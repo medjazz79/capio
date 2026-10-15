@@ -1321,8 +1321,34 @@ class TranslatePopup(QDialog):
         engine = re.sub(r"\bchosen image:\s*", "", engine.strip())
         engine = re.sub(r"\bcustom:\s*", "", engine.strip())
         if marker:
-            self.badge.setText(f"⚠ {engine} · {secs:.1f}s")
-            self.badge.setToolTip(f"{engine.strip()} is NOT the model you chose.\n{why.strip()}")
+            selected_model = re.search(
+                r"\bchosen model\s+(.+?)\s+failed:", why, re.IGNORECASE)
+            selected_model = (
+                selected_model.group(1).strip()
+                if selected_model else ""
+            )
+            actual_engine = {
+                "Free service": "Google Translate",
+                "Free service (alt)": "MyMemory",
+            }.get(engine, engine)
+            status = f"⚠ {actual_engine}"
+            if selected_model:
+                model_label = (
+                    selected_model if len(selected_model) <= 36
+                    else f"{selected_model[:33]}..."
+                )
+                status += f" · {model_label} failed"
+                tooltip = (
+                    f"{actual_engine} answered because the selected model "
+                    f"{selected_model} failed.\n{why.strip()}"
+                )
+            else:
+                tooltip = (
+                    f"{actual_engine} is NOT the model you chose.\n"
+                    f"{why.strip()}"
+                )
+            self.badge.setText(f"{status} · {secs:.1f}s")
+            self.badge.setToolTip(tooltip)
             self.badge.setProperty("warning", True)
         else:
             self.badge.setText(f"{engine} · {secs:.1f}s")
@@ -1583,30 +1609,29 @@ class TranslatePopup(QDialog):
             Qt.LayoutDirection.RightToLeft
             if is_arabic else Qt.LayoutDirection.LeftToRight
         )
-        alignment = (
+        start_alignment = (
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute
             if is_arabic else Qt.AlignmentFlag.AlignLeft
         )
         self.result.setLayoutDirection(direction)
         option = document.defaultTextOption()
         option.setTextDirection(direction)
-        option.setAlignment(alignment)
+        option.setAlignment(Qt.AlignmentFlag.AlignJustify)
         document.setDefaultTextOption(option)
         block = document.begin()
         while block.isValid():
             block_format = block.blockFormat()
             is_code_block = block_format.hasProperty(
                 QTextFormat.Property.BlockCodeFence)
-            block_direction = (
-                Qt.LayoutDirection.LeftToRight
-                if is_code_block else direction
-            )
-            block_alignment = (
-                Qt.AlignmentFlag.AlignLeft if is_code_block else alignment
-            )
+            is_heading = bool(block_format.headingLevel())
             block_format.setLayoutDirection(
-                block_direction)
-            block_format.setAlignment(block_alignment)
+                Qt.LayoutDirection.LeftToRight if is_code_block else direction)
+            if is_code_block:
+                block_format.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            elif is_heading:
+                block_format.setAlignment(start_alignment)
+            else:
+                block_format.setAlignment(Qt.AlignmentFlag.AlignJustify)
             cursor = QTextCursor(block)
             cursor.setBlockFormat(block_format)
             block = block.next()

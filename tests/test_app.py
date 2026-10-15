@@ -8521,11 +8521,21 @@ class TestReaderZoom(_GuiCase):
         self.assertIn("NOT the model you chose", tip)
         self.assertIn("403", tip)          # the reason is not lost
 
-        # Degraded to the free service: still honest about it.
+        # A fallback names both the service that answered and the model that
+        # failed; the full failure reason remains available on hover.
         text, tip = self._badge_after(
             "Free service  \u26a0 chosen model gemini-3.5-flash-lite failed: no Gemini key")
         self.assertTrue(text.startswith("\u26a0"))
+        self.assertIn("Google Translate", text)
+        self.assertIn("gemini-3.5-flash-lite failed", text)
+        self.assertIn("answered because", tip)
         self.assertIn("no Gemini key", tip)
+
+        text, tip = self._badge_after(
+            "Free service (alt)  \u26a0 chosen model space-bunny-free failed: 403")
+        self.assertIn("MyMemory", text)
+        self.assertIn("space-bunny-free failed", text)
+        self.assertIn("403", tip)
 
     def test_popup_badge_line_stays_short(self):
         """A long failure reason must not overflow the status line."""
@@ -8533,6 +8543,12 @@ class TestReaderZoom(_GuiCase):
         text, tip = self._badge_after(long_reason)
         self.assertLess(len(text), 80)
         self.assertIn("x" * 400, tip)
+
+        long_model = "custom/" + ("model-" * 12)
+        text, tip = self._badge_after(
+            f"Free service  \u26a0 chosen model {long_model} failed: unavailable")
+        self.assertLess(len(text), 80)
+        self.assertIn(long_model, tip)
 
     def test_popup_engine_badge_is_above_translation_and_bottom_is_compact(self):
         from PySide6.QtWidgets import QLabel
@@ -10337,16 +10353,14 @@ class TestMemoryZoom(_GuiCase):
                 )
                 self.assertEqual(
                     prose.blockFormat().alignment(),
-                    Qt.AlignmentFlag.AlignRight
-                    | Qt.AlignmentFlag.AlignAbsolute,
+                    Qt.AlignmentFlag.AlignJustify,
                 )
                 option = popup.result.document().defaultTextOption()
                 self.assertEqual(
                     option.textDirection(), Qt.LayoutDirection.RightToLeft)
                 self.assertEqual(
                     option.alignment(),
-                    Qt.AlignmentFlag.AlignRight
-                    | Qt.AlignmentFlag.AlignAbsolute,
+                    Qt.AlignmentFlag.AlignJustify,
                 )
                 self.assertGreater(prose.layout().lineCount(), 0)
                 start_cursor = QTextCursor(prose)
@@ -10382,6 +10396,10 @@ class TestMemoryZoom(_GuiCase):
                     popup.result.document().begin().blockFormat().layoutDirection(),
                     Qt.LayoutDirection.LeftToRight,
                 )
+                self.assertEqual(
+                    popup.result.document().begin().next().blockFormat().alignment(),
+                    Qt.AlignmentFlag.AlignJustify,
+                )
 
                 popup.settings["target_language"] = "fr"
                 popup._translation_text = ""
@@ -10392,14 +10410,31 @@ class TestMemoryZoom(_GuiCase):
                 )
                 self.assertEqual(
                     popup.result.document().begin().blockFormat().alignment(),
-                    Qt.AlignmentFlag.AlignRight
-                    | Qt.AlignmentFlag.AlignAbsolute,
+                    Qt.AlignmentFlag.AlignJustify,
                 )
 
-                popup._render_markdown("Texte traduit")
+                popup._translation_text = (
+                    "A long translation paragraph that should use the entire "
+                    "available reading width after every resize and zoom. " * 5
+                )
+                popup.resize(1100, 620)
+                popup._render_translation()
                 self.assertEqual(
-                    popup.result.layoutDirection(),
-                    Qt.LayoutDirection.LeftToRight,
+                    popup.result.document().begin().blockFormat().alignment(),
+                    Qt.AlignmentFlag.AlignJustify,
+                )
+                popup._apply_translation_zoom(1.1)
+                self.app.processEvents()
+                self.assertEqual(
+                    popup.result.document().begin().blockFormat().alignment(),
+                    Qt.AlignmentFlag.AlignJustify,
+                )
+                popup.resize(420, 420)
+                self.app.processEvents()
+                popup._render_translation()
+                self.assertEqual(
+                    popup.result.document().begin().blockFormat().alignment(),
+                    Qt.AlignmentFlag.AlignJustify,
                 )
             finally:
                 popup.close()
