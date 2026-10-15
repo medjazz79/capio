@@ -9,7 +9,24 @@ translate selected text and images elsewhere on your screen.
 
 ## See Capio in action
 
-<p align="center"><img src="Capio-Preview-French.png" alt="Capio translating a passage inside a book" width="760"></p>
+<table>
+  <tr>
+    <td><img src="Capio-Preview-Reader-Russian.png" alt="Capio translating a book passage into Russian" width="100%"></td>
+    <td><img src="Capio-Preview-Reader-Italian.png" alt="Capio translating a book passage into Italian" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Read the Russian translation beside the original page.</sub></td>
+    <td align="center"><sub>Switch to Italian while keeping your place.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="Capio-Preview-Reader-Spanish.png" alt="Capio translating a book passage into Spanish" width="100%"></td>
+    <td></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Follow the original as you read the Spanish translation.</sub></td>
+    <td></td>
+  </tr>
+</table>
 
 Capio keeps the translated passage beside the page, so you can continue
 reading without switching applications.

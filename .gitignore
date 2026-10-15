@@ -13,9 +13,9 @@ __pycache__/
 /*.png
 /*.jpg
 /*.jpeg
-!/Capio-Preview-French.png
-!/Capio-Preview-Arabic.png
-!/Capio-Preview-Russian.png
+!/Capio-Preview-Reader-Russian.png
+!/Capio-Preview-Reader-Italian.png
+!/Capio-Preview-Reader-Spanish.png
 !/Capio-Preview-Floating-Translator.png
 !/Capio-Preview-Floating-Translator-Article.png
 runtests_report.txt
