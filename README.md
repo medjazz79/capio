@@ -26,6 +26,14 @@ translate selected text and images elsewhere on your screen.
     <td align="center"><sub>Follow the original as you read the Spanish translation.</sub></td>
     <td align="center"><sub>Read an Arabic translation alongside the book.</sub></td>
   </tr>
+  <tr>
+    <td><img src="Capio-Preview-Reader-Chat.png" alt="Ask the AI tutor a follow-up question about a selected passage" width="100%"></td>
+    <td></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Ask follow-up questions about the passage without leaving the reader.</sub></td>
+    <td></td>
+  </tr>
 </table>
 
 Capio keeps the translated passage beside the page, so you can continue
