@@ -21,6 +21,8 @@ reading without switching applications.
 Keep the floating button available over other applications, select an area,
 then translate its text with OCR or send the image to a vision-capable model.
 
+<p align="center"><img src="Capio-Preview-Floating-Translator-Article.png" alt="Capio translating a Quanta Magazine mathematics article beside the original page" width="720"></p>
+
 ## What you can do
 
 - Translate a word, passage, or full page beside the original.
