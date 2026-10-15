@@ -12139,6 +12139,107 @@ class TestFloat(_GuiCase):
             if popup is not None:
                 popup.close()
 
+    def test_changing_float_language_does_not_delete_running_speech_prefetch(self):
+        import threading
+        from unittest import mock
+        from PySide6.QtCore import QObject, Signal
+        from popup.speech_worker import SpeechWorker
+        from popup.translate_popup import TranslatePopup
+        from config.settings import DEFAULTS
+
+        class StubTranslateWorker(QObject):
+            done = Signal(str, str)
+            stage = Signal(str)
+            failed = Signal(str)
+            source_ready = Signal(str)
+            partial = Signal(str)
+            finished = Signal()
+
+            def __init__(self, settings, text=None, pil_image=None, ocr_langs=None):
+                super().__init__()
+                self._settings = dict(settings)
+
+            def start(self):
+                pass
+
+            def isRunning(self):
+                return False
+
+        class BlockingPrefetchWorker(SpeechWorker):
+            def __init__(self, parent):
+                super().__init__("prefetched words", parent, prefetch_only=True)
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.cleaned = False
+
+            def run(self):
+                self.started.set()
+                self.release.wait(5)
+
+            def cleanup_output(self):
+                self.cleaned = True
+
+        settings = dict(
+            DEFAULTS,
+            source_language="auto",
+            target_language="ar",
+            float_source_language="auto",
+            float_target_language="ar",
+        )
+        popup = None
+        prefetch = None
+        try:
+            with mock.patch(
+                "popup.translate_popup.TranslateWorker", StubTranslateWorker,
+            ):
+                popup = TranslatePopup(
+                    settings,
+                    source_text="original words",
+                    floating_language_controls=True,
+                    float_language_preferences=True,
+                )
+                popup.show()
+                self.app.processEvents()
+                prefetch = BlockingPrefetchWorker(popup)
+                prefetch.deleteLater = mock.Mock(wraps=prefetch.deleteLater)
+                popup._speech_prefetch_worker = prefetch
+                popup._speech_prefetch_workers.append(prefetch)
+                popup._speech_prefetch_key = ("old translation",)
+                prefetch.finished.connect(
+                    popup._on_speech_prefetch_finished)
+                prefetch.start()
+                self.assertTrue(prefetch.started.wait(2))
+
+                popup._language_actions["target"]["fr"].trigger()
+
+                self.assertIsNone(popup._speech_prefetch_worker)
+                self.assertTrue(prefetch.isRunning())
+                self.assertTrue(prefetch.isInterruptionRequested())
+                prefetch.deleteLater.assert_not_called()
+                self.assertEqual(popup._speech_prefetch_workers, [prefetch])
+
+                popup.close()
+                self.assertTrue(popup._close_pending)
+                self.assertFalse(popup.isVisible())
+
+                prefetch.release.set()
+                self.assertTrue(prefetch.wait(5000))
+                self.app.processEvents()
+                self.app.processEvents()
+                self.assertTrue(prefetch.cleaned)
+                prefetch.deleteLater.assert_called_once_with()
+                self.assertFalse(popup._speech_prefetch_workers)
+                self.assertFalse(popup._close_pending)
+        finally:
+            if prefetch is not None:
+                prefetch.release.set()
+                try:
+                    prefetch.wait(5000)
+                except RuntimeError:
+                    pass
+            if popup is not None:
+                popup.close()
+
     def test_float_language_preferences_save_without_changing_main_languages(self):
         from unittest import mock
         from PySide6.QtWidgets import QDialog

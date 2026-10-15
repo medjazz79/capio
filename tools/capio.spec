@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build for the Capio floating translator.
 
-    pyinstaller capio.spec --noconfirm
+    pyinstaller tools/capio.spec --noconfirm
 
 Notes that matter (each one cost a failed build before):
 
@@ -25,7 +25,7 @@ hidden = [
     # first-party packages found through the runtime sys.path insert
     "config", "popup", "reader", "translators", "ocr_providers", "ui",
     "main",  # dynamically opened as the document reader by the floating tool
-    "app_log",
+    "config.app_log",
     # imported inside functions / threads, invisible to the entry point
     "translators.ocr", "translators.chain", "translators.probe",
     "ocr_providers.oneocr_backend", "ocr_providers.manager",

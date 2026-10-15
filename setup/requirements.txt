@@ -26,4 +26,4 @@ langdetect>=1.0  # source-language guess for the second free translator
 # OPTIONAL — read-aloud only. The app runs, translates and OCRs without it;
 # "Read aloud" then says so instead of failing.
 # Install the tested optional speech dependency with:
-#   .venv\Scripts\python.exe -m pip install -r requirements-speech.txt
+#   .venv\Scripts\python.exe -m pip install -r setup\requirements-speech.txt

@@ -2,9 +2,9 @@
 dependence. A test that passes alone but fails in its class is an isolation
 problem; a test that fails both ways is a real defect.
 
-    runsolo.py tests.test_app.TestChain.test_foo   # one id
-    runsolo.py tests.test_app.TestReaderZoom       # every test in a class
-    runsolo.py tests.test_app.TestReaderZoom.test_bar tests.test_app.TestX.y
+    python tools\\runsolo.py tests.test_app.TestChain.test_foo   # one id
+    python tools\\runsolo.py tests.test_app.TestReaderZoom       # every test in a class
+    python tools\\runsolo.py tests.test_app.TestReaderZoom.test_bar tests.test_app.TestX.y
 
 Test ids are read from the command line, not from a list baked into this file:
 a hardcoded list goes stale the moment a test is renamed, and then the runner
@@ -14,12 +14,16 @@ truth.
 
 Ids may also be piped in, one per line, which is how you feed it a failure list:
 
-    runtests.py 2>&1 | runsolo.py -
+    python tools\\runtests.py 2>&1 | python tools\\runsolo.py -
 """
 import os
 import pathlib
 import subprocess
 import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+os.chdir(ROOT)
+sys.path.insert(0, str(ROOT))
 
 CHILD = r"""
 import os, sys, unittest

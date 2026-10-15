@@ -49,7 +49,7 @@ if (
         cwd=str(APP_DIR),
     ))
 
-from app_log import log_path, setup_logging  # noqa: E402  (needs sys.path)
+from config.app_log import log_path, setup_logging  # noqa: E402  (needs sys.path)
 
 _fault_log_file = None
 from PySide6.QtCore import (

@@ -48,7 +48,7 @@ if (
         cwd=str(APP_DIR),
     ))
 
-from app_log import get_logger, setup_logging
+from config.app_log import get_logger, setup_logging
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QGuiApplication, QIcon, QLinearGradient, QPainter,

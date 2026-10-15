@@ -13,6 +13,10 @@ __pycache__/
 /*.png
 /*.jpg
 /*.jpeg
+!/Capio-Preview-French.png
+!/Capio-Preview-Arabic.png
+!/Capio-Preview-Russian.png
+!/Capio-Preview-Floating-Translator.png
 runtests_report.txt
 solo_report.txt
 solo.txt

@@ -15,9 +15,9 @@ whatever else is installed instead of this checkout. `tests/__init__.py` exists
 for the same reason: the modules are imported as `tests.test_app`, so the
 package must be a real package and not an implicit namespace one.
 
-    runtests.py                  -> every class, every test module
-    runtests.py TestChain        -> one class
-    runtests.py tests.test_chat  -> one module
+    python tools\\runtests.py                  -> every class, every test module
+    python tools\\runtests.py TestChain        -> one class
+    python tools\\runtests.py tests.test_chat  -> one module
 """
 import os
 import pathlib
@@ -25,6 +25,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+os.chdir(ROOT)
+sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

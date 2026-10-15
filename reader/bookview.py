@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from app_log import get_logger
+from config.app_log import get_logger
 from reader import pdf_utils
 from reader.continuous import ContinuousReader
 from reader.document_import import prepare_document, text_direction

@@ -5,13 +5,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$setup = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = Split-Path -Parent $setup
 $venv = Join-Path $root ".venv"
 $venvPython = Join-Path $venv "Scripts\python.exe"
 $venvPythonw = Join-Path $venv "Scripts\pythonw.exe"
 $requirements = @(
-    (Join-Path $root "requirements.txt"),
-    (Join-Path $root "requirements-speech.txt")
+    (Join-Path $setup "requirements.txt"),
+    (Join-Path $setup "requirements-speech.txt")
 )
 
 function Stop-WithGuidance([string]$message, [string]$url = "") {

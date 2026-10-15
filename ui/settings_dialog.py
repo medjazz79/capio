@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app_log import get_logger
+from config.app_log import get_logger
 from config.settings import (
     DEFAULT_LINE_SPACING, DEFAULT_MODEL,
     DEFAULT_TRANSLATION_SIDE_MARGIN_PX,

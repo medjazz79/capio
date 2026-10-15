@@ -172,6 +172,7 @@ class TranslatePopup(QDialog):
         self._pending_player_position_ms: int | None = None
         self._pending_player_source: QUrl | None = None
         self._speech_prefetch_worker: SpeechWorker | None = None
+        self._speech_prefetch_workers: list[SpeechWorker] = []
         self._speech_prefetch_key: tuple | None = None
         self._speech_active = False
         self._close_pending = False
@@ -3091,6 +3092,7 @@ class TranslatePopup(QDialog):
             trace=trace,
         )
         self._speech_prefetch_worker = worker
+        self._speech_prefetch_workers.append(worker)
         self._speech_prefetch_key = key
         worker.failed.connect(self._on_speech_prefetch_failed)
         worker.finished.connect(self._on_speech_prefetch_finished)
@@ -3103,9 +3105,11 @@ class TranslatePopup(QDialog):
         if worker is not None:
             if worker.isRunning():
                 worker.requestInterruption()
-            else:
-                worker.cleanup_output()
+                return
+            worker.cleanup_output()
             worker.deleteLater()
+            if worker in self._speech_prefetch_workers:
+                self._speech_prefetch_workers.remove(worker)
 
     def _on_speech_prefetch_failed(self, error: str) -> None:
         logging.warning("Speech prefetch failed: %s", error)
@@ -3117,6 +3121,9 @@ class TranslatePopup(QDialog):
         if worker is not self._speech_prefetch_worker:
             worker.cleanup_output()
             worker.deleteLater()
+            if worker in self._speech_prefetch_workers:
+                self._speech_prefetch_workers.remove(worker)
+            self._continue_pending_close()
             return
         # A finished prefetch already wrote the disk cache; drop the worker,
         # keep the cache. A later prefetch for the same text is a cheap
@@ -3600,12 +3607,9 @@ class TranslatePopup(QDialog):
         if (
             self._speech_worker is not None and self._speech_worker.isRunning()
         ) or (
-            self._speech_prefetch_worker is not None
-            and self._speech_prefetch_worker.isRunning()
-        ) or (
             self._voice_list_worker is not None
             and self._voice_list_worker.isRunning()
-        ) or any(
+        ) or self._speech_prefetch_workers or any(
             worker.isRunning() for worker in self._translation_workers
         ) or any(worker.isRunning() for worker in self._chat_workers):
             return
@@ -3659,7 +3663,6 @@ class TranslatePopup(QDialog):
         self._size_save_timer.stop()
         self._save_geometry()
         self._speech_prefetch_timer.stop()
-        prefetch_worker = self._speech_prefetch_worker
         self._cancel_speech_prefetch()
         if self.page_number_label.isChecked():
             self.page_number_label.setChecked(False)
@@ -3676,16 +3679,14 @@ class TranslatePopup(QDialog):
         self._close_speech_stream_server()
         voice_worker = self._voice_list_worker
         speech_running = speech_worker is not None and speech_worker.isRunning()
-        prefetch_running = (
-            prefetch_worker is not None and prefetch_worker.isRunning()
-        )
+        prefetch_pending = bool(self._speech_prefetch_workers)
         voices_running = voice_worker is not None and voice_worker.isRunning()
         translation_running = any(
             worker.isRunning() for worker in self._translation_workers)
         chat_running = any(worker.isRunning() for worker in self._chat_workers)
         if (
             speech_running or voices_running or translation_running
-            or chat_running or prefetch_running
+            or chat_running or prefetch_pending
         ):
             self._close_pending = True
             self._speech_active = False
@@ -3694,6 +3695,9 @@ class TranslatePopup(QDialog):
             self._player.setSource(QUrl())
             if speech_running:
                 speech_worker.requestInterruption()
+            for worker in self._speech_prefetch_workers:
+                if worker.isRunning():
+                    worker.requestInterruption()
             if voices_running:
                 voice_worker.requestInterruption()
             for worker in self._translation_workers:

@@ -6,7 +6,7 @@ import secrets
 import threading
 import time
 
-from app_log import get_logger
+from config.app_log import get_logger
 
 
 class SpeechTrace:

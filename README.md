@@ -1,31 +1,81 @@
 # Capio
 
-## Translate. Understand. Listen.
-
+**Translate. Understand. Listen.**
 Your AI reading companion, right inside your book.
 
-Capio is a reading companion for books and long-form documents in other
-languages. Open a book, select a word or passage, and read its AI translation
-beside the page. Keep your place in the book, then listen to the translation
-or follow along with word highlighting.
+Read books in other languages without leaving the page to take screenshots,
+switch apps, and paste text into an AI chat. Select a word or passage to see
+its translation alongside the book, ask for an explanation, or listen while
+the current words are highlighted.
 
-There is no need to capture a screenshot, switch to a separate AI chat, paste
-the image, and bring the result back. Capio translates selected text in place;
-for scanned pages, use OCR or send the selection directly to a supported
-vision model.
+Learn more about the idea behind Capio in [Why Capio?](WHY_CAPIO.md).
 
-Capio is designed for books across subjects: literature, history, programming,
-mathematics, science, music, and more. Translation guidance adapts to the
-content, preserving the structure and subject-specific material that matters
-in context, such as code, equations, or musical notation when present. It is a
-general-purpose book reader, not a music-only translator. Music-specific
-formatting is used only when the source is clearly about music; scale examples
-keep every readable note in order as compact LaTeX visual references. Code,
-equations, and material from other fields retain their own conventions.
+The screenshot files are next to this README in the project folder, so you can
+open them directly without searching through subfolders.
 
-Supported formats include PDF, EPUB, DOCX, TXT, Markdown, HTML, XPS/OXPS, FB2,
-CBZ comics, and common image formats (PNG, JPEG, BMP, GIF, TIFF, WebP, and
-SVG).
+## See Capio in action
+
+<table>
+  <tr>
+    <td><img src="Capio-Preview-French.png" alt="Capio translating Darwin's Origin of Species into French inside the book reader" width="520"></td>
+    <td><img src="Capio-Preview-Arabic.png" alt="Capio translating Darwin's Origin of Species into Arabic inside the book reader" width="520"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Translate a passage into French without leaving the book.</sub></td>
+    <td align="center"><sub>Read an Arabic translation alongside the original page.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="Capio-Preview-Russian.png" alt="Capio translating Darwin's Origin of Species into Russian inside the book reader" width="520"></td>
+    <td><img src="Capio-Preview-Floating-Translator.png" alt="Capio floating translator translating a Project Gutenberg page in a browser" width="520"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Switch target languages while keeping your place.</sub></td>
+    <td align="center"><sub>Use the floating translator on a website or another desktop app.</sub></td>
+  </tr>
+</table>
+
+## Quick start (Windows)
+
+1. Install **Python 3.10 or newer** for Windows.
+2. Download and extract the Capio project.
+3. Double-click **`run.bat`** for the book reader or **`run_float.bat`** for
+   the floating translator.
+
+On first launch, Capio creates a private Python environment and downloads the
+required libraries. This can take several minutes and requires an internet
+connection. Later launches reuse the installation. You do not need to install
+the libraries yourself. Translation requires choosing a provider; some
+providers work without an API key, while others need your own key.
+
+For a simple walkthrough, see the [Easy Start Guide](START_HERE.md).
+
+## Features
+
+- **Translate inside the book:** select a word or passage and read the result
+  beside the original page.
+- **Translate outside the reader:** use the floating translator to select a
+  screen area and read its text with OCR, or send the image to a model that
+  supports vision.
+- **Read scans and images:** use OCR on scanned pages, or send a selected
+  image directly to a model that supports vision.
+- **Understand as you read:** ask AI for an explanation of a passage.
+- **Listen and follow along:** hear translations with word-by-word highlighting;
+  stop and resume from where playback left off.
+- **For books across subjects:** literature, history, programming, mathematics,
+  science, music, and more. Code and equations keep their proper form; music
+  formatting is applied only when the source is clearly about music.
+- **Open common formats:** PDF, EPUB, DOCX, TXT, Markdown, HTML, XPS/OXPS, FB2,
+  CBZ, and common image files.
+
+## Full guide
+
+The sections below cover supported documents, translation providers, settings,
+OCR and image translation, speech, troubleshooting, and optional packaging.
+
+### Supported documents and page reading
+
+Capio supports PDF, EPUB, DOCX, TXT, Markdown, HTML, XPS/OXPS, FB2, CBZ comics,
+and common image formats (PNG, JPEG, BMP, GIF, TIFF, WebP, and SVG).
 Non-PDF documents are rendered to temporary pages for reading and translation;
 the original file is kept unchanged until saved. TXT and Markdown files can be
 edited from **File → Edit source text** and saved in their original format with
@@ -34,6 +84,8 @@ the source font. The source editor uses a light background and opens at 18 px.
 Markdown is edited as source, while the reader view renders its formatting.
 Other non-PDF formats remain read-only; use **Save as PDF** to export a copy.
 PDF editing and in-place saving continue to work as before.
+
+### OCR and direct image translation
 
 Works on **both** kinds of PDFs:
 - **Text PDFs** — instant translation of the selected text.
@@ -53,32 +105,6 @@ Works on **both** kinds of PDFs:
   incomplete hidden text layer. Full-page translation detects a large page
   image with sparse text and OCRs the rendered page instead of translating
   only that partial text layer.
-
-## Start (Windows)
-
-Install **Python 3.10 or newer** for Windows first. Download the project ZIP
-from GitHub and extract it, then double-click **`run.bat`**. On first launch,
-the setup window creates a private `.venv` beside the application and
-downloads the required libraries, including read-aloud support; later launches
-reuse that environment and only reinstall dependencies when the requirements
-change. The project does not include Python or its libraries in the GitHub
-source download. If Python is missing or too old, the launcher opens the
-official Python download page and explains what to install.
-
-For the floating translator, double-click **`run_float.bat`** instead.
-`run_hidden.vbs` and `run_float_hidden.vbs` are also available; they show the
-setup window while Python or dependencies are being installed, then launch
-the application without a console.
-
-Or manually:
-
-```bat
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-speech.txt
-.venv\Scripts\python.exe main.py
-```
-
-With a file: `.venv\Scripts\python.exe main.py "C:\books\rimsky.pdf"`
 
 ## Translation providers (API keys are optional)
 
@@ -394,7 +420,7 @@ provider; if Snipping Tool/OneOCR is unavailable, scanned-page OCR cannot run.
   notation wrapped in dollar signs remains visible without the delimiters and
   is skipped; ordinary prose such as `3f` stays unmarked and is read aloud.
   Read-aloud is optional; install Edge TTS with
-  `.venv\Scripts\python.exe -m pip install -r requirements-speech.txt`.
+  `.venv\Scripts\python.exe -m pip install -r setup\requirements-speech.txt`.
   With Arabic as the target and Latin-word reading enabled, Arabic and Latin
   text are synthesized together per bounded text chunk using the selected
   voice, avoiding a language-run hand-off between the scripts. All chunks keep
@@ -512,13 +538,13 @@ otherwise drops, and it excludes the packages that make a one-file build slow.
 
 ```bat
 pip install pyinstaller
-pyinstaller capio.spec
+pyinstaller tools\capio.spec
 ```
 
 Note what that spec actually builds: **`main_02.py`**, named
 **`CapioFloat`** — the floating translator, not the main reader. To
-build the reader instead, change the `["main_02.py"]` entry on line 59 of the
-spec to `["main.py"]` and update the `EXE` name accordingly.
+build the reader instead, change the `["main_02.py"]` entry in
+`tools\capio.spec` to `["main.py"]` and update the `EXE` name accordingly.
 
 ## Notes
 
