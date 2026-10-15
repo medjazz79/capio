@@ -60,8 +60,8 @@ from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QInputDialog, QPushButton, QPlainTextEdit, QTabWidget, QTextEdit, QToolBar,
-    QToolButton, QVBoxLayout,
+    QInputDialog, QPushButton, QPlainTextEdit, QTabBar, QTabWidget, QTextEdit,
+    QToolBar, QToolButton, QVBoxLayout,
     QWidget, QSpinBox,
 )
 
@@ -235,8 +235,10 @@ QTabBar::tab {
     color: @muted@; 
     border: none;
     border-bottom: 3px solid transparent;
-    padding: 11px 20px;
-    min-width: 120px; 
+    padding: 5px 10px;
+    width: 360px;
+    min-width: 360px;
+    max-width: 360px;
     font-size: 13px;
     font-weight: 600;
 }
@@ -251,6 +253,23 @@ QTabBar::tab:selected {
 QTabBar::tab:hover:!selected { 
     background-color: @surface_hover@; 
     color: @text@; 
+}
+QTabBar QToolButton#tabCloseButton {
+    color: @accent_light@;
+    background: transparent;
+    border: none;
+    border-radius: 15px;
+    padding: 0;
+    font-size: 28px;
+    font-weight: 300;
+    min-width: 30px;
+    max-width: 30px;
+    min-height: 30px;
+    max-height: 30px;
+}
+QTabBar QToolButton#tabCloseButton:hover {
+    color: @text@;
+    background-color: @surface_hover@;
 }
 QLabel#modelReadout {
     color: @text@;
@@ -831,14 +850,17 @@ class MainWindow(QMainWindow):
         # Tab Widget
         self.tabs = QTabWidget()
         self._sync_file_actions()
-        self.tabs.setTabsClosable(True)
+        self.tabs.setTabsClosable(False)
         self.tabs.setMovable(True)
         self.tabs.setDocumentMode(True)
-        self.tabs.tabCloseRequested.connect(self._close_tab)
+        tab_bar = self.tabs.tabBar()
+        tab_bar.setExpanding(False)
+        tab_bar.setElideMode(Qt.TextElideMode.ElideRight)
+        tab_bar.setUsesScrollButtons(True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        self.tabs.tabBar().tabMoved.connect(lambda _s, _t: self._save_session_soon())
-        self.tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tabs.tabBar().customContextMenuRequested.connect(self._tab_menu)
+        tab_bar.tabMoved.connect(lambda _s, _t: self._save_session_soon())
+        tab_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(self._tab_menu)
 
         central = QWidget()
         central.setAcceptDrops(True)
@@ -1405,6 +1427,7 @@ class MainWindow(QMainWindow):
         if page is not None and page > 0:
             book.pending_page = min(page, max(0, book.page_count() - 1))
         idx = self.tabs.addTab(book, book.title)
+        self._install_tab_close_button(idx)
         self.tabs.setTabToolTip(idx, path)
         self._apply_pin_title(book)
         book.set_thumbs_visible(self.thumbs_action.isChecked())
@@ -1433,6 +1456,24 @@ class MainWindow(QMainWindow):
             if self.tabs.widget(i) is book:
                 return i
         return -1
+
+    def _install_tab_close_button(self, index: int) -> None:
+        tab_bar = self.tabs.tabBar()
+        button = QToolButton(tab_bar)
+        button.setObjectName("tabCloseButton")
+        button.setText("×")
+        button.setAccessibleName("Close tab")
+        button.setToolTip("Close this tab")
+        button.setAutoRaise(True)
+        button.setFixedSize(30, 30)
+        button.clicked.connect(
+            lambda _checked=False, close_button=button: self._close_tab(
+                tab_bar.tabAt(close_button.mapTo(
+                    tab_bar, close_button.rect().center()))
+            )
+        )
+        tab_bar.setTabButton(
+            index, QTabBar.ButtonPosition.RightSide, button)
 
     def _apply_pin_title(self, book: BookView) -> None:
         idx = self._book_tab_index(book)
@@ -1547,7 +1588,8 @@ class MainWindow(QMainWindow):
                 text = self.tabs.tabText(index)
                 tip = self.tabs.tabToolTip(index)
                 self.tabs.removeTab(index)
-                self.tabs.insertTab(i, book, text)
+                inserted_index = self.tabs.insertTab(i, book, text)
+                self._install_tab_close_button(inserted_index)
                 self.tabs.setTabToolTip(i, tip)
                 self._apply_pin_title(book)
         finally:

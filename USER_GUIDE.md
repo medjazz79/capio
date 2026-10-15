@@ -155,6 +155,8 @@ Works on **both** kinds of PDFs:
 
 - Main window first opens at **1803×1044, centered**; later launches restore
   the last window size and position.
+- Document tabs have a fixed width; long titles are shortened with an
+  ellipsis. Use the colored **×** on a tab to close it.
 - Translation popup opens at outer frame **(514, 605, 1126, 326)** via Win32
   `SetWindowPos`; after moving or resizing, it remembers the user's chosen
   position and size.

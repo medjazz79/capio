@@ -10057,13 +10057,54 @@ class TestSession(_GuiCase):
                 win.close()
 
     def test_tabs_pin_and_close(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QTabBar
         from main import MainWindow
+        from ui.theme import theme_colors
+
         win = MainWindow()
         try:
             a = _make_pdf_file("tab_a.pdf")
             b = _make_pdf_file("tab_b.pdf")
             win.open_paths([a, b])
             self.assertEqual(win.tabs.count(), 2)
+            win.show()
+            self.app.processEvents()
+            tab_bar = win.tabs.tabBar()
+            self.assertEqual(
+                tab_bar.elideMode(), Qt.TextElideMode.ElideRight)
+            self.assertFalse(tab_bar.expanding())
+            tab_width = tab_bar.tabRect(0).width()
+            self.assertGreaterEqual(tab_width, 350)
+            self.assertLessEqual(tab_width, 400)
+            tab_bar.setTabText(0, "A very long document title " * 12)
+            self.app.processEvents()
+            self.assertEqual(tab_bar.tabRect(0).width(), tab_width)
+
+            close_button = tab_bar.tabButton(
+                0, QTabBar.ButtonPosition.RightSide)
+            self.assertIsNotNone(close_button)
+            self.assertEqual(close_button.text(), "×")
+            self.assertEqual(close_button.accessibleName(), "Close tab")
+            self.assertEqual(close_button.size().width(), 30)
+            self.assertEqual(close_button.size().height(), 30)
+            close_style = self.app.styleSheet()
+            colors = theme_colors(
+                win.settings.get("theme", "Dark Slate"),
+                win.settings.get("color_scheme", "system"),
+                self.app,
+            )
+            self.assertIn(
+                f"QTabBar QToolButton#tabCloseButton {{\n"
+                f"    color: {colors['accent_light']};",
+                close_style,
+            )
+            self.assertIn("font-size: 28px;", close_style)
+            self.assertIn("font-weight: 300;", close_style)
+            self.assertIn(
+                f"border-bottom: 3px solid {colors['accent_light']};",
+                close_style,
+            )
             win.open_paths([a])  # duplicate -> activates, no new tab
             self.assertEqual(win.tabs.count(), 2)
             first = win.tabs.widget(0)
@@ -10076,7 +10117,9 @@ class TestSession(_GuiCase):
             win._close_tab(win._book_tab_index(first))  # pinned -> refused
             self.assertEqual(win.tabs.count(), 2)
             first.pinned = False
-            win._close_tab(win._book_tab_index(first))
+            first_index = win._book_tab_index(first)
+            tab_bar.tabButton(
+                first_index, QTabBar.ButtonPosition.RightSide).click()
             self.assertEqual(win.tabs.count(), 1)
         finally:
             try:
