@@ -10406,11 +10406,15 @@ class TestMemoryZoom(_GuiCase):
                 popup._render_markdown("ترجمة عربية")
                 self.assertEqual(
                     popup.result.layoutDirection(),
-                    Qt.LayoutDirection.RightToLeft,
+                    Qt.LayoutDirection.LeftToRight,
                 )
                 self.assertEqual(
                     popup.result.document().begin().blockFormat().alignment(),
                     Qt.AlignmentFlag.AlignJustify,
+                )
+                self.assertEqual(
+                    popup.result.document().begin().blockFormat().layoutDirection(),
+                    Qt.LayoutDirection.LeftToRight,
                 )
 
                 popup._translation_text = (
@@ -10436,6 +10440,54 @@ class TestMemoryZoom(_GuiCase):
                     popup.result.document().begin().blockFormat().alignment(),
                     Qt.AlignmentFlag.AlignJustify,
                 )
+            finally:
+                popup.close()
+
+    def test_streamed_markdown_direction_resets_when_target_language_changes(self):
+        from PySide6.QtCore import Qt
+        from popup.translate_popup import TranslatePopup
+
+        with mock_chain_translate(return_value=("translation", "Test")):
+            popup = TranslatePopup(
+                dict(DEFAULTS, target_language="ar"), source_text="source")
+            try:
+                if popup._worker:
+                    self.assertTrue(popup._worker.wait(20000))
+                self.app.processEvents()
+
+                popup._render_markdown("### عنوان\n\nنص عربي")
+                popup.settings["target_language"] = "fr"
+                popup.result.clear()
+                popup._streamed_partial = ""
+                popup._append_streamed_partial("### Chapitre\n\nTexte français")
+
+                document = popup.result.document()
+                self.assertEqual(
+                    popup.result.layoutDirection(),
+                    Qt.LayoutDirection.LeftToRight)
+                self.assertEqual(
+                    document.defaultTextOption().textDirection(),
+                    Qt.LayoutDirection.LeftToRight)
+                self.assertEqual(
+                    document.begin().blockFormat().layoutDirection(),
+                    Qt.LayoutDirection.LeftToRight)
+
+                popup._render_markdown("### Chapter\n\nEnglish text")
+                popup.settings["target_language"] = "ar"
+                popup.result.clear()
+                popup._streamed_partial = ""
+                popup._append_streamed_partial("### عنوان\n\nنص عربي")
+
+                document = popup.result.document()
+                self.assertEqual(
+                    popup.result.layoutDirection(),
+                    Qt.LayoutDirection.RightToLeft)
+                self.assertEqual(
+                    document.defaultTextOption().textDirection(),
+                    Qt.LayoutDirection.RightToLeft)
+                self.assertEqual(
+                    document.begin().blockFormat().layoutDirection(),
+                    Qt.LayoutDirection.RightToLeft)
             finally:
                 popup.close()
 

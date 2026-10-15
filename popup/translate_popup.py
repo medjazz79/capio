@@ -781,13 +781,26 @@ class TranslatePopup(QDialog):
         previous = self._streamed_partial
         if text == previous:
             return
+        target_language = str(
+            self.settings.get("target_language", "ar")).split("-", 1)[0]
         direction = (
             Qt.LayoutDirection.RightToLeft
-            if self.settings.get("target_language", "ar") == "ar"
+            if target_language == "ar"
             else Qt.LayoutDirection.LeftToRight
         )
         self.result.setLayoutDirection(direction)
-        self.result.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        document = self.result.document()
+        option = document.defaultTextOption()
+        option.setTextDirection(direction)
+        option.setAlignment(Qt.AlignmentFlag.AlignJustify)
+        document.setDefaultTextOption(option)
+        initial_block = document.begin()
+        if initial_block.isValid():
+            block_format = initial_block.blockFormat()
+            block_format.setLayoutDirection(direction)
+            block_format.setAlignment(Qt.AlignmentFlag.AlignJustify)
+            cursor = QTextCursor(initial_block)
+            cursor.setBlockFormat(block_format)
         if text.startswith(previous):
             cursor = self.result.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -798,6 +811,14 @@ class TranslatePopup(QDialog):
             cursor = self.result.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
             self.result.setTextCursor(cursor)
+        block = document.begin()
+        while block.isValid():
+            block_format = block.blockFormat()
+            block_format.setLayoutDirection(direction)
+            block_format.setAlignment(Qt.AlignmentFlag.AlignJustify)
+            cursor = QTextCursor(block)
+            cursor.setBlockFormat(block_format)
+            block = block.next()
         self._streamed_partial = text
 
     def _on_worker_done(self, translated_text: str, badge: str) -> None:
@@ -1601,10 +1622,7 @@ class TranslatePopup(QDialog):
         target_language = str(
             self.settings.get("target_language", "ar")).split("-", 1)[0]
         document = self.result.document()
-        is_arabic = target_language == "ar" or bool(re.search(
-            r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]",
-            document.toPlainText(),
-        ))
+        is_arabic = target_language == "ar"
         direction = (
             Qt.LayoutDirection.RightToLeft
             if is_arabic else Qt.LayoutDirection.LeftToRight
