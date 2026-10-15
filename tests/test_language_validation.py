@@ -396,3 +396,34 @@ class TestTranslationOutput(unittest.TestCase):
             "CRITICAL CORRECTION",
             translate.call_args.kwargs["instructions"],
         )
+
+    def test_streaming_translation_retries_when_output_language_is_wrong(self):
+        settings = dict(
+            DEFAULTS,
+            model="gemini-3.5-flash-lite",
+            gemini_key="test-key",
+            source_language="en",
+            target_language="ar",
+            fast_mode=True,
+        )
+        with (
+            mock.patch(
+                "translators.chain._stream_single_gemini",
+                return_value=iter([("done", "English output", "Gemini")]),
+            ),
+            mock.patch(
+                "translators.chain._detect_translation_language",
+                side_effect=["en", "ar"],
+            ),
+            mock.patch(
+                "translators.chain._translate_chunk",
+                return_value=("النص العربي المصحح", "Gemini"),
+            ) as retry,
+        ):
+            events = list(chain.translate_stream("Source passage", settings))
+
+        retry.assert_called_once()
+        self.assertEqual(
+            events[-1],
+            ("done", "النص العربي المصحح", "Gemini"),
+        )

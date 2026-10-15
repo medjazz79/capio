@@ -221,10 +221,11 @@ class BookView(QWidget):
         thumbnail_worker = getattr(self.thumbs, "_worker", None)
         self.thumbs.clear_document()
         self.reader.clear_document()
-        document = self._document
-        self._document = None
-        if document is not None:
-            document.close()
+        with self._doc_lock:
+            document = self._document
+            self._document = None
+            if document is not None:
+                document.close()
         if temporary_path:
             self._remove_temporary_view_file(temporary_path, thumbnail_worker)
         self._document_path = ""
@@ -465,10 +466,13 @@ class BookView(QWidget):
             return
         self._save_document_to(str(destination))
         saved_document = pdf_utils.open_doc(str(destination))
-        previous_document = self._document
         thumbnail_worker = getattr(self.thumbs, "_worker", None)
         temporary_path = self._temporary_view_path
-        self._document = saved_document
+        with self._doc_lock:
+            previous_document = self._document
+            self._document = saved_document
+            if previous_document is not None:
+                previous_document.close()
         self._document_path = str(destination)
         self.path = str(destination)
         self.title = destination.stem
@@ -477,8 +481,6 @@ class BookView(QWidget):
         self._pdf_view_modified = False
         self._editing_source = False
         self.view_stack.setCurrentWidget(self.splitter)
-        if previous_document is not None:
-            previous_document.close()
         self._temporary_view_path = None
         self.thumbs.set_document(
             self._document_path,
@@ -525,19 +527,22 @@ class BookView(QWidget):
         os.close(descriptor)
         os.unlink(temporary_path)
         try:
-            self._document.save(temporary_path, garbage=4, deflate=True)
-            if destination.resolve() == Path(self.path).resolve():
-                document = self._document
-                self._document = None
-                document.close()
-                try:
-                    os.replace(temporary_path, destination)
-                except Exception:
+            with self._doc_lock:
+                if self._document is None:
+                    raise RuntimeError("Cannot save without an open document")
+                self._document.save(temporary_path, garbage=4, deflate=True)
+                if destination.resolve() == Path(self.path).resolve():
+                    document = self._document
+                    self._document = None
+                    document.close()
+                    try:
+                        os.replace(temporary_path, destination)
+                    except Exception:
+                        self._document = pdf_utils.open_doc(self.path)
+                        raise
                     self._document = pdf_utils.open_doc(self.path)
-                    raise
-                self._document = pdf_utils.open_doc(self.path)
-            else:
-                os.replace(temporary_path, destination)
+                else:
+                    os.replace(temporary_path, destination)
         finally:
             Path(temporary_path).unlink(missing_ok=True)
 
@@ -546,9 +551,10 @@ class BookView(QWidget):
 
     @property
     def metadata(self) -> dict[str, str]:
-        if self._document is None:
-            raise RuntimeError("Cannot read PDF metadata without an open PDF")
-        return dict(self._document.metadata)
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot read PDF metadata without an open PDF")
+            return dict(self._document.metadata)
 
     def delete_pages(self, page_indices: list[int]) -> int:
         if self._document is None:
@@ -571,8 +577,11 @@ class BookView(QWidget):
         new_current_page = current_page - sum(
             page <= current_page for page in pages)
 
-        for page in reversed(pages):
-            self._document.delete_page(page)
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot delete pages without an open PDF")
+            for page in reversed(pages):
+                self._document.delete_page(page)
         self._page_sizes = [
             size for index, size in enumerate(self._page_sizes)
             if index not in deleted
@@ -618,8 +627,9 @@ class BookView(QWidget):
             raise ValueError("Page rotation must be -90 or 90 degrees")
 
         anchor = self.reader._anchor_state()
-        self._view_rotations[page_index] = (
-            self._view_rotations[page_index] + degrees) % 360
+        with self._doc_lock:
+            self._view_rotations[page_index] = (
+                self._view_rotations[page_index] + degrees) % 360
         self.reader.set_document(self._display_page_sizes())
         if anchor is not None:
             QTimer.singleShot(0, lambda: self.reader._restore_anchor(anchor))
@@ -634,40 +644,38 @@ class BookView(QWidget):
         return self._view_rotations[page_index]
 
     def page_text(self, page_index: int) -> str:
-        if self._document is None:
-            raise RuntimeError("Cannot read text without an open PDF")
-        if not 0 <= page_index < self.page_count():
-            raise IndexError(f"PDF page index out of range: {page_index}")
-        return pdf_utils.page_text(self._document[page_index])
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot read text without an open PDF")
+            if not 0 <= page_index < self.page_count():
+                raise IndexError(f"PDF page index out of range: {page_index}")
+            return pdf_utils.page_text(self._document[page_index])
 
     def page_body_text(self, page_index: int) -> tuple[str, str | None]:
-        if self._document is None:
-            raise RuntimeError("Cannot read text without an open PDF")
-        if not 0 <= page_index < self.page_count():
-            raise IndexError(f"PDF page index out of range: {page_index}")
-        return pdf_utils.page_body_text(self._document[page_index])
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot read text without an open PDF")
+            if not 0 <= page_index < self.page_count():
+                raise IndexError(f"PDF page index out of range: {page_index}")
+            return pdf_utils.page_body_text(self._document[page_index])
 
     def scroll_to_page(self, page: int) -> None:
         self.reader.scroll_to_page(page)
 
     def _render_page(self, page_index: int, zoom: float):
-        if self._document is None:
-            raise RuntimeError("Cannot render a page without an open PDF")
         with self._doc_lock:
             if self._document is None:
-                raise RuntimeError("Document closed during render")
+                raise RuntimeError("Cannot render a page without an open PDF")
             page = self._document[page_index]
             raster_zoom = self._raster_zoom(page_index, zoom)
-        # render_page does I/O-bound PyMuPDF work; lock released to avoid blocking GUI
-        # but page object already captured. Re-acquire for safety if needed:
-        image = pdf_utils.render_page(page, raster_zoom)
-        rotation = self._view_rotations[page_index]
-        if rotation:
-            image = image.transformed(
-                QTransform().rotate(rotation),
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        return image
+            image = pdf_utils.render_page(page, raster_zoom)
+            rotation = self._view_rotations[page_index]
+            if rotation:
+                image = image.transformed(
+                    QTransform().rotate(rotation),
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            return image
 
     def _raster_zoom(self, page_index: int, zoom: float) -> float:
         """Largest zoom whose raster for this page stays inside the budget.
@@ -708,12 +716,30 @@ class BookView(QWidget):
     ) -> tuple[float, float, float, float]:
         if not 0 <= page_index < len(self._page_sizes):
             raise IndexError(f"PDF page index out of range: {page_index}")
-        scale = self.zoom
+        display_width, display_height = self._display_page_sizes()[page_index]
+        raster_zoom = self._raster_zoom(page_index, self.zoom)
+        raster_width = math.ceil(display_width * raster_zoom)
+        raster_height = math.ceil(display_height * raster_zoom)
+        offset_x = offset_y = 0.0
+        if page_index < len(self.reader._labels):
+            label = self.reader._labels[page_index]
+            pixmap = label.pixmap()
+            if pixmap is not None and not pixmap.isNull():
+                raster_width, raster_height = pixmap.width(), pixmap.height()
+            content = label.contentsRect()
+            offset_x = content.x() + (content.width() - raster_width) / 2
+            offset_y = content.y() + (content.height() - raster_height) / 2
+        scale_x = raster_width / display_width
+        scale_y = raster_height / display_height
+        x0 = min(raster_width, max(0, rect.left() - offset_x))
+        y0 = min(raster_height, max(0, rect.top() - offset_y))
+        x1 = min(raster_width, max(0, rect.right() - offset_x))
+        y1 = min(raster_height, max(0, rect.bottom() - offset_y))
         return (
-            rect.left() / scale,
-            rect.top() / scale,
-            rect.right() / scale,
-            rect.bottom() / scale,
+            x0 / scale_x,
+            y0 / scale_y,
+            x1 / scale_x,
+            y1 / scale_y,
         )
 
     def _base_display_rect(
@@ -748,57 +774,62 @@ class BookView(QWidget):
     def _page_rect(
         self, page_index: int, rect: QRect
     ) -> tuple[float, float, float, float]:
-        if self._document is None:
-            raise RuntimeError("Cannot map a selection without an open PDF")
-        display_rect = self._base_display_rect(page_index, rect)
-        page = self._document[page_index]
-        unrotated_rect = display_rect * page.derotation_matrix
-        return (
-            unrotated_rect.x0,
-            unrotated_rect.y0,
-            unrotated_rect.x1,
-            unrotated_rect.y1,
-        )
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot map a selection without an open PDF")
+            display_rect = self._base_display_rect(page_index, rect)
+            page = self._document[page_index]
+            unrotated_rect = display_rect * page.derotation_matrix
+            return (
+                unrotated_rect.x0,
+                unrotated_rect.y0,
+                unrotated_rect.x1,
+                unrotated_rect.y1,
+            )
 
     def extract(self, page_index: int, rect: QRect) -> tuple[str, str]:
-        if self._document is None:
-            raise RuntimeError("Cannot extract text without an open PDF")
-        extraction = pdf_utils.extract_region(
-            self._document[page_index], self._page_rect(page_index, rect))
-        if extraction.text:
-            return "text", extraction.text
-        return "image", ""
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot extract text without an open PDF")
+            extraction = pdf_utils.extract_region(
+                self._document[page_index], self._page_rect(page_index, rect))
+            if extraction.text:
+                return "text", extraction.text
+            return "image", ""
 
     def page_needs_full_page_ocr(self, page_index: int) -> bool:
-        if self._document is None:
-            raise RuntimeError("Cannot inspect a page without an open PDF")
-        if not 0 <= page_index < self.page_count():
-            raise IndexError(f"PDF page index out of range: {page_index}")
-        return pdf_utils.has_sparse_text_over_scan(self._document[page_index])
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot inspect a page without an open PDF")
+            if not 0 <= page_index < self.page_count():
+                raise IndexError(f"PDF page index out of range: {page_index}")
+            return pdf_utils.has_sparse_text_over_scan(
+                self._document[page_index])
 
     def render_crop(self, page_index: int, rect: QRect, dpi: float = 300):
-        if self._document is None:
-            raise RuntimeError("Cannot render a crop without an open PDF")
-        display_rect = self._base_display_rect(page_index, rect)
-        # Pixmap clips use page.rect coordinates; _page_rect is for the
-        # unrotated text coordinates consumed by extract_region.
-        image = pdf_utils.render_crop(
-            self._document[page_index],
-            (
-                display_rect.x0,
-                display_rect.y0,
-                display_rect.x1,
-                display_rect.y1,
-            ),
-            dpi=dpi,
-        )
-        rotation = self._view_rotations[page_index]
-        if rotation:
-            image = image.transformed(
-                QTransform().rotate(rotation),
-                Qt.TransformationMode.SmoothTransformation,
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot render a crop without an open PDF")
+            display_rect = self._base_display_rect(page_index, rect)
+            # Pixmap clips use page.rect coordinates; _page_rect is for the
+            # unrotated text coordinates consumed by extract_region.
+            image = pdf_utils.render_crop(
+                self._document[page_index],
+                (
+                    display_rect.x0,
+                    display_rect.y0,
+                    display_rect.x1,
+                    display_rect.y1,
+                ),
+                dpi=dpi,
             )
-        return image
+            rotation = self._view_rotations[page_index]
+            if rotation:
+                image = image.transformed(
+                    QTransform().rotate(rotation),
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            return image
 
     def page_rect_on_screen(self, page_index: int) -> QRect:
         if not 0 <= page_index < self.page_count():
@@ -811,38 +842,44 @@ class BookView(QWidget):
         )
 
     def render_page_image(self, page_index: int, dpi: float = 150):
-        if self._document is None:
-            raise RuntimeError("Cannot render a page without an open PDF")
-        if not 0 <= page_index < self.page_count():
-            raise IndexError(f"PDF page index out of range: {page_index}")
-        image = pdf_utils.render_page_at_dpi(self._document[page_index], dpi)
-        rotation = self._view_rotations[page_index]
-        if rotation:
-            image = image.transformed(
-                QTransform().rotate(rotation),
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        return image
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot render a page without an open PDF")
+            if not 0 <= page_index < self.page_count():
+                raise IndexError(f"PDF page index out of range: {page_index}")
+            image = pdf_utils.render_page_at_dpi(
+                self._document[page_index], dpi)
+            rotation = self._view_rotations[page_index]
+            if rotation:
+                image = image.transformed(
+                    QTransform().rotate(rotation),
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            return image
 
     def save_pages_as_pdf(self, page_indices: list[int], output_path: str) -> None:
-        if self._document is None:
-            raise RuntimeError("Cannot export pages without an open PDF")
-        pages = sorted(set(page_indices))
-        if not pages or any(not 0 <= page < self.page_count() for page in pages):
-            raise ValueError("Select one or more valid PDF pages to export")
-        if Path(output_path).resolve() == Path(self.path).resolve():
-            raise ValueError("The output PDF cannot overwrite the open source book")
-        output = pymupdf.open()
-        try:
-            for page_index in pages:
-                output.insert_pdf(
-                    self._document,
-                    from_page=page_index,
-                    to_page=page_index,
-                )
-            output.save(output_path)
-        finally:
-            output.close()
+        with self._doc_lock:
+            if self._document is None:
+                raise RuntimeError("Cannot export pages without an open PDF")
+            pages = sorted(set(page_indices))
+            if not pages or any(
+                not 0 <= page < self.page_count() for page in pages
+            ):
+                raise ValueError("Select one or more valid PDF pages to export")
+            if Path(output_path).resolve() == Path(self.path).resolve():
+                raise ValueError(
+                    "The output PDF cannot overwrite the open source book")
+            output = pymupdf.open()
+            try:
+                for page_index in pages:
+                    output.insert_pdf(
+                        self._document,
+                        from_page=page_index,
+                        to_page=page_index,
+                    )
+                output.save(output_path)
+            finally:
+                output.close()
 
     def set_zoom_percent(self, value: float) -> None:
         try:
@@ -903,16 +940,17 @@ class BookView(QWidget):
         self.initial_fit_pending = False
 
     def fit_visible(self) -> None:
-        if self._document is None or not self._page_sizes:
-            return
-        page_index = self.current_page()
-        page = self._document[page_index]
-        bounds = pymupdf.Rect(page.rect)
-        content = pymupdf.Rect()
-        for _kind, bbox in page.get_bboxlog():
-            rect = pymupdf.Rect(bbox) & page.rect
-            if not rect.is_empty and not rect.is_infinite:
-                content |= rect
+        with self._doc_lock:
+            if self._document is None or not self._page_sizes:
+                return
+            page_index = self.current_page()
+            page = self._document[page_index]
+            bounds = pymupdf.Rect(page.rect)
+            content = pymupdf.Rect()
+            for _kind, bbox in page.get_bboxlog():
+                rect = pymupdf.Rect(bbox) & page.rect
+                if not rect.is_empty and not rect.is_infinite:
+                    content |= rect
         if content.is_empty:
             self.fit_to_page()
             return

@@ -691,6 +691,62 @@ class TestRenderedPixelBudget(unittest.TestCase):
             book.close_doc()
             book.close()
 
+    def test_capped_raster_selection_maps_to_the_visible_pdf_region(self):
+        from PySide6.QtCore import QPoint, QRect
+        from PySide6.QtGui import QPixmap
+
+        from reader.bookview import BookView
+
+        book = BookView()
+        try:
+            book.open(self.path, zoom_percent=1000.0)
+            image = book._render_page(0, book.zoom)
+            label = book.reader._labels[0]
+            label.setPixmap(QPixmap.fromImage(image))
+            content = label.contentsRect()
+            offset_x = content.x() + (content.width() - image.width()) / 2
+            offset_y = content.y() + (content.height() - image.height()) / 2
+            scale_x = image.width() / 612
+            scale_y = image.height() / 792
+            left = round(offset_x + 120 * scale_x)
+            top = round(offset_y + 180 * scale_y)
+            rect = QRect(QPoint(left, top), QPoint(left + 8, top + 8))
+
+            x0, y0, x1, y1 = book._display_rect(0, rect)
+
+            self.assertAlmostEqual(x0, 120, delta=1)
+            self.assertAlmostEqual(y0, 180, delta=1)
+            self.assertAlmostEqual(x1, 120 + 8 / scale_x, delta=1)
+            self.assertAlmostEqual(y1, 180 + 8 / scale_y, delta=1)
+        finally:
+            book.close_doc()
+            book.close()
+
+    def test_pdf_rasterization_keeps_the_document_lock_until_done(self):
+        from unittest import mock
+
+        from PySide6.QtGui import QImage
+
+        from reader import pdf_utils
+        from reader.bookview import BookView
+
+        book = BookView()
+        try:
+            book.open(self.path, zoom_percent=100.0)
+            observed_lock_state = []
+
+            def render(_page, _zoom):
+                observed_lock_state.append(book._doc_lock._is_owned())
+                return QImage(1, 1, QImage.Format.Format_RGB888)
+
+            with mock.patch.object(pdf_utils, "render_page", side_effect=render):
+                book._render_page(0, book.zoom)
+
+            self.assertEqual(observed_lock_state, [True])
+        finally:
+            book.close_doc()
+            book.close()
+
 
 # ---------------------------------------------------------------------------
 # Defect 13 + 14: thumbnail queue draining and failure expiry.

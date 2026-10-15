@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -227,6 +228,10 @@ def load() -> dict:
             size = SETTINGS_PATH.stat().st_size
             if size > _MAX_SETTINGS_FILE_BYTES:
                 log.warning("Settings file too large (%d bytes), using defaults", size)
+                try:
+                    _backup_oversized_file(SETTINGS_PATH)
+                except OSError:
+                    log.exception("Could not back up oversized settings file")
         except (OSError, FileNotFoundError):
             size = 0
         if size <= _MAX_SETTINGS_FILE_BYTES:
@@ -245,7 +250,6 @@ def load() -> dict:
         try:
             corrupt_backup = SETTINGS_PATH.with_suffix(".corrupt.json")
             if SETTINGS_PATH.is_file():
-                import shutil
                 shutil.copy2(str(SETTINGS_PATH), str(corrupt_backup))
                 log.warning("Backed up corrupt settings to %s", corrupt_backup)
         except Exception:
@@ -262,6 +266,12 @@ def load() -> dict:
             log.warning(
                 "Custom providers file too large, using settings-file copy"
             )
+            try:
+                _backup_oversized_file(providers_path)
+            except OSError:
+                log.exception(
+                    "Could not back up oversized custom providers file"
+                )
         else:
             providers_data = json.loads(
                 providers_path.read_text(encoding="utf-8-sig")
@@ -500,11 +510,29 @@ def save(settings: dict) -> None:
         clean.get("vision_probes"), clean["custom_providers"])
     providers_path = _custom_providers_path()
     try:
+        _backup_oversized_file(providers_path)
+        _backup_oversized_file(SETTINGS_PATH)
         _write_json_atomically(providers_path, clean["custom_providers"])
         _write_json_atomically(SETTINGS_PATH, clean)
     except (OSError, TypeError, ValueError) as exc:
         log.exception("Could not save settings: %s", exc)
         raise
+
+
+def _backup_oversized_file(path: Path) -> Path | None:
+    """Preserve oversized user data before a later save can replace it."""
+    try:
+        if path.stat().st_size <= _MAX_SETTINGS_FILE_BYTES:
+            return None
+    except FileNotFoundError:
+        return None
+    backup = path.with_name(
+        f"{path.stem}.oversized-{os.getpid()}-{secrets.token_hex(4)}"
+        f"{path.suffix}"
+    )
+    shutil.copy2(path, backup)
+    log.warning("Backed up oversized user data to %s", backup)
+    return backup
 
 
 def _write_json_atomically(path: Path, value) -> None:

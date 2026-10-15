@@ -61,15 +61,11 @@ def bare_class(name: str) -> str:
     return name.rsplit(".", 1)[-1]
 
 
-MODULES = ("tests.test_app", "tests.test_chat",
-           "tests.test_engine_fixes", "tests.test_file_menu",
-           "tests.test_freellmapi", "tests.test_freellm_vision",
-           "tests.test_gemini_image_output_budget",
-           "tests.test_language_validation", "tests.test_gemini_streaming",
-           "tests.test_image_streaming", "tests.test_reader_fixes",
-           "tests.test_speech_edge_only",
-           "tests.test_speech_segment_handoff",
-           "tests.test_translation_fonts")
+MODULES = tuple(
+    f"tests.{path.stem}"
+    for path in sorted((ROOT / "tests").glob("test_*.py"))
+    if path.is_file()
+)
 
 ISOLATED_TEST_CLASSES = {
     "tests.test_app.TestReaderZoom",

@@ -1009,7 +1009,40 @@ def translate_stream(text: str, settings: dict):
                     )
                 elif kind == "done":
                     current = value
-                    parts.append(value)
+                    from .prompt import LANGUAGE_NAMES
+
+                    target_language = chunk_settings.get(
+                        "target_language", "ar")
+                    source_language = chunk_settings.get(
+                        "source_language", "auto")
+                    detected_language = _detect_translation_language(value)
+                    if (
+                        target_language in LANGUAGE_NAMES
+                        and source_language != target_language
+                        and detected_language
+                        and detected_language != target_language
+                    ):
+                        current, badge = _translate_chunk(
+                            chunk, chunk_settings)
+                        detected_language = _detect_translation_language(
+                            current)
+                        if (
+                            detected_language
+                            and detected_language != target_language
+                        ):
+                            target_name = LANGUAGE_NAMES[target_language]
+                            raise RuntimeError(
+                                "Streaming translation returned "
+                                f"{detected_language} instead of "
+                                f"{target_name}."
+                            )
+                        yield (
+                            "partial",
+                            "\n".join([*parts, current]).translate(
+                                _WESTERN_DIGITS),
+                            "",
+                        )
+                    parts.append(current)
                     badges.append(badge)
         yield (
             "done",
