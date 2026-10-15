@@ -217,6 +217,25 @@ class TestTranslationFonts(unittest.TestCase):
 
             popup.result.clear()
             popup._streamed_partial = ""
+            popup._apply_streamed_typography()
+            popup._append_streamed_partial("مرحبا")
+            popup._append_streamed_partial("مرحبا\n\nEnglish")
+            streamed_document = popup.result.document()
+            self.assertEqual(
+                streamed_document.find("مرحبا").charFormat().fontFamilies()[0],
+                "Times New Roman",
+            )
+            self.assertEqual(
+                streamed_document.find("English").charFormat().fontFamilies()[0],
+                "Georgia",
+            )
+            self.assertAlmostEqual(
+                streamed_document.find("English").block().blockFormat().lineHeight(),
+                5.0,
+            )
+
+            popup.result.clear()
+            popup._streamed_partial = ""
             popup._translation_text = "مرحبا café English"
             popup.result.show()
             popup.refresh_display(settings)

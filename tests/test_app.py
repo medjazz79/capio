@@ -4361,12 +4361,12 @@ class TestChain(unittest.TestCase):
         )
         self.assertIn("\u2726 chosen: gemini-2.5-flash", badge)
 
-    def test_full_page_translation_uses_smaller_complete_source_chunks(self):
+    def test_full_page_translation_uses_complete_bounded_source_chunks(self):
         from unittest import mock
         from config.settings import DEFAULTS
 
         source = "\n\n".join(
-            f"Paragraph {index}: " + ("content " * 35)
+            f"Paragraph {index}: " + ("content " * 100)
             for index in range(5)
         )
         settings = dict(
@@ -4374,6 +4374,12 @@ class TestChain(unittest.TestCase):
             model="gemini-2.5-flash",
             gemini_key="k",
             _full_page_translation=True,
+        )
+        self.assertEqual(
+            chain._translation_chunks("x" * 3000, settings),
+            ["x" * 3000],
+            "page translations up to the existing 4000-character request "
+            "limit should not incur extra serial model round-trips",
         )
         seen = []
 
@@ -4387,7 +4393,7 @@ class TestChain(unittest.TestCase):
             chain.translate(source, settings)
 
         self.assertGreater(len(seen), 1)
-        self.assertLessEqual(max(map(len, seen)), chain.FULL_PAGE_CHUNK)
+        self.assertLessEqual(max(map(len, seen)), chain.MAX_CHUNK)
         combined = "\n".join(seen)
         for index in range(5):
             self.assertIn(f"Paragraph {index}:", combined)
@@ -4403,7 +4409,7 @@ class TestChain(unittest.TestCase):
         ):
             list(chain.translate_stream(source, settings))
         self.assertGreater(len(seen), 1)
-        self.assertLessEqual(max(map(len, seen)), chain.FULL_PAGE_CHUNK)
+        self.assertLessEqual(max(map(len, seen)), chain.MAX_CHUNK)
         combined = "\n".join(seen)
         for index in range(5):
             self.assertIn(f"Paragraph {index}:", combined)
@@ -4413,7 +4419,8 @@ class TestChain(unittest.TestCase):
             chain, "_translate_chunk", side_effect=translate_chunk,
         ):
             chain.translate(source, dict(settings, _full_page_translation=False))
-        self.assertEqual(len(seen), 1)
+        self.assertEqual(
+            len(seen), len(chain.chunk_text(source, limit=chain.MAX_CHUNK)))
 
     def test_keyless_opencode_model_is_attempted(self):
         """space-bunny-free answers with no Authorization header at all, so the
@@ -8586,23 +8593,59 @@ class TestReaderZoom(_GuiCase):
             "Free service  \u26a0 chosen model gemini-3.5-flash-lite failed: no Gemini key")
         self.assertTrue(text.startswith("\u26a0"))
         self.assertIn("Google Translate", text)
-        self.assertIn("gemini-3.5-flash-lite failed", text)
         self.assertIn("answered because", tip)
+        self.assertIn("gemini-3.5-flash-lite failed", tip)
         self.assertIn("no Gemini key", tip)
 
         text, tip = self._badge_after(
             "Free service (alt)  \u26a0 chosen model space-bunny-free failed: 403")
         self.assertIn("MyMemory", text)
-        self.assertIn("space-bunny-free failed", text)
+        self.assertIn("space-bunny-free failed", tip)
         self.assertIn("403", tip)
 
     def test_popup_badge_shows_engine_for_mixed_chunk_warning(self):
+        from translators.chain import _merge_badges
+
+        badge = _merge_badges(
+            ["\u2726 chosen: gemini-3.5-flash-lite"] * 6
+            + ["Free service  \u26a0 not your model (403)"] * 2,
+            "gemini-3.5-flash-lite",
+        )
+        text, tip = self._badge_after(badge)
+        self.assertTrue(text.startswith("\u26a0 Partial fallback"))
+        self.assertIn("6/8", text)
+        self.assertLess(len(text), 45)
+        self.assertIn("translated 6 of 8 chunks", tip)
+        self.assertIn("gemini-3.5-flash-lite", tip)
+
+    def test_popup_badge_does_not_hide_missing_engine_name(self):
+        text, tip = self._badge_after("\u26a0   (not your model)")
+        self.assertTrue(text.startswith("\u26a0 Fallback"))
+        self.assertIn("did not translate any chunks", tip)
+
+    def test_popup_badge_shows_failed_model_when_fallback_engine_is_missing(self):
         text, tip = self._badge_after(
-            "\u26a0 Google Translate  (6/8 chunks by your model)")
-        self.assertTrue(text.startswith("\u26a0 Google Translate"))
-        self.assertIn("6/8 chunks by your model", text)
-        self.assertIn("selected model did not handle every chunk", tip)
-        self.assertIn("Google Translate", tip)
+            "\u26a0 chosen model gemini-3.5-flash-lite failed: HTTP 429 quota")
+        self.assertIn("gemini-3.5-flash-lite failed", text)
+        self.assertIn("HTTP 429 quota", tip)
+
+    def test_completed_translation_is_rendered_once(self):
+        from unittest import mock
+        from popup.translate_popup import TranslatePopup
+
+        with mock_chain_translate(return_value=("initial", "\u2726 chosen: test-model")):
+            popup = TranslatePopup(dict(DEFAULTS), source_text="source")
+            try:
+                if popup._worker:
+                    self.assertTrue(popup._worker.wait(20000))
+                self.app.processEvents()
+                with mock.patch.object(
+                        popup, "_render_markdown",
+                        wraps=popup._render_markdown) as render:
+                    popup._on_done("completed text", "\u2726 chosen: test-model")
+                    render.assert_called_once()
+            finally:
+                popup.close()
 
     def test_popup_badge_line_stays_short(self):
         """A long failure reason must not overflow the status line."""
@@ -10369,13 +10412,20 @@ class TestMemoryZoom(_GuiCase):
                 popup.result.clear()
                 popup._streamed_partial = ""
                 with mock.patch.object(popup, "_render_markdown") as render:
-                    popup._append_streamed_partial("A long ")
-                    popup._append_streamed_partial("A long **translation**")
-                    self.assertEqual(
-                        popup.result.toPlainText(), "A long **translation**")
-                    render.assert_not_called()
+                    with mock.patch.object(
+                        popup, "_apply_streamed_typography") as typography:
+                        popup._append_streamed_partial("A long ")
+                        typography.assert_called_once()
+                        popup._append_streamed_partial(
+                        "A long **translation**")
+                        self.assertEqual(
+                        popup.result.toPlainText(),
+                        "A long **translation**")
+                        render.assert_not_called()
+                        typography.assert_called_once()
 
-                    popup._append_streamed_partial("Corrected partial")
+                        popup._append_streamed_partial("Corrected partial")
+                        self.assertEqual(typography.call_count, 2)
                     self.assertEqual(
                         popup.result.toPlainText(), "Corrected partial")
             finally:

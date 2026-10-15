@@ -28,7 +28,7 @@ from . import (
 # Larger batches reduce serial model round-trips for long page selections while
 # staying comfortably below common request/context limits.
 MAX_CHUNK = 4000
-FULL_PAGE_CHUNK = 800
+FULL_PAGE_CHUNK = MAX_CHUNK
 _GEMMA3_4B_MODEL = re.compile(r"^gemma3:4b(?:$|[-_.])", re.IGNORECASE)
 _QWEN3_VL_2B_MODEL = re.compile(
     r"^qwen3-vl:2b(?:-instruct)?(?:$|[-_.])", re.IGNORECASE)

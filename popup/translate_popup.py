@@ -717,6 +717,7 @@ class TranslatePopup(QDialog):
         self.spin.show()
         self.spin.setText("Starting…")
         self.result.clear()
+        self._apply_streamed_typography()
         self.speak_btn.setEnabled(False)
         worker.start()
 
@@ -789,17 +790,28 @@ class TranslatePopup(QDialog):
         if text.startswith(previous):
             cursor = self.result.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
+            start_position = cursor.position()
+            previous_block_count = self.result.document().blockCount()
             cursor.insertText(text[len(previous):])
             self.result.setTextCursor(cursor)
+            if not previous:
+                self._apply_streamed_typography()
+            elif self.result.document().blockCount() > previous_block_count:
+                self._apply_streamed_typography(start_position)
+            else:
+                self._apply_script_font_families(
+                    self.result.document(), start_position)
         else:
             self.result.setPlainText(text)
             cursor = self.result.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
             self.result.setTextCursor(cursor)
+            self._apply_streamed_typography()
         self._streamed_partial = text
-        self._apply_streamed_typography()
 
-    def _apply_streamed_typography(self) -> None:
+    def _apply_streamed_typography(
+        self, start_position: int | None = None,
+    ) -> None:
         target_language = str(
             self.settings.get("target_language", "ar")).split("-", 1)[0]
         direction = (
@@ -824,26 +836,33 @@ class TranslatePopup(QDialog):
         root_format.setTopMargin(vertical_margin)
         root_format.setBottomMargin(vertical_margin)
         document.rootFrame().setFrameFormat(root_format)
-        block = document.begin()
+        block = (
+            document.begin()
+            if start_position is None
+            else document.findBlock(start_position)
+        )
+        first_block_position = block.position()
         while block.isValid():
-            block_format = block.blockFormat()
-            block_format.setLayoutDirection(direction)
-            block_format.setAlignment(start_alignment)
-            block_format.setTopMargin(0)
-            block_format.setBottomMargin(0)
-            if spacing and block.text().strip():
-                block_format.setLineHeight(
-                    float(spacing),
-                    int(QTextBlockFormat.LineHeightTypes.LineDistanceHeight.value),
-                )
-            else:
-                block_format.clearProperty(QTextFormat.Property.LineHeight)
-                block_format.clearProperty(
-                    QTextFormat.Property.LineHeightType)
-            cursor = QTextCursor(block)
-            cursor.setBlockFormat(block_format)
+            if start_position is None or block.position() != first_block_position:
+                block_format = block.blockFormat()
+                block_format.setLayoutDirection(direction)
+                block_format.setAlignment(start_alignment)
+                block_format.setTopMargin(0)
+                block_format.setBottomMargin(0)
+                if spacing and block.text().strip():
+                    block_format.setLineHeight(
+                        float(spacing),
+                        int(QTextBlockFormat.LineHeightTypes.LineDistanceHeight.value),
+                    )
+                else:
+                    block_format.clearProperty(QTextFormat.Property.LineHeight)
+                    block_format.clearProperty(
+                        QTextFormat.Property.LineHeightType)
+                cursor = QTextCursor(block)
+                cursor.setBlockFormat(block_format)
             block = block.next()
-        self._apply_script_font_families(document)
+        self._apply_script_font_families(
+            document, start_position if start_position is not None else 0)
 
     def _on_worker_done(self, translated_text: str, badge: str) -> None:
         worker = self.sender()
@@ -1092,7 +1111,9 @@ class TranslatePopup(QDialog):
             return None
         return family
 
-    def _apply_script_font_families(self, document: QTextDocument) -> None:
+    def _apply_script_font_families(
+        self, document: QTextDocument, start_position: int = 0,
+    ) -> None:
         arabic_font = self.settings.get("translation_font_arabic", "")
         latin_font = self.settings.get("translation_font_latin", "")
         legacy_font = self.settings.get("translation_font", "")
@@ -1106,13 +1127,16 @@ class TranslatePopup(QDialog):
             "arabic": arabic_font,
             "latin": latin_font,
         }
-        block = document.begin()
+        block = document.findBlock(start_position)
         while block.isValid():
             text = block.text()
             run_kind = None
-            qt_position = block.position()
+            block_start = block.position()
+            local_start = max(0, start_position - block_start)
+            python_start = qt_to_python_position(text, local_start)
+            qt_position = block_start + local_start
             run_qt_start = qt_position
-            for character in text:
+            for character in text[python_start:]:
                 codepoint = ord(character)
                 if (
                     0x0600 <= codepoint <= 0x06FF
@@ -1341,9 +1365,8 @@ class TranslatePopup(QDialog):
         self.chat_btn.setEnabled(bool(translated_text.strip()))
         self.chat_send_btn.setEnabled(
             bool(translated_text.strip()) and self._chat_worker is None)
-        self._render_translation()
-        self.refresh_display(self.settings)
         self.result.show()
+        self.refresh_display(self.settings)
         self.speak_btn.setEnabled(
             bool(translated_text.strip()) and self._speech_available)
         self.speed_btn.setEnabled(self._speech_available)
@@ -1363,17 +1386,31 @@ class TranslatePopup(QDialog):
             self.token_line = tail.strip()
             badge = head
         chunk_summary = re.fullmatch(
-            r"⚠\s+(.+?)\s{2}"
-            r"\((?:\d+/\d+ chunks by your model|not your model)\)",
+            r"⚠\s*(.*?)\s{2}"
+            r"(\(\d+/\d+ chunks by your model\)|\(not your model\))",
             badge.strip(),
         )
         if chunk_summary:
-            engine = chunk_summary.group(1).strip()
-            self.badge.setText(f"{badge.strip()} · {secs:.1f}s")
-            self.badge.setToolTip(
-                "The selected model did not handle every chunk of this "
-                f"translation.\n{badge.strip()}"
+            engine = chunk_summary.group(1).strip() or "Translation fallback"
+            counts = re.fullmatch(
+                r"\((\d+)/(\d+) chunks by your model\)",
+                chunk_summary.group(2),
             )
+            if counts:
+                used, total = counts.groups()
+                self.badge.setText(
+                    f"⚠ Partial fallback · {used}/{total} · {secs:.1f}s")
+                self.badge.setToolTip(
+                    f"The selected model translated {used} of {total} chunks."
+                    f"\nMost common engine: {engine}.\n{badge.strip()}"
+                )
+            else:
+                self.badge.setText(
+                    f"⚠ Fallback · not your model · {secs:.1f}s")
+                self.badge.setToolTip(
+                    f"The selected model did not translate any chunks."
+                    f"\nMost common engine: {engine}.\n{badge.strip()}"
+                )
             self.badge.setProperty("warning", True)
         else:
             engine, marker, why = badge.partition("⚠")
@@ -1391,19 +1428,19 @@ class TranslatePopup(QDialog):
                 actual_engine = {
                     "Free service": "Google Translate",
                     "Free service (alt)": "MyMemory",
-                }.get(engine, engine)
-                status = f"⚠ {actual_engine}"
+                }.get(engine, engine) or "Translation fallback"
                 if selected_model:
                     model_label = (
-                        selected_model if len(selected_model) <= 36
-                        else f"{selected_model[:33]}..."
+                        selected_model if len(selected_model) <= 34
+                        else f"{selected_model[:31]}..."
                     )
-                    status += f" · {model_label} failed"
+                    status = f"⚠ {actual_engine} · {model_label} failed"
                     tooltip = (
                         f"{actual_engine} answered because the selected model "
                         f"{selected_model} failed.\n{why.strip()}"
                     )
                 else:
+                    status = f"⚠ {actual_engine}"
                     tooltip = (
                         f"{actual_engine} is NOT the model you chose.\n"
                         f"{why.strip()}"
@@ -1411,6 +1448,7 @@ class TranslatePopup(QDialog):
                 self.badge.setText(f"{status} · {secs:.1f}s")
                 self.badge.setToolTip(tooltip)
                 self.badge.setProperty("warning", True)
+                engine = actual_engine
             else:
                 self.badge.setText(f"{engine} · {secs:.1f}s")
                 self.badge.setToolTip("Your chosen model translated this.")
