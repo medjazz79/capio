@@ -8596,6 +8596,14 @@ class TestReaderZoom(_GuiCase):
         self.assertIn("space-bunny-free failed", text)
         self.assertIn("403", tip)
 
+    def test_popup_badge_shows_engine_for_mixed_chunk_warning(self):
+        text, tip = self._badge_after(
+            "\u26a0 Google Translate  (6/8 chunks by your model)")
+        self.assertTrue(text.startswith("\u26a0 Google Translate"))
+        self.assertIn("6/8 chunks by your model", text)
+        self.assertIn("selected model did not handle every chunk", tip)
+        self.assertIn("Google Translate", tip)
+
     def test_popup_badge_line_stays_short(self):
         """A long failure reason must not overflow the status line."""
         long_reason = "\u2726 gemini-2.5-flash  \u26a0 not your model (" + ("x" * 400) + ")"

@@ -1362,45 +1362,59 @@ class TranslatePopup(QDialog):
         if sep:
             self.token_line = tail.strip()
             badge = head
-        engine, marker, why = badge.partition("⚠")
-        # "\u2726 chosen: gemini-x" -> "\u2726 gemini-x": keep the symbol, drop the word.
-        engine = re.sub(r"\bchosen:\s*", "", engine.strip())
-        engine = re.sub(r"\bchosen image:\s*", "", engine.strip())
-        engine = re.sub(r"\bcustom:\s*", "", engine.strip())
-        if marker:
-            selected_model = re.search(
-                r"\bchosen model\s+(.+?)\s+failed:", why, re.IGNORECASE)
-            selected_model = (
-                selected_model.group(1).strip()
-                if selected_model else ""
+        chunk_summary = re.fullmatch(
+            r"⚠\s+(.+?)\s{2}"
+            r"\((?:\d+/\d+ chunks by your model|not your model)\)",
+            badge.strip(),
+        )
+        if chunk_summary:
+            engine = chunk_summary.group(1).strip()
+            self.badge.setText(f"{badge.strip()} · {secs:.1f}s")
+            self.badge.setToolTip(
+                "The selected model did not handle every chunk of this "
+                f"translation.\n{badge.strip()}"
             )
-            actual_engine = {
-                "Free service": "Google Translate",
-                "Free service (alt)": "MyMemory",
-            }.get(engine, engine)
-            status = f"⚠ {actual_engine}"
-            if selected_model:
-                model_label = (
-                    selected_model if len(selected_model) <= 36
-                    else f"{selected_model[:33]}..."
-                )
-                status += f" · {model_label} failed"
-                tooltip = (
-                    f"{actual_engine} answered because the selected model "
-                    f"{selected_model} failed.\n{why.strip()}"
-                )
-            else:
-                tooltip = (
-                    f"{actual_engine} is NOT the model you chose.\n"
-                    f"{why.strip()}"
-                )
-            self.badge.setText(f"{status} · {secs:.1f}s")
-            self.badge.setToolTip(tooltip)
             self.badge.setProperty("warning", True)
         else:
-            self.badge.setText(f"{engine} · {secs:.1f}s")
-            self.badge.setToolTip("Your chosen model translated this.")
-            self.badge.setProperty("warning", False)
+            engine, marker, why = badge.partition("⚠")
+            # "\u2726 chosen: gemini-x" -> "\u2726 gemini-x": keep the symbol, drop the word.
+            engine = re.sub(r"\bchosen:\s*", "", engine.strip())
+            engine = re.sub(r"\bchosen image:\s*", "", engine.strip())
+            engine = re.sub(r"\bcustom:\s*", "", engine.strip())
+            if marker:
+                selected_model = re.search(
+                    r"\bchosen model\s+(.+?)\s+failed:", why, re.IGNORECASE)
+                selected_model = (
+                    selected_model.group(1).strip()
+                    if selected_model else ""
+                )
+                actual_engine = {
+                    "Free service": "Google Translate",
+                    "Free service (alt)": "MyMemory",
+                }.get(engine, engine)
+                status = f"⚠ {actual_engine}"
+                if selected_model:
+                    model_label = (
+                        selected_model if len(selected_model) <= 36
+                        else f"{selected_model[:33]}..."
+                    )
+                    status += f" · {model_label} failed"
+                    tooltip = (
+                        f"{actual_engine} answered because the selected model "
+                        f"{selected_model} failed.\n{why.strip()}"
+                    )
+                else:
+                    tooltip = (
+                        f"{actual_engine} is NOT the model you chose.\n"
+                        f"{why.strip()}"
+                    )
+                self.badge.setText(f"{status} · {secs:.1f}s")
+                self.badge.setToolTip(tooltip)
+                self.badge.setProperty("warning", True)
+            else:
+                self.badge.setText(f"{engine} · {secs:.1f}s")
+                self.badge.setToolTip("Your chosen model translated this.")
+                self.badge.setProperty("warning", False)
         self.badge.style().unpolish(self.badge)
         self.usageReported.emit(engine.strip(), self.token_line)
         self.badge.style().polish(self.badge)
