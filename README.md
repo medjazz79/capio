@@ -16,7 +16,7 @@ reading without switching applications.
 
 ## Floating translator: translate what is on your screen
 
-<p align="center"><img src="Capio-Preview-Floating-Translator.png" alt="The floating translator translating a website selection" width="720"></p>
+<p align="center"><img src="Capio-Preview-Floating-Translator.png" alt="Capio's floating translator translating a Quanta Magazine article in a browser" width="720"></p>
 
 Keep the floating button available over other applications, select an area,
 then translate its text with OCR or send the image to a vision-capable model.
