@@ -1,0 +1,44 @@
+# Python environments, caches, and bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated images and test reports in the project root
+/*.png
+/*.jpg
+/*.jpeg
+runtests_report.txt
+solo_report.txt
+solo.txt
+.report
+
+# User settings, credentials, runtime data, and logs
+.env
+.env.*
+!.env.example
+settings.json
+custom_providers.json
+*.log
+harmony_tts_cache/
+
+# Build and packaging output
+build/
+dist/
+*.spec.bak
+
+# Local test and profiling artifacts
+_probe*.py
+_probe*.out
+_measure_*.py
+_profile_*.*
+
+# Local planning and machine-specific scratch files
+docs/superpowers/
+FIXPLAN.md
+PLAN.md

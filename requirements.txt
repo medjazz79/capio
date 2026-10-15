@@ -1,0 +1,29 @@
+# Runtime floors for Capio.
+#
+# Verified against the .venv on 2026-10-13. The exact versions that suite was
+# run with are listed under "TESTED WITH" below -- install those with
+# `pip install -r requirements.txt` for the floors, or pin to the tested set for
+# a reproducible run.
+
+PySide6>=6.7
+# 1.24.3, not 1.24: the lowercase `pymupdf` module name — which is what every
+# caller imports, not the old `fitz` alias — first shipped in 1.24.3.
+# reader/pdf_utils.py, reader/bookview.py, reader/thumbnails.py and the tests
+# all say `import pymupdf`, so anything below this floor installs cleanly and
+# then fails with ModuleNotFoundError at first use.
+PyMuPDF>=1.24.3
+mammoth>=1.8
+requests>=2.31
+Pillow>=10
+mss>=9  # robust screen-region capture for the floating tool
+langdetect>=1.0  # source-language guess for the second free translator
+
+# TESTED WITH (2026-10-13, this machine):
+#   PySide6==6.11.2   PyMuPDF==1.28.2   mammoth==1.13.0
+#   requests==2.34.2  Pillow==12.3.0    mss==10.2.0
+#   langdetect==1.0.9
+
+# OPTIONAL — read-aloud only. The app runs, translates and OCRs without it;
+# "Read aloud" then says so instead of failing.
+# Install the tested optional speech dependency with:
+#   .venv\Scripts\python.exe -m pip install -r requirements-speech.txt

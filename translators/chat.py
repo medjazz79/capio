@@ -1,0 +1,108 @@
+"""Conversational requests routed through the currently selected model."""
+from __future__ import annotations
+
+from . import gemini, opencode_bridge, opencode_cli, opencode_compat, opencode_zen
+from . import registry
+from .prompt import LANGUAGE_NAMES
+
+
+def _model_messages(
+    messages: list[dict[str, str]],
+    source_text: str,
+    translated_text: str,
+    source_language: str,
+    target_language: str,
+    extra_instructions: str = "",
+) -> tuple[str, list[dict[str, str]]]:
+    target_name = LANGUAGE_NAMES.get(target_language, "Arabic")
+    source_name = LANGUAGE_NAMES.get(
+        source_language, "the automatically detected source language")
+    system = (
+        "You are a helpful tutor for a student reading a music-harmony textbook. "
+        f"Reply in {target_name}. Answer the student's questions conversationally "
+        "and accurately. Explain only as much as needed. Keep musical notation, "
+        "chord symbols, and quoted source-language terms unchanged when relevant. "
+        f"The source language is {source_name}. The passage and its translation "
+        "being discussed follow.\n\nOriginal passage:\n{source_text}\n\n"
+        f"Translation:\n{translated_text}"
+    )
+    extra_instructions = extra_instructions.strip()
+    if extra_instructions:
+        system += (
+            "\n\nAdditional instructions from the translation window. "
+            "Follow them when explaining the passage and answering the student's "
+            f"questions:\n{extra_instructions}"
+        )
+    conversation = [
+        {"role": item["role"], "content": item["content"]}
+        for item in messages
+        if item.get("role") in {"user", "assistant"}
+        and isinstance(item.get("content"), str)
+    ]
+    return system, conversation
+
+
+def reply(
+    messages: list[dict[str, str]],
+    settings: dict,
+    source_text: str,
+    translated_text: str,
+) -> str:
+    """Reply using the selected model; failures never silently change models."""
+    from config.settings import resolve_model
+
+    model = resolve_model(settings)
+    provider = registry.provider_of(model)
+    system, conversation = _model_messages(
+        messages,
+        source_text,
+        translated_text,
+        settings.get("source_language", "auto"),
+        settings.get("target_language", "ar"),
+        str(settings.get("explain_instructions", "") or ""),
+    )
+    if not conversation or conversation[-1]["role"] != "user":
+        raise ValueError("A user message is required to ask the model.")
+
+    if provider == "gemini":
+        api_key = (settings.get("gemini_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("Chat with this Gemini model requires a Gemini API key.")
+        return gemini.chat(conversation, api_key, model, system)
+    if provider == "bridge":
+        return opencode_bridge.chat(conversation, model, system, settings)
+    if provider == "opencode":
+        return opencode_zen.chat(conversation, model, system)
+    if provider == "opencode_cli":
+        return opencode_cli.chat(
+            conversation, model[len(registry.OPENCODE_CLI_PREFIX):], system)
+    if provider in {"groq", "cf", "mistral"}:
+        base, key = registry.provider_creds(provider, settings)
+        if not base or not key:
+            raise RuntimeError(
+                f"Chat requires a {provider.upper()} API key in Settings.")
+        prefix = {
+            "groq": registry.GROQ_PREFIX,
+            "cf": registry.CF_PREFIX,
+            "mistral": registry.MISTRAL_PREFIX,
+        }[provider]
+        return opencode_compat.chat(
+            conversation, base, key, model[len(prefix):], system)
+    if provider == "custom_provider":
+        cfg = registry.custom_provider_config(model, settings)
+        if cfg is None:
+            raise RuntimeError("Custom provider not found — re-add it in Settings → Custom Providers.")
+        base, key, provider_model = cfg
+        if not base or not key or not provider_model:
+            raise RuntimeError("Custom provider is incomplete — fill Base URL, API Key and Model in Settings.")
+        entry = registry.get_custom_provider(settings, model)
+        reasoning = bool(entry.get("reasoning_enabled")) if entry else False
+        return opencode_compat.chat(conversation, base, key, provider_model, system, reasoning_enabled=reasoning)
+
+    base = (settings.get("openai_base") or "").strip()
+    key = (settings.get("openai_key") or "").strip()
+    if not base or not key:
+        raise RuntimeError(
+            "Chat with this model requires an OpenAI-compatible base URL "
+            "and API key in Settings.")
+    return opencode_compat.chat(conversation, base, key, model, system)
