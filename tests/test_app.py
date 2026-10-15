@@ -7843,6 +7843,63 @@ class TestReaderZoom(_GuiCase):
                 pass
             popup.close()
 
+    def test_translation_popup_skips_rerender_for_theme_only_refresh(self):
+        from unittest import mock
+        from popup.translate_popup import TranslatePopup
+
+        settings = dict(DEFAULTS, theme="Dark Slate", color_scheme="dark")
+        popup = TranslatePopup(settings)
+        try:
+            popup._translation_text = "translated"
+            popup._render_translation()
+            popup.result.show()
+            updated = dict(
+                settings,
+                theme="Everforest",
+                color_scheme="light",
+                pdf_canvas_theme_background=True,
+            )
+            with mock.patch.object(
+                popup, "_render_translation", wraps=popup._render_translation
+            ) as render:
+                popup.refresh_display(updated)
+
+            render.assert_not_called()
+            self.assertIs(popup.settings, updated)
+            self.assertEqual(popup.result.toPlainText(), "translated")
+            from ui.theme import theme_colors
+            colors = theme_colors("Everforest", "light")
+            self.assertIn(colors["window"], popup.styleSheet())
+            self.assertIn(colors["surface"], popup.result.styleSheet())
+            self.assertIn(colors["text"], popup.result.styleSheet())
+            updated_font = dict(
+                updated, font_size=float(settings.get("font_size", 17)) + 1)
+            with mock.patch.object(
+                popup, "_render_translation", wraps=popup._render_translation
+            ) as render:
+                popup.refresh_display(updated_font)
+
+            render.assert_called_once()
+            self.assertEqual(
+                popup.result.font().pointSizeF(),
+                updated_font["font_size"],
+            )
+            popup._translation_needs_render = True
+            with mock.patch.object(
+                popup, "_render_translation", wraps=popup._render_translation
+            ) as render:
+                popup.refresh_display(updated_font)
+
+            render.assert_called_once()
+        finally:
+            try:
+                if popup._worker and not popup._worker.wait(20000):
+                    popup._worker.terminate()
+                    popup._worker.wait(2000)
+            except RuntimeError:
+                pass
+            popup.close()
+
     def _badge_after(self, badge):
         from unittest import mock
         from popup.translate_popup import TranslatePopup
@@ -11783,7 +11840,6 @@ class TestFloat(_GuiCase):
 
     def test_floating_translation_uses_latest_shared_tashkeel_setting(self):
         from unittest import mock
-        from config.settings import DEFAULTS
         from main_02 import FloatButton
 
         floating = FloatButton()
@@ -11917,6 +11973,29 @@ class TestFloat(_GuiCase):
                 )
         finally:
             app.setStyleSheet(previous_stylesheet)
+            self._close_float(floating)
+
+    def test_floating_theme_selection_updates_popup_colors(self):
+        from unittest import mock
+        from config.settings import DEFAULTS
+        from main_02 import FloatButton
+        from popup.translate_popup import TranslatePopup
+        from ui.theme import theme_colors
+
+        floating = FloatButton()
+        popup = TranslatePopup(dict(floating.settings))
+        floating.popups = [popup]
+        popup.show()
+        try:
+            with mock.patch("main_02.save"):
+                floating._set_theme("Amoled")
+
+            colors = theme_colors("Amoled", floating.settings["color_scheme"])
+            self.assertIn(colors["window"], popup.styleSheet())
+            self.assertIn(colors["surface"], popup.result.styleSheet())
+            self.assertIn(colors["text"], popup.result.styleSheet())
+            self.assertEqual(popup.settings["theme"], "Amoled")
+        finally:
             self._close_float(floating)
 
     def test_floating_bubble_stays_inside_screen_available_geometry(self):

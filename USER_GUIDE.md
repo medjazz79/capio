@@ -283,8 +283,8 @@ fallback chain as the main reader. Esc/right-click cancels the selection; the
 taskbar is never covered.
 Drop a PDF onto the floating button to open it in the main PDF reader.
 The bubble and tray menus also offer the same built-in themes as the reader;
-theme and color-scheme changes made in either app are picked up by the other.
-If OCR is unavailable,
+the bubble and translation popup follow the selected theme and color scheme.
+Changes made in either app are picked up by the other. If OCR is unavailable,
 the floating translator explains that OneOCR from Windows 11 Snipping Tool is
 required and offers Image mode as an alternative.
 

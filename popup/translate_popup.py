@@ -159,6 +159,8 @@ class TranslatePopup(QDialog):
         self._translation_generation = 0
         self._streamed_partial = ""
         self._translation_text = ""
+        self._translation_needs_render = False
+        self._rendered_translation_text: str | None = None
         self._full_page_translation = full_page_translation
         self._source_text = source_text
         self._source_image = pil_image
@@ -210,24 +212,6 @@ class TranslatePopup(QDialog):
         self._size_save_timer.setSingleShot(True)
         self._size_save_timer.setInterval(400)
         self._size_save_timer.timeout.connect(self._save_geometry)
-        side_margin = self._translation_side_margin(settings)
-        self.setStyleSheet(
-            "QDialog { background: #f7f8fa; }"
-            "QLabel#badge { color: #52677f; font-size: 12px; font-weight: 600; }"
-            "QLabel#badge[warning='true'] { color: #a65b00; }"
-            "QLabel#spin { color: #687789; font-size: 12px; }"
-            "QPushButton { background: transparent; border: 1px solid #d8dde4;"
-            " border-radius: 4px; padding: 0 7px; font-size: 12px; color: #3f4a57; }"
-            "QPushButton:hover { background: #e9edf2; }"
-            f"QTextEdit#translationResult {{ background: #f1f3f6; color: #222831;"
-            f" border: none; border-radius: 4px; padding: 0;"
-            f" padding-left: {side_margin}px; padding-right: {side_margin}px;"
-            f" font-size: {font_size}pt; }}"
-            "QTextBrowser#chatTranscript, QPlainTextEdit#chatInput,"
-            " QPlainTextEdit#explainInstructions {"
-            " background: #f1f3f6; color: #222831; border: 1px solid #d8dde4;"
-            " border-radius: 4px; padding: 5px; }"
-        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 5, 6, 5)
         layout.setSpacing(4)
@@ -302,10 +286,6 @@ class TranslatePopup(QDialog):
         if self._speech_engine == GEMINI_TTS_ENGINE:
             self.voice_btn.setToolTip(
                 f"Gemini voice: {self.settings.get('gemini_tts_voice', 'Kore')}")
-        self.voice_btn.setStyleSheet(
-            "QToolButton { background: transparent; border: 1px solid #d4dde6;"
-            " border-radius: 5px; padding: 0; font-size: 16px; color: #334155; }"
-            "QToolButton:hover { background: #e8eef5; }")
         self.pin_btn = QPushButton("Pin")
         self.pin_btn.setFixedHeight(26)
         self.pin_btn.setToolTip(
@@ -450,12 +430,6 @@ class TranslatePopup(QDialog):
         self.content_splitter.setObjectName("translationChatSplitter")
         self.content_splitter.setChildrenCollapsible(False)
         self.content_splitter.setHandleWidth(6)
-        self.content_splitter.setStyleSheet(
-            "QSplitter#translationChatSplitter::handle:vertical { "
-            "background: #38BDF8; margin: 1px 0; }"
-            "QSplitter#translationChatSplitter::handle:vertical:hover { "
-            "background: #0EA5E9; }"
-        )
         self.content_splitter.addWidget(self.translation_area)
         self.content_splitter.addWidget(self.chat_panel)
         self.content_splitter.setStretchFactor(0, 1)
@@ -490,6 +464,7 @@ class TranslatePopup(QDialog):
         self._speech_prefetch_timer.setInterval(SPEECH_PREFETCH_DELAY_MS)
         self._speech_prefetch_timer.timeout.connect(self._start_speech_prefetch)
 
+        self._apply_popup_theme()
         self._start_translation_worker(
             text=source_text if pil_image is None else None,
             pil_image=pil_image,
@@ -642,15 +617,17 @@ class TranslatePopup(QDialog):
         )
         self.explain_btn.setStyleSheet(
             "QPushButton#explainModeButton { "
-            "background: transparent; border: 1px solid #d8dde4; "
+            f"background: {colors['surface']}; "
+            f"border: 1px solid {colors['border']}; "
             "border-radius: 4px; padding: 0 7px; font-size: 12px; "
-            "color: #3f4a57; }"
+            f"color: {colors['text']}; }}"
             "QPushButton#explainModeButton:hover, "
             "QPushButton#explainModeButton:checked { "
-            f"background-color: {colors['accent']}; color: #FFFFFF; }}"
+            f"background-color: {colors['accent']}; "
+            f"color: {colors['text']}; }}"
             "QPushButton#explainModeButton:checked:hover { "
             f"background-color: {colors['accent_hover']}; "
-            "color: #FFFFFF; }"
+            f"color: {colors['text']}; }}"
         )
         self.explain_btn.setToolTip(
             "Explain mode is on: add an explanation below translations"
@@ -919,6 +896,46 @@ class TranslatePopup(QDialog):
 
     def refresh_display(self, settings: dict | None = None) -> None:
         """Reapply saved typography after refreshing settings in-place."""
+        theme_changed = settings is not None and (
+            settings.get("theme") != self.settings.get("theme")
+            or settings.get("color_scheme")
+            != self.settings.get("color_scheme")
+        )
+        if (
+            settings is not None
+            and self._rendered_translation_text == self._translation_text
+            and self._rendered_translation_text is not None
+            and not self._translation_needs_render
+            and not any(
+                settings.get(key) != self.settings.get(key)
+                for key in (
+                    "arabic_tashkeel",
+                    "explain_instructions",
+                    "explain_mode",
+                    "font_size",
+                    "gemini_key",
+                    "gemini_tts_voice",
+                    "line_spacing_px",
+                    "source_language",
+                    "speech_engine",
+                    "speech_rate",
+                    "speech_read_latin_words",
+                    "speech_voice",
+                    "target_language",
+                    "translation_font",
+                    "translation_font_arabic",
+                    "translation_font_latin",
+                    "translation_side_margin_px",
+                    "translation_top_bottom_margin_px",
+                    "automatic_speech_voice",
+                )
+            )
+        ):
+            self.settings = settings
+            if theme_changed:
+                self._apply_popup_theme()
+            return
+
         old_explain_mode = bool(self.settings.get("explain_mode", False))
         old_explain_instructions = self.settings.get("explain_instructions", "")
         old_arabic_tashkeel = bool(
@@ -1016,6 +1033,120 @@ class TranslatePopup(QDialog):
             self._apply_streamed_typography()
         if self._chat_entries:
             self._render_chat_transcript()
+        self._apply_popup_theme()
+
+    def _apply_popup_theme(self) -> None:
+        colors = theme_colors(
+            self.settings.get("theme", "Dark Slate"),
+            self.settings.get("color_scheme", "system"),
+        )
+        border = colors["border"]
+        text = colors["text"]
+        muted = colors["muted"]
+        result_font = self.result.font()
+        transcript_font = self.chat_transcript.font()
+        input_font = self.chat_input.font()
+        result_family = result_font.family().replace("\\", "\\\\").replace('"', '\\"')
+        transcript_family = transcript_font.family().replace(
+            "\\", "\\\\").replace('"', '\\"')
+        input_family = input_font.family().replace("\\", "\\\\").replace('"', '\\"')
+        self.setStyleSheet(
+            "QDialog { "
+            f"background-color: {colors['window']}; color: {text}; }}"
+            "QLabel#badge { "
+            f"color: {muted}; font-size: 12px; font-weight: 600; }}"
+            "QLabel#badge[warning='true'] { "
+            f"color: {colors['warning']}; }}"
+            "QLabel#spin { "
+            f"color: {muted}; font-size: 12px; }}"
+            "QPushButton, QToolButton { "
+            f"background-color: {colors['surface']}; color: {text}; "
+            f"border: 1px solid {border}; border-radius: 5px; "
+            "padding: 0 7px; font-size: 12px; }"
+            "QPushButton:hover, QToolButton:hover { "
+            f"background-color: {colors['surface_hover']}; }}"
+            "QPushButton:disabled, QToolButton:disabled { "
+            f"color: {muted}; }}"
+            "QTextEdit#translationResult, "
+            "QTextBrowser#chatTranscript, QPlainTextEdit#chatInput, "
+            "QPlainTextEdit#explainInstructions { "
+            f"background-color: {colors['surface']}; color: {text}; "
+            f"border: 1px solid {border}; border-radius: 5px; }}"
+            "QMenu { "
+            f"background-color: {colors['panel']}; color: {text}; "
+            f"border: 1px solid {border}; }}"
+            "QMenu::item:selected { "
+            f"background-color: {colors['selection']}; }}"
+            "QSplitter#translationChatSplitter::handle:vertical { "
+            f"background-color: {colors['accent_light']}; }}"
+            "QSplitter#translationChatSplitter::handle:vertical:hover { "
+            f"background-color: {colors['accent']}; }}"
+        )
+        self.result.setStyleSheet(
+            "QTextEdit#translationResult { "
+            f"background-color: {colors['surface']}; color: {text}; "
+            f"border: none; border-radius: 4px; padding: 0; "
+            f"padding-left: {self._translation_side_margin(self.settings)}px; "
+            f"padding-right: {self._translation_side_margin(self.settings)}px; "
+            f'font-family: "{result_family}"; '
+            f"font-size: {result_font.pointSizeF():g}pt; }}"
+        )
+        self.chat_transcript.setStyleSheet(
+            "QTextBrowser#chatTranscript { "
+            f"background-color: {colors['surface']}; color: {text}; "
+            f"border: 1px solid {border}; border-radius: 4px; padding: 5px; "
+            f'font-family: "{transcript_family}"; '
+            f"font-size: {transcript_font.pointSizeF():g}pt; }}"
+        )
+        self.chat_input.setStyleSheet(
+            "QPlainTextEdit#chatInput { "
+            f"background-color: {colors['surface']}; color: {text}; "
+            f"border: 1px solid {border}; border-radius: 4px; padding: 5px; "
+            f'font-family: "{input_family}"; '
+            f"font-size: {input_font.pointSizeF():g}pt; }}"
+        )
+        self.voice_btn.setStyleSheet(
+            "QToolButton { "
+            f"background-color: {colors['surface']}; color: {text}; "
+            f"border: 1px solid {border}; border-radius: 5px; padding: 0; }}"
+            "QToolButton:hover { "
+            f"background-color: {colors['surface_hover']}; }}"
+        )
+        self.page_number_label.setStyleSheet(
+            "QPushButton#translationPageNumber { "
+            f"color: {muted}; font-size: 12px; font-weight: 600; padding: 0 5px; }}"
+            "QPushButton#translationPageNumber:checked { "
+            f"background-color: {colors['selection']}; "
+            f"border-color: {colors['accent']}; color: {text}; }}"
+        )
+        self._sync_explain_button()
+        self._style_speed_button()
+        self.speed_menu.setStyleSheet(
+            "QMenu { "
+            f"background-color: {colors['panel']}; color: {text}; "
+            f"border: 1px solid {border}; padding: 2px; }}"
+        )
+        self._speed_panel.setStyleSheet(
+            "QWidget#speechSpeedPanel { "
+            f"background-color: {colors['panel']}; color: {text}; }}"
+            "QLabel#speechSpeedTitle, QLabel#speechSpeedValue { "
+            f"color: {text}; }}"
+            "QLabel#speechSpeedDescription { "
+            f"color: {muted}; }}"
+            "QSlider::groove:horizontal { "
+            f"background-color: {border}; height: 5px; border-radius: 2px; }}"
+            "QSlider::sub-page:horizontal { "
+            f"background-color: {colors['accent']}; border-radius: 2px; }}"
+            "QSlider::handle:horizontal { "
+            f"background-color: {colors['surface_hover']}; "
+            f"border: 1px solid {colors['accent_light']}; "
+            "width: 19px; height: 19px; margin: -8px 0; border-radius: 10px; }"
+            "QToolButton { "
+            f"background-color: {colors['surface']}; color: {text}; "
+            f"border: none; border-radius: 16px; padding: 7px 3px; }}"
+            "QToolButton:hover, QToolButton:checked { "
+            f"background-color: {colors['selection']}; color: {text}; }}"
+        )
 
     def _refresh_speech_controls(self) -> None:
         old_voice = self._speech_voice
@@ -1364,6 +1495,7 @@ class TranslatePopup(QDialog):
     def _on_done(self, translated_text: str, badge: str) -> None:
         self.spin.hide()
         self._translation_text = translated_text
+        self._translation_needs_render = bool(translated_text)
         self.chat_btn.setEnabled(bool(translated_text.strip()))
         self.chat_send_btn.setEnabled(
             bool(translated_text.strip()) and self._chat_worker is None)
@@ -1735,6 +1867,8 @@ class TranslatePopup(QDialog):
     def _render_translation(self) -> None:
         text = getattr(self, "_translation_text", "")
         self._render_markdown(text)
+        self._rendered_translation_text = text
+        self._translation_needs_render = False
 
     def _on_failed(self, err: str) -> None:
         self.spin.hide()
@@ -2202,6 +2336,7 @@ class TranslatePopup(QDialog):
     def _build_speed_menu(self) -> None:
         panel = QWidget(self.speed_menu)
         panel.setObjectName("speechSpeedPanel")
+        self._speed_panel = panel
         panel.setFixedWidth(420)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(18, 14, 18, 16)
@@ -2344,13 +2479,19 @@ class TranslatePopup(QDialog):
         self.speed_menu.popup(QPoint(x, y))
 
     def _style_speed_button(self) -> None:
+        colors = theme_colors(
+            self.settings.get("theme", "Dark Slate"),
+            self.settings.get("color_scheme", "system"),
+        )
         self.speed_btn.setStyleSheet(
             "QToolButton { "
-            "background-color: #f7f8fa; border: 1px solid #d8dde4; "
-            "border-radius: 4px; padding: 0; font-size: 16px; color: #3f4a57; "
-            "}"
+            f"background-color: {colors['surface']}; "
+            f"border: 1px solid {colors['border']}; "
+            f"border-radius: 4px; padding: 0; font-size: 16px; "
+            f"color: {colors['text']}; }}"
             "QToolButton:hover, QToolButton:pressed { "
-            "background-color: #e9edf2; color: #3f4a57; }"
+            f"background-color: {colors['surface_hover']}; "
+            f"color: {colors['text']}; }}"
         )
 
     def _position_speed_preset_buttons(self) -> None:
