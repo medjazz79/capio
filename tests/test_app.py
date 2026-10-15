@@ -13347,9 +13347,10 @@ class TestGuideFlow(_GuiCase):
 
     def test_model_usage_readout_is_ltr_centered_and_expands_with_toolbar(self):
         from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QToolBar
+        from PySide6.QtWidgets import QApplication, QToolBar
         from translators import usage
-        from main import MainWindow
+        from main import MainWindow, app_stylesheet
+        from ui.theme import theme_colors
 
         usage.reset()
         window = MainWindow()
@@ -13373,7 +13374,41 @@ class TestGuideFlow(_GuiCase):
                 readout.mapTo(toolbar, readout.rect().bottomRight()).x(),
                 toolbar.contentsRect().right(),
             )
-            self.assertIn("#b9c3d0", readout.styleSheet())
+            self.assertEqual(readout.styleSheet(), "")
+            colors = theme_colors(
+                window.settings.get("theme", "Dark Slate"),
+                window.settings.get("color_scheme", "system"),
+                QApplication.instance(),
+            )
+            app_style = QApplication.instance().styleSheet()
+            self.assertIn(
+                f"QLabel#modelReadout {{\n    color: {colors['text']};",
+                app_style,
+            )
+            self.assertIn(
+                f"QTabBar::tab:selected {{\n    background-color: "
+                f"{colors['surface']}; \n    color: {colors['text']};",
+                app_style,
+            )
+
+            window._on_theme_changed("Catppuccin")
+            colors = theme_colors(
+                "Catppuccin",
+                window.settings.get("color_scheme", "system"),
+                QApplication.instance(),
+            )
+            app_style = QApplication.instance().styleSheet()
+            self.assertEqual(
+                app_style, app_stylesheet(
+                    "Catppuccin", window.settings.get(
+                        "color_scheme", "system"),
+                    bool(window.settings.get(
+                        "pdf_canvas_theme_background", False))),
+            )
+            self.assertIn(
+                f"QLabel#modelReadout {{\n    color: {colors['text']};",
+                QApplication.instance().styleSheet(),
+            )
         finally:
             window.close()
 

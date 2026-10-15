@@ -252,6 +252,13 @@ QTabBar::tab:hover:!selected {
     background-color: @surface_hover@; 
     color: @text@; 
 }
+QLabel#modelReadout {
+    color: @text@;
+    font-size: 13px;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}
 
 /* Scroll Area & Canvas */
 QScrollArea#pdfCanvas { 
@@ -742,9 +749,6 @@ class MainWindow(QMainWindow):
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         self.model_readout.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.model_readout.setMinimumWidth(160)
-        self.model_readout.setStyleSheet(
-            "color: #b9c3d0; font-size: 13px; font-weight: 600; "
-            "background: transparent; border: none;")
         self.model_readout.setToolTip("Model that answered, and its running cost.")
         spacer = QWidget(self)
         spacer.setFixedWidth(14)
