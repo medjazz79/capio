@@ -74,3 +74,15 @@ may require an API key.
 ## License
 
 Capio is licensed under the [MIT License](LICENSE).
+
+## Search tags
+
+**Reading:** #AIReadingAssistant #BookTranslation #PDFReader #EPUBReader
+#DocumentTranslation #StudyTools
+
+**Translation:** #AITranslation #OCR #VisionAI #ScreenTranslation
+#FloatingTranslator #LanguageLearning
+
+**Listening:** #TextToSpeech #TTS #ReadAloud #WordHighlighting
+
+**Platform:** #Python #WindowsApp #OpenSource
