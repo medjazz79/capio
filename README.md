@@ -20,11 +20,11 @@ translate selected text and images elsewhere on your screen.
   </tr>
   <tr>
     <td><img src="Capio-Preview-Reader-Spanish.png" alt="Capio translating a book passage into Spanish" width="100%"></td>
-    <td></td>
+    <td><img src="Capio-Preview-Reader-Arabic.png" alt="Capio translating a book passage into Arabic" width="100%"></td>
   </tr>
   <tr>
     <td align="center"><sub>Follow the original as you read the Spanish translation.</sub></td>
-    <td></td>
+    <td align="center"><sub>Read an Arabic translation alongside the book.</sub></td>
   </tr>
 </table>
 
