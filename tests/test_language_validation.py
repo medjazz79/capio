@@ -34,16 +34,16 @@ class TestTranslationOutput(unittest.TestCase):
         self.assertIn("Use Markdown with #### headings", system)
         self.assertIn("Preserve order and paragraph breaks", system)
         self.assertIn(
-            "Only for a page clearly about music theory or performance",
+            "On clearly musical pages",
             system,
         )
         self.assertIn(
             "bold headings only and keep prose normal",
             system,
         )
-        self.assertIn("never treat code, variables, or graphs as music", system)
+        self.assertIn("never mistake them for music", system)
         self.assertIn(
-            "Read-aloud skips `music` blocks",
+            "read-aloud skips them",
             system,
         )
         self.assertIn("Preserve equations as LaTeX", system)
@@ -52,12 +52,17 @@ class TestTranslationOutput(unittest.TestCase):
             system,
         )
         self.assertIn(
-            "Only for a page clearly about music theory or performance",
+            "On clearly musical pages",
             system,
         )
-        self.assertIn("four-string ukulele tab", system)
-        self.assertIn("only when they are clearly musical scales", system)
-        self.assertIn("Preserve chord labels and notes beside examples", system)
+        self.assertIn(
+            "Never omit notes, give only selected pitches",
+            system,
+        )
+        self.assertIn("Transcribe every legible note exactly and in order",
+                      system)
+        self.assertNotIn("ukulele", system)
+        self.assertIn("Preserve chord labels and adjacent notes.", system)
         self.assertIn(
             "Treat an isolated line above the main body as a running header",
             system,
@@ -68,7 +73,7 @@ class TestTranslationOutput(unittest.TestCase):
         self.assertIn("standalone page number", system)
         self.assertIn("on the final line", system)
         self.assertIn("<small>PAGE_NUMBER</small>", system)
-        self.assertIn("No commentary", system)
+        self.assertIn("output only the translation", system)
         self.assertIn("Keep names precise.", system)
         self.assertLess(len(prompt) + len(system), 3200)
 
@@ -277,7 +282,9 @@ class TestTranslationOutput(unittest.TestCase):
             "The equation is \\(x^2 + y^2 = z^2\\), with "
             "\\(A = \\begin{bmatrix}a&b\\\\c&d\\end{bmatrix}\\).",
             "auto", "ar")
-        music_prompt = user_prompt("C major scale", "auto", "ar")
+        note_sequence = "C D E F# G A B C"
+        music_prompt = user_prompt(
+            f"C major scale: {note_sequence}", "auto", "ar")
         image_system = image_system_instructions("")
         image_prompt = image_translation_prompt()
 
@@ -291,19 +298,30 @@ class TestTranslationOutput(unittest.TestCase):
                 self.assertNotIn("fenced `music` code block", prompt)
         self.assertIn("inline `$...$` or display `$$...$$` LaTeX", math_prompt)
         self.assertIn("Never put math or science in a `music` block", math_prompt)
-        self.assertIn("Convert every standalone scale", music_prompt)
-        self.assertIn("standard ukulele tuning, low to high G-C-E-A", music_prompt)
-        self.assertIn("only when the source is clearly", music_prompt)
+        self.assertIn("preserve every source note", music_prompt)
         self.assertIn(
-            "Only for a page clearly about music theory or performance",
+            "Never omit notes, reduce the sequence to selected symbols",
+            music_prompt,
+        )
+        self.assertIn("complete, faithful note sequence", music_prompt)
+        self.assertNotIn("ukulele", music_prompt)
+        self.assertIn(note_sequence, music_prompt)
+        self.assertIn(
+            "On clearly musical pages",
             image_system,
         )
         self.assertIn(
-            "never treat code, variables, or graphs as music",
+            "never mistake them for music",
             image_system,
         )
         self.assertIn("Preserve equations as LaTeX", image_system)
-        self.assertNotIn("four-string ukulele tab", image_prompt)
+        self.assertIn("Transcribe every legible note exactly and in order",
+                      image_system)
+        self.assertIn(
+            "Never omit notes, give only selected pitches",
+            image_system,
+        )
+        self.assertNotIn("ukulele", image_prompt)
 
     def test_translation_prompts_adapt_style_to_the_source_domain(self):
         from translators.prompt import DOMAIN_STYLE_RULES, user_prompt

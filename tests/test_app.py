@@ -4038,33 +4038,40 @@ class TestChain(unittest.TestCase):
         self.assertIn("copy a URL only if it appears in the source, unchanged", user)
         self.assertNotIn("Convert every standalone scale", system)
         self.assertIn(
-            "Convert every standalone scale or single-note melodic exercise",
+            "preserve every source note in each scale, melody, chord, and score example",
             user,
         )
-        self.assertIn("standard ukulele tuning, low to high G-C-E-A", user)
-        self.assertIn("exactly four aligned rows ordered A, E, C, G", user)
-        self.assertIn("Keep the tablature; do not replace it with prose or omit it", user)
+        self.assertIn("complete, faithful note sequence", user)
+        self.assertNotIn("ukulele", user)
 
-    def test_translation_prompts_apply_ukulele_rules_only_to_music_sources(self):
+    def test_translation_prompts_preserve_all_notes_only_for_music_sources(self):
         from translators.prompt import system_instructions, user_prompt
         from translators.vision import image_system_instructions
 
         system = system_instructions("", "auto", "ar")
-        music = user_prompt("C major scale", "auto", "ar")
+        note_sequence = "C D E F# G A B C"
+        music = user_prompt(
+            f"C major scale: {note_sequence}", "auto", "ar")
         programming = user_prompt(
             "The Python program defines scale = [1, 2, 3].", "auto", "ar")
         self.assertNotIn("Convert every standalone scale", system)
         self.assertNotIn("Convert every standalone scale", programming)
-        self.assertIn("Convert every standalone scale", music)
-        self.assertIn("standard ukulele tuning, low to high G-C-E-A", music)
-        self.assertIn("exactly four string rows", music)
-        self.assertIn("fenced `music` code block", music)
+        self.assertIn("preserve every source note", music)
         self.assertIn(
-            "Convert standalone scales to four-string ukulele tab",
+            "Never omit notes, reduce the sequence to selected symbols",
+            music,
+        )
+        self.assertNotIn("ukulele", music)
+        self.assertIn(note_sequence, music)
+        self.assertIn("fenced `music` code block", music)
+        self.assertIn("Transcribe every legible note exactly and in order",
+                      image_system_instructions(""))
+        self.assertIn(
+            "Never omit notes, give only selected pitches",
             image_system_instructions(""),
         )
         self.assertIn(
-            "Only for a page clearly about music theory or performance",
+            "On clearly musical pages",
             image_system_instructions(""),
         )
 
@@ -4203,8 +4210,9 @@ class TestChain(unittest.TestCase):
         self.assertIn("musical examples, notation, scores, tablature", user)
         self.assertIn("including when they appear near a page edge", user)
         self.assertIn("Preserve each example rather than replacing it", user)
-        self.assertIn("Convert every standalone scale", user)
-        self.assertIn("Keep the tablature; do not replace it with prose or omit it", user)
+        self.assertIn("preserve every source note", user)
+        self.assertIn("complete, faithful note sequence", user)
+        self.assertNotIn("ukulele", user)
 
         image_system = image_system_instructions()
         image_prompt = image_translation_prompt()
@@ -4219,9 +4227,9 @@ class TestChain(unittest.TestCase):
             "Preserve all body text, order, and examples",
             image_prompt,
         )
-        self.assertIn("Only for a page clearly about music theory or performance",
+        self.assertIn("On clearly musical pages",
                       image_rules)
-        self.assertIn("never treat code, variables, or graphs as music",
+        self.assertIn("never mistake them for music",
                       image_rules)
 
     def test_translation_output_budget_scales_with_source_length(self):

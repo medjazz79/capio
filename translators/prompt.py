@@ -77,35 +77,18 @@ ARABIC_DIGIT_STYLE_RULE = (
     "years, measure numbers, labels, or examples."
 )
 
-UKULELE_TAB_RULES = (
-    "Convert every standalone scale or single-note melodic exercise into "
-    "playable four-string ukulele tablature only when the source is clearly "
-    "about music theory or musical performance; never apply this to a "
-    "non-musical use of the word scale or to code, mathematics, or science. "
-    "Do not repeat its original note-name sequence or staff notation. Assume "
-    "standard ukulele tuning, low to high G-C-E-A, and print "
-    "the tab strings high to low as A, E, C, G. Use exactly four string rows "
-    "and fret numbers, "
-    "keep simultaneous notes vertically aligned, and preserve the source's "
-    "pitch classes, note order, repetitions, direction, and any stated rhythm. "
-    "Preserve the octave when it is specified; otherwise choose a practical "
-    "playable register and fingering. Do not add notes or musical details. "
-    "Keep the tablature; do not replace it with prose or omit it. Put every "
-    "standalone musical example, including tablature, scales, chord examples, "
-    "and notation, in its own fenced `music` code block and express the example "
-    "with LaTeX only inside that block. For tablature, use a simple LaTeX "
-    "`array` with exactly four aligned rows ordered A, E, C, G. "
-    "Do not put LaTeX, dollar delimiters, or musical examples inside prose. "
-    "Do not convert chord symbols, figured bass, or Roman-numeral analysis "
-    "into tablature; preserve chord names beside the tablature they label. "
-    "Translate any brief source note explaining an example and place it "
-    "immediately before or after that example, outside the notation block. "
-    "Do not invent chord labels or explanatory notes. If source "
-    "pitches cannot be identified reliably, do not guess: preserve the source "
-    "example in a `music` block. Keep notation rows together without empty "
-    "lines, and do not add blank lines between a notation block and adjacent "
-    "prose. Preserve every symbol, space, line break, and indentation in the "
-    "source notation."
+MUSIC_EXAMPLE_RULES = (
+    "For clearly musical content, preserve every source note in each scale, "
+    "melody, chord, and score example in its original order, including "
+    "repetitions, letter names, accidentals, octave, and rhythm when shown. "
+    "Never omit notes, reduce the sequence to selected symbols or scale "
+    "degrees, or substitute tablature or another notation. Put each "
+    "standalone example in its own "
+    "fenced `music` block, using compact LaTeX to display the complete, "
+    "faithful note sequence as a visual reference; do not add notes or "
+    "explanations. Do not guess pitches that are unreadable in the source. "
+    "Keep notation rows together without blank lines and keep prose outside "
+    "the block."
 )
 
 MUSIC_LATEX_RULES = (
@@ -198,7 +181,7 @@ def is_music_context(text: str) -> bool:
 
 def music_domain_rules() -> str:
     """Return notation rules reserved for clearly musical source material."""
-    return f"{MUSIC_LATEX_RULES} {UKULELE_TAB_RULES}"
+    return f"{MUSIC_LATEX_RULES} {MUSIC_EXAMPLE_RULES}"
 
 
 LAYOUT_RULES = (

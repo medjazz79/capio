@@ -18,7 +18,10 @@ Capio is designed for books across subjects: literature, history, programming,
 mathematics, science, music, and more. Translation guidance adapts to the
 content, preserving the structure and subject-specific material that matters
 in context, such as code, equations, or musical notation when present. It is a
-general-purpose book reader, not a music-only translator.
+general-purpose book reader, not a music-only translator. Music-specific
+formatting is used only when the source is clearly about music; scale examples
+keep every readable note in order as compact LaTeX visual references. Code,
+equations, and material from other fields retain their own conventions.
 
 Supported formats include PDF, EPUB, DOCX, TXT, Markdown, HTML, XPS/OXPS, FB2,
 CBZ comics, and common image formats (PNG, JPEG, BMP, GIF, TIFF, WebP, and
@@ -182,9 +185,11 @@ original spelling in parentheses after the Arabic form of searchable proper
 names (people, places, organizations, titles, brands, and notable named
 events/concepts) on first mention only; later mentions use Arabic alone.
 Ordinary words and generic terms are not copied into parentheses.
-Models are also instructed not to embellish or explain notation, replace it
-with alternate forms, or convert it into LaTeX; inline notation is marked only
-to keep it silent in read-aloud.
+For clearly musical passages, complete note sequences are preserved in compact
+LaTeX examples that act as visual references and are skipped by read-aloud.
+This music-specific formatting does not apply to other subjects; code,
+equations, and scientific notation keep the representation appropriate to
+their field.
 These instructions are appended to the built-in
 translation rules and are saved with your settings. Leave the field empty to
 use the built-in rules alone. Free online translators and the offline glossary
