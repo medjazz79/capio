@@ -28,6 +28,7 @@ from . import (
 # Larger batches reduce serial model round-trips for long page selections while
 # staying comfortably below common request/context limits.
 MAX_CHUNK = 4000
+FULL_PAGE_CHUNK = 800
 _GEMMA3_4B_MODEL = re.compile(r"^gemma3:4b(?:$|[-_.])", re.IGNORECASE)
 _QWEN3_VL_2B_MODEL = re.compile(
     r"^qwen3-vl:2b(?:-instruct)?(?:$|[-_.])", re.IGNORECASE)
@@ -524,6 +525,7 @@ def _is_prose_mislabelled_as_heading(text: str) -> bool:
     """Reject heading markers placed before a sentence or paragraph."""
     if len(text) > 180:
         return True
+    text = re.sub(r"^(?:\*\*|__)?\d+(?:\.\d+)*\.\s+", "", text, count=1)
     return bool(re.search(r"(?<=[.!?؟。])\s+\S", text))
 
 
@@ -559,6 +561,15 @@ def _split_long(para: str, limit: int) -> list[str]:
     if cur:
         out.append(" ".join(cur))
     return out
+
+
+def _translation_chunks(text: str, settings: dict) -> list[str]:
+    limit = (
+        FULL_PAGE_CHUNK
+        if settings.get("_full_page_translation")
+        else MAX_CHUNK
+    )
+    return chunk_text(text, limit=limit)
 
 
 def chunk_text(text: str, limit: int = MAX_CHUNK) -> list[str]:
@@ -603,7 +614,7 @@ def translate(text: str, settings: dict) -> tuple[str, str]:
     if not text.strip():
         return "", "—"
     source_text = dehyphenate(text.strip())
-    chunks = chunk_text(source_text)
+    chunks = _translation_chunks(source_text, settings)
     for index, chunk in enumerate(chunks):
         if not chunk.strip():
             continue
@@ -967,7 +978,7 @@ def translate_stream(text: str, settings: dict):
         arabic, badge = translate(text, settings)
         yield ("done", arabic, badge)
         return
-    chunks = chunk_text(text)
+    chunks = _translation_chunks(text, settings)
     chosen = resolve_model(settings)
     provider = registry.provider_of(chosen)
     streaming_providers = {
@@ -1175,7 +1186,7 @@ def _translation_instructions(settings: dict, model: str = "") -> str:
         "Explain mode is enabled and overrides any instruction to output only "
         "the translation for this request. First give the complete translation. "
         f"Immediately after it, add a separate Markdown heading exactly "
-        f"`#### {heading}`, followed by one concise paragraph explaining the "
+        f"`### {heading}`, followed by one concise paragraph explaining the "
         f"meaning of the translated passage in {target_name}. The explanation "
         "must clarify the ideas; do not repeat the translation, add unrelated "
         "information, or use another language."

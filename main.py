@@ -1970,6 +1970,7 @@ class MainWindow(QMainWindow):
                     ocr_langs=ocr_langs,
                     book=book,
                     page_no=page_no,
+                    full_page_translation=omit_running_header,
                 )
                 return
             popup.set_page_navigation(page_no, book.page_count())
@@ -2300,7 +2301,8 @@ class MainWindow(QMainWindow):
 
     def _show_popup(self, text: str | None = None, pil_image=None,
                     ocr_langs=("ru", "en"), book: BookView | None = None,
-                    page_no: int | None = None) -> TranslatePopup:
+                    page_no: int | None = None,
+                    full_page_translation: bool = False) -> TranslatePopup:
         self.popups = [p for p in self.popups if p.isVisible()]
         for p in self.popups:
             if not getattr(p, "_pinned", False):
@@ -2310,6 +2312,7 @@ class MainWindow(QMainWindow):
             ocr_langs=ocr_langs, parent=self,
             floating_language_controls=True,
             language_change_callback=self._on_popup_languages_changed,
+            full_page_translation=full_page_translation,
         )
         popup.automaticPageReadingToggled.connect(
             lambda enabled, source_book=book, source_popup=popup:

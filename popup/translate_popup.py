@@ -145,7 +145,8 @@ class TranslatePopup(QDialog):
                  float_language_preferences: bool = False,
                  language_change_callback: (
                      Callable[[str, str, TranslatePopup], None] | None
-                 ) = None):
+                 ) = None,
+                 full_page_translation: bool = False):
         super().__init__(parent, Qt.WindowType.Tool)
         self._settings = settings
         self.settings = settings
@@ -158,6 +159,7 @@ class TranslatePopup(QDialog):
         self._translation_generation = 0
         self._streamed_partial = ""
         self._translation_text = ""
+        self._full_page_translation = full_page_translation
         self._source_text = source_text
         self._source_image = pil_image
         self._speech_worker: SpeechWorker | None = None
@@ -694,8 +696,11 @@ class TranslatePopup(QDialog):
         self._toggle_chat_panel(False)
         generation = self._translation_generation
         self._streamed_partial = ""
+        worker_settings = dict(self.settings)
+        if self._full_page_translation:
+            worker_settings["_full_page_translation"] = True
         worker = TranslateWorker(
-            self.settings,
+            worker_settings,
             text=text,
             pil_image=pil_image,
             ocr_langs=ocr_langs,
@@ -781,26 +786,6 @@ class TranslatePopup(QDialog):
         previous = self._streamed_partial
         if text == previous:
             return
-        target_language = str(
-            self.settings.get("target_language", "ar")).split("-", 1)[0]
-        direction = (
-            Qt.LayoutDirection.RightToLeft
-            if target_language == "ar"
-            else Qt.LayoutDirection.LeftToRight
-        )
-        self.result.setLayoutDirection(direction)
-        document = self.result.document()
-        option = document.defaultTextOption()
-        option.setTextDirection(direction)
-        option.setAlignment(Qt.AlignmentFlag.AlignJustify)
-        document.setDefaultTextOption(option)
-        initial_block = document.begin()
-        if initial_block.isValid():
-            block_format = initial_block.blockFormat()
-            block_format.setLayoutDirection(direction)
-            block_format.setAlignment(Qt.AlignmentFlag.AlignJustify)
-            cursor = QTextCursor(initial_block)
-            cursor.setBlockFormat(block_format)
         if text.startswith(previous):
             cursor = self.result.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -811,15 +796,54 @@ class TranslatePopup(QDialog):
             cursor = self.result.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
             self.result.setTextCursor(cursor)
+        self._streamed_partial = text
+        self._apply_streamed_typography()
+
+    def _apply_streamed_typography(self) -> None:
+        target_language = str(
+            self.settings.get("target_language", "ar")).split("-", 1)[0]
+        direction = (
+            Qt.LayoutDirection.RightToLeft
+            if target_language == "ar"
+            else Qt.LayoutDirection.LeftToRight
+        )
+        start_alignment = (
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute
+            if target_language == "ar"
+            else Qt.AlignmentFlag.AlignLeft
+        )
+        self.result.setLayoutDirection(direction)
+        document = self.result.document()
+        option = document.defaultTextOption()
+        option.setTextDirection(direction)
+        option.setAlignment(start_alignment)
+        document.setDefaultTextOption(option)
+        spacing = self._line_spacing(self.settings)
+        root_format = document.rootFrame().frameFormat()
+        vertical_margin = self._translation_top_bottom_margin(self.settings)
+        root_format.setTopMargin(vertical_margin)
+        root_format.setBottomMargin(vertical_margin)
+        document.rootFrame().setFrameFormat(root_format)
         block = document.begin()
         while block.isValid():
             block_format = block.blockFormat()
             block_format.setLayoutDirection(direction)
-            block_format.setAlignment(Qt.AlignmentFlag.AlignJustify)
+            block_format.setAlignment(start_alignment)
+            block_format.setTopMargin(0)
+            block_format.setBottomMargin(0)
+            if spacing and block.text().strip():
+                block_format.setLineHeight(
+                    float(spacing),
+                    int(QTextBlockFormat.LineHeightTypes.LineDistanceHeight.value),
+                )
+            else:
+                block_format.clearProperty(QTextFormat.Property.LineHeight)
+                block_format.clearProperty(
+                    QTextFormat.Property.LineHeightType)
             cursor = QTextCursor(block)
             cursor.setBlockFormat(block_format)
             block = block.next()
-        self._streamed_partial = text
+        self._apply_script_font_families(document)
 
     def _on_worker_done(self, translated_text: str, badge: str) -> None:
         worker = self.sender()
@@ -967,6 +991,8 @@ class TranslatePopup(QDialog):
         )
         if getattr(self, "_translation_text", "") and not self.result.isHidden():
             self._render_translation()
+        elif self._streamed_partial and not self.result.isHidden():
+            self._apply_streamed_typography()
         if self._chat_entries:
             self._render_chat_transcript()
 
@@ -1596,11 +1622,11 @@ class TranslatePopup(QDialog):
             block = block.next()
 
     def _apply_heading_typography(self) -> None:
-        """Render all title styles at the compact Markdown H3 size."""
+        """Render headings noticeably larger than the translation body."""
         base_size = self.result.font().pointSizeF()
         if base_size <= 0:
             base_size = self._translation_font_size(self.settings)
-        heading_size = max(10.0, base_size - 2)
+        heading_size = max(12.0, base_size + 4.0)
         block = self.result.document().begin()
         while block.isValid():
             block_format = block.blockFormat()
@@ -1634,7 +1660,7 @@ class TranslatePopup(QDialog):
         self.result.setLayoutDirection(direction)
         option = document.defaultTextOption()
         option.setTextDirection(direction)
-        option.setAlignment(Qt.AlignmentFlag.AlignJustify)
+        option.setAlignment(start_alignment)
         document.setDefaultTextOption(option)
         block = document.begin()
         while block.isValid():
@@ -1646,10 +1672,8 @@ class TranslatePopup(QDialog):
                 Qt.LayoutDirection.LeftToRight if is_code_block else direction)
             if is_code_block:
                 block_format.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            elif is_heading:
-                block_format.setAlignment(start_alignment)
             else:
-                block_format.setAlignment(Qt.AlignmentFlag.AlignJustify)
+                block_format.setAlignment(start_alignment)
             cursor = QTextCursor(block)
             cursor.setBlockFormat(block_format)
             block = block.next()

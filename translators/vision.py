@@ -61,7 +61,7 @@ def image_system_instructions(
         f"{source_rule} Translate all body text, actual content headings, "
         "captions, parentheticals, and examples in the image. "
         f"{PERIPHERAL_TEXT_RULE} "
-        "Preserve order and paragraph breaks. Use Markdown with #### headings; "
+        "Preserve order and paragraph breaks. Use Markdown with ### headings; "
         "bold headings only and keep prose normal. Preserve equations as LaTeX "
         "($...$ inline, $$...$$ display). Do not summarize or omit unique "
         "source text. Keep `<C>`, `<F>`, and `<G>` as "

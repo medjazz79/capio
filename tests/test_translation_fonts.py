@@ -120,7 +120,7 @@ class TestTranslationFonts(unittest.TestCase):
             self.app.processEvents()
 
     def test_translation_window_applies_each_font_to_matching_script(self):
-        from PySide6.QtCore import QObject, Signal
+        from PySide6.QtCore import QObject, Qt, Signal
         from config.settings import DEFAULTS
         from popup.translate_popup import TranslatePopup
 
@@ -145,12 +145,78 @@ class TestTranslationFonts(unittest.TestCase):
             DEFAULTS,
             translation_font_arabic="Georgia",
             translation_font_latin="Times New Roman",
+            line_spacing_px=5,
         )
         with mock.patch(
             "popup.translate_popup.TranslateWorker", StubTranslateWorker,
         ):
             popup = TranslatePopup(settings, source_text=None)
         try:
+            popup.result.show()
+            streamed_markdown = "# مرحبا café\n\nEnglish"
+            popup._append_streamed_partial(streamed_markdown)
+            streamed_document = popup.result.document()
+            self.assertEqual(
+                popup.result.toPlainText(), streamed_markdown)
+            self.assertEqual(
+                streamed_document.find("مرحبا").charFormat().fontFamilies()[0],
+                "Georgia",
+            )
+            self.assertEqual(
+                streamed_document.find("café").charFormat().fontFamilies()[0],
+                "Times New Roman",
+            )
+            self.assertEqual(
+                streamed_document.find("English").charFormat().fontFamilies()[0],
+                "Times New Roman",
+            )
+            self.assertEqual(
+                streamed_document.defaultTextOption().alignment(),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute,
+            )
+            blank_block = streamed_document.begin().next()
+            self.assertEqual(blank_block.text(), "")
+            self.assertEqual(blank_block.blockFormat().topMargin(), 0)
+            self.assertEqual(blank_block.blockFormat().bottomMargin(), 0)
+            self.assertEqual(
+                streamed_document.begin().blockFormat().bottomMargin(), 0)
+            self.assertEqual(
+                streamed_document.lastBlock().blockFormat().bottomMargin(), 0)
+            self.assertAlmostEqual(
+                streamed_document.defaultFont().pointSizeF(),
+                popup.result.font().pointSizeF(),
+            )
+            self.assertAlmostEqual(
+                streamed_document.find("English").block().blockFormat().lineHeight(),
+                5.0,
+            )
+            self.assertAlmostEqual(
+                streamed_document.begin().blockFormat().lineHeight(), 5.0)
+
+            streamed_updated = dict(
+                settings,
+                translation_font_arabic="Times New Roman",
+                translation_font_latin="Georgia",
+            )
+            popup.refresh_display(streamed_updated)
+            streamed_document = popup.result.document()
+            self.assertEqual(
+                streamed_document.find("مرحبا").charFormat().fontFamilies()[0],
+                "Times New Roman",
+            )
+            self.assertEqual(
+                streamed_document.find("English").charFormat().fontFamilies()[0],
+                "Georgia",
+            )
+            self.assertAlmostEqual(
+                streamed_document.defaultFont().pointSizeF(),
+                popup.result.font().pointSizeF(),
+            )
+            self.assertEqual(
+                streamed_document.begin().blockFormat().lineHeight(), 5.0)
+
+            popup.result.clear()
+            popup._streamed_partial = ""
             popup._translation_text = "مرحبا café English"
             popup.result.show()
             popup.refresh_display(settings)

@@ -112,7 +112,7 @@ class TestImageStreamingAdapters(unittest.TestCase):
                 source_language="auto", target_language="ar"),
         )
         self.assertIn("all body text", system)
-        self.assertIn("Use Markdown with #### headings", system)
+        self.assertIn("Use Markdown with ### headings", system)
         self.assertIn("fenced `music` blocks", system)
         self.assertIn("Preserve equations as LaTeX", system)
         self.assertIn("Do not summarize or omit unique source text", system)

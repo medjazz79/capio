@@ -4,14 +4,14 @@ from __future__ import annotations
 import re
 
 HEADING_RULES = (
-    "Whenever you include a heading, begin it with exactly four hash "
-    "characters (`####`), regardless of its length or importance. Never use "
-    "`#`, `##`, `###`, or five or more hashes for a heading."
+    "Whenever you include a heading, begin it with exactly three hash "
+    "characters (`###`), regardless of its length or importance. Never use "
+    "`#`, `##`, `####`, or four or more hashes for a heading."
 )
 
 BOLD_FORMATTING_RULES = (
     "Use bold formatting only for headings; bold every heading and format it "
-    "as a Markdown heading beginning with exactly `####`. Keep all prose, "
+    "as a Markdown heading beginning with exactly `###`. Keep all prose, "
     "paragraphs, list items, labels, and individual terms in normal weight. "
     "Do not preserve bold emphasis from the source in body text, and never "
     "bold a whole paragraph or emphasize words within one. Never turn the "

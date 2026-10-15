@@ -1840,7 +1840,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         with mock.patch("translators.opencode_compat.translate",
                         return_value="groq-ar") as t:
             chain.translate("cadence", s)
-        self.assertIn("#### الشرح", t.call_args.kwargs["instructions"])
+        self.assertIn("### الشرح", t.call_args.kwargs["instructions"])
 
     def test_explain_mode_is_appended_only_after_last_text_chunk(self):
         from unittest import mock
@@ -1875,16 +1875,16 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             "explain_mode": True,
             "target_language": "ar",
         })
-        self.assertIn("#### الشرح", instructions)
+        self.assertIn("### الشرح", instructions)
         self.assertIn("in Arabic", instructions)
         plain = chain._translation_instructions({"explain_mode": False})
         self.assertIn("Arabic tashkeel is disabled", plain)
-        self.assertNotIn("#### الشرح", plain)
+        self.assertNotIn("### الشرح", plain)
         french = chain._translation_instructions({
             "explain_mode": True,
             "target_language": "fr",
         })
-        self.assertIn("#### Explication", french)
+        self.assertIn("### Explication", french)
         self.assertIn("in French", french)
         custom = chain._translation_instructions({
             "explain_mode": True,
@@ -2839,6 +2839,11 @@ class TestChain(unittest.TestCase):
     def test_only_headings_remain_bold_in_prepared_translation(self):
         from translators.chain import _prepare_translation
 
+        numbered_heading = "### **1.2. Décompression des éléments**"
+        self.assertEqual(
+            _prepare_translation(numbered_heading),
+            numbered_heading,
+        )
         self.assertEqual(
             _prepare_translation(
                 "#### **عنوان القسم**\n\n"
@@ -3790,7 +3795,7 @@ class TestChain(unittest.TestCase):
             payload["system_instruction"]["parts"][0]["text"],
         )
         self.assertIn(
-            "Use Markdown with #### headings",
+            "Use Markdown with ### headings",
             payload["system_instruction"]["parts"][0]["text"],
         )
         self.assertIn(
@@ -4163,10 +4168,10 @@ class TestChain(unittest.TestCase):
                 instructions,
             )
             self.assertIn(
-                "begin it with exactly four hash characters (`####`)",
+                "begin it with exactly three hash characters (`###`)",
                 instructions,
             )
-            self.assertIn("Never use `#`, `##`, `###`", instructions)
+            self.assertIn("Never use `#`, `##`, `####`", instructions)
             self.assertIn(
                 "Keep translated text, headings, subtitles, and musical examples",
                 instructions,
@@ -4355,6 +4360,60 @@ class TestChain(unittest.TestCase):
              for i in range(1, len(seen) + 1)],
         )
         self.assertIn("\u2726 chosen: gemini-2.5-flash", badge)
+
+    def test_full_page_translation_uses_smaller_complete_source_chunks(self):
+        from unittest import mock
+        from config.settings import DEFAULTS
+
+        source = "\n\n".join(
+            f"Paragraph {index}: " + ("content " * 35)
+            for index in range(5)
+        )
+        settings = dict(
+            DEFAULTS,
+            model="gemini-2.5-flash",
+            gemini_key="k",
+            _full_page_translation=True,
+        )
+        seen = []
+
+        def translate_chunk(chunk, _settings):
+            seen.append(chunk)
+            return f"Translation {len(seen)}", "Test"
+
+        with mock.patch.object(
+            chain, "_translate_chunk", side_effect=translate_chunk,
+        ):
+            chain.translate(source, settings)
+
+        self.assertGreater(len(seen), 1)
+        self.assertLessEqual(max(map(len, seen)), chain.FULL_PAGE_CHUNK)
+        combined = "\n".join(seen)
+        for index in range(5):
+            self.assertIn(f"Paragraph {index}:", combined)
+
+        seen.clear()
+        with mock.patch.object(
+            chain,
+            "_stream_single_gemini",
+            side_effect=lambda chunk, _settings: (
+                seen.append(chunk)
+                or iter([("done", f"Translation {len(seen)}", "Test")])
+            ),
+        ):
+            list(chain.translate_stream(source, settings))
+        self.assertGreater(len(seen), 1)
+        self.assertLessEqual(max(map(len, seen)), chain.FULL_PAGE_CHUNK)
+        combined = "\n".join(seen)
+        for index in range(5):
+            self.assertIn(f"Paragraph {index}:", combined)
+
+        seen.clear()
+        with mock.patch.object(
+            chain, "_translate_chunk", side_effect=translate_chunk,
+        ):
+            chain.translate(source, dict(settings, _full_page_translation=False))
+        self.assertEqual(len(seen), 1)
 
     def test_keyless_opencode_model_is_attempted(self):
         """space-bunny-free answers with no Authorization header at all, so the
@@ -10353,14 +10412,16 @@ class TestMemoryZoom(_GuiCase):
                 )
                 self.assertEqual(
                     prose.blockFormat().alignment(),
-                    Qt.AlignmentFlag.AlignJustify,
+                    Qt.AlignmentFlag.AlignRight
+                    | Qt.AlignmentFlag.AlignAbsolute,
                 )
                 option = popup.result.document().defaultTextOption()
                 self.assertEqual(
                     option.textDirection(), Qt.LayoutDirection.RightToLeft)
                 self.assertEqual(
                     option.alignment(),
-                    Qt.AlignmentFlag.AlignJustify,
+                    Qt.AlignmentFlag.AlignRight
+                    | Qt.AlignmentFlag.AlignAbsolute,
                 )
                 self.assertGreater(prose.layout().lineCount(), 0)
                 start_cursor = QTextCursor(prose)
@@ -10398,7 +10459,7 @@ class TestMemoryZoom(_GuiCase):
                 )
                 self.assertEqual(
                     popup.result.document().begin().next().blockFormat().alignment(),
-                    Qt.AlignmentFlag.AlignJustify,
+                    Qt.AlignmentFlag.AlignLeft,
                 )
 
                 popup.settings["target_language"] = "fr"
@@ -10410,7 +10471,7 @@ class TestMemoryZoom(_GuiCase):
                 )
                 self.assertEqual(
                     popup.result.document().begin().blockFormat().alignment(),
-                    Qt.AlignmentFlag.AlignJustify,
+                    Qt.AlignmentFlag.AlignLeft,
                 )
                 self.assertEqual(
                     popup.result.document().begin().blockFormat().layoutDirection(),
@@ -10425,20 +10486,20 @@ class TestMemoryZoom(_GuiCase):
                 popup._render_translation()
                 self.assertEqual(
                     popup.result.document().begin().blockFormat().alignment(),
-                    Qt.AlignmentFlag.AlignJustify,
+                    Qt.AlignmentFlag.AlignLeft,
                 )
                 popup._apply_translation_zoom(1.1)
                 self.app.processEvents()
                 self.assertEqual(
                     popup.result.document().begin().blockFormat().alignment(),
-                    Qt.AlignmentFlag.AlignJustify,
+                    Qt.AlignmentFlag.AlignLeft,
                 )
                 popup.resize(420, 420)
                 self.app.processEvents()
                 popup._render_translation()
                 self.assertEqual(
                     popup.result.document().begin().blockFormat().alignment(),
-                    Qt.AlignmentFlag.AlignJustify,
+                    Qt.AlignmentFlag.AlignLeft,
                 )
             finally:
                 popup.close()
@@ -10491,7 +10552,7 @@ class TestMemoryZoom(_GuiCase):
             finally:
                 popup.close()
 
-    def test_translation_headings_use_a_consistent_compact_type_scale(self):
+    def test_translation_headings_are_larger_than_the_body_text(self):
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QTextCursor
         from popup.translate_popup import TranslatePopup
@@ -10507,6 +10568,7 @@ class TestMemoryZoom(_GuiCase):
                     "# عنوان رئيسي\n\n"
                     "## عنوان قسم\n\n"
                     "### عنوان فرعي\n\n"
+                    "### **1.2. عنوان مرقم**\n\n"
                     "**عنوان عريض مستقل**\n\n"
                     "فقرة فيها **تأكيد عريض**."
                 )
@@ -10519,11 +10581,13 @@ class TestMemoryZoom(_GuiCase):
                 main_title = char_format("عنوان رئيسي")
                 section_title = char_format("عنوان قسم")
                 subtitle = char_format("عنوان فرعي")
+                numbered_heading = char_format("1.2. عنوان مرقم")
                 bold_standalone = char_format("عنوان عريض مستقل")
                 inline_emphasis = char_format("تأكيد عريض")
-                self.assertEqual(main_title.fontPointSize(), 14)
-                self.assertEqual(section_title.fontPointSize(), 14)
-                self.assertEqual(subtitle.fontPointSize(), 14)
+                self.assertEqual(main_title.fontPointSize(), 20)
+                self.assertEqual(section_title.fontPointSize(), 20)
+                self.assertEqual(subtitle.fontPointSize(), 20)
+                self.assertEqual(numbered_heading.fontPointSize(), 20)
                 self.assertEqual(bold_standalone.fontPointSize(), 0)
                 self.assertEqual(inline_emphasis.fontPointSize(), 0)
                 self.assertGreater(main_title.fontWeight(), 400)
@@ -10542,13 +10606,18 @@ class TestMemoryZoom(_GuiCase):
                     Qt.AlignmentFlag.AlignRight
                     | Qt.AlignmentFlag.AlignAbsolute,
                 )
+                self.assertEqual(
+                    popup.result.document().find("1.2. عنوان مرقم")
+                    .blockFormat().headingLevel(),
+                    3,
+                )
 
                 level_four = "#### مستوى عميق"
                 popup._render_markdown(
                     f"# عنوان\n\n{level_four}\n\nنص عادي"
                 )
                 deep = popup.result.document().find("مستوى عميق")
-                self.assertEqual(deep.charFormat().fontPointSize(), 14)
+                self.assertEqual(deep.charFormat().fontPointSize(), 20)
                 plain = popup.result.document().find("نص عادي")
                 self.assertEqual(plain.charFormat().fontPointSize(), 0)
 
@@ -10622,6 +10691,9 @@ class TestMemoryZoom(_GuiCase):
                 self.assertTrue(popup._worker.wait(20000))
                 self.app.processEvents()
                 self.assertEqual(popup.result.toPlainText(), "ترجمة الصفحة")
+                self.assertTrue(popup._full_page_translation)
+                self.assertTrue(
+                    popup._worker._settings["_full_page_translation"])
                 stream.assert_called_once()
                 self.assertIn("memory page 1", stream.call_args.args[0])
         finally:

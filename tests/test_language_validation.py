@@ -30,8 +30,8 @@ class TestTranslationOutput(unittest.TestCase):
             "Treat an isolated line above the main body as a running header",
             system,
         )
-        self.assertIn("#### headings", system)
-        self.assertIn("Use Markdown with #### headings", system)
+        self.assertIn("### headings", system)
+        self.assertIn("Use Markdown with ### headings", system)
         self.assertIn("Preserve order and paragraph breaks", system)
         self.assertIn(
             "On clearly musical pages",
@@ -349,12 +349,12 @@ class TestTranslationOutput(unittest.TestCase):
         self.assertEqual(
             image_system.count(DOMAIN_STYLE_RULES), 1)
 
-    def test_translation_prompts_use_four_hashes_for_every_heading(self):
+    def test_translation_prompts_use_three_hashes_for_every_heading(self):
         from translators.prompt import system_instructions, user_prompt
 
         heading_rule = (
-            "Whenever you include a heading, begin it with exactly four "
-            "hash characters (`####`)"
+            "Whenever you include a heading, begin it with exactly three "
+            "hash characters (`###`)"
         )
         for prompt in (
             system_instructions("", "auto", "ar"),
@@ -363,7 +363,7 @@ class TestTranslationOutput(unittest.TestCase):
             with self.subTest(prompt=prompt[:40]):
                 self.assertIn(heading_rule, prompt)
                 self.assertIn(
-                    "Never use `#`, `##`, `###`, or five or more hashes",
+                    "Never use `#`, `##`, `####`, or four or more hashes",
                     prompt,
                 )
 
@@ -377,7 +377,7 @@ class TestTranslationOutput(unittest.TestCase):
         )
         markdown = (
             "ترجمة عربية.\n\n"
-            "#### مثال\n"
+            "### مثال\n"
             "The effects of EU membership.\n"
             "`inline source notation`\n"
             "```python\nx = True\n```"
