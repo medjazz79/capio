@@ -5028,6 +5028,65 @@ class TestPdfUtils(unittest.TestCase):
         finally:
             doc.close()
 
+    def test_page_body_text_preserves_aligned_table_cells(self):
+        import pymupdf
+        from reader import pdf_utils
+
+        doc = pymupdf.open()
+        page = doc.new_page(width=600, height=800)
+        page.insert_text((50, 160), "Table 6. Required fusion values", fontsize=10)
+        rows = (
+            ("Fundamental pitch (ETS)", "Required fusion (%)"),
+            ("Major (major)", "0.8"),
+            ("Augmented (augmented)", "5.0"),
+            ("Minor (minor)", "5.2"),
+            ("Diminished (diminished)", "6.1"),
+        )
+        for row_index, row in enumerate(rows):
+            y = 200 + row_index * 24
+            page.insert_text((50, y), row[0], fontsize=10)
+            page.insert_text((450, y), row[1], fontsize=10)
+
+        try:
+            body, _page_number = pdf_utils.page_body_text(page)
+        finally:
+            doc.close()
+
+        self.assertIn("Table 6. Required fusion values", body)
+        self.assertIn("| Fundamental pitch (ETS) | Required fusion (%) |", body)
+        self.assertIn("| --- | --- |", body)
+        self.assertIn("| Major (major) | 0.8 |", body)
+        self.assertIn("| Diminished (diminished) | 6.1 |", body)
+        self.assertNotIn("Fundamental pitch (ETS)\nRequired fusion (%)", body)
+
+    def test_page_body_text_does_not_turn_two_prose_columns_into_a_table(self):
+        import pymupdf
+        from reader import pdf_utils
+
+        doc = pymupdf.open()
+        page = doc.new_page(width=600, height=800)
+        for row_index in range(4):
+            y = 200 + row_index * 24
+            page.insert_text(
+                (50, y),
+                f"The left prose column has a complete sentence number {row_index}.",
+                fontsize=10,
+            )
+            page.insert_text(
+                (330, y),
+                f"The right prose column has another complete sentence {row_index}.",
+                fontsize=10,
+            )
+
+        try:
+            body, _page_number = pdf_utils.page_body_text(page)
+        finally:
+            doc.close()
+
+        self.assertNotIn("| --- |", body)
+        self.assertIn("complete sentence number 0", body)
+        self.assertIn("another complete sentence 0", body)
+
     def test_extract_in_rect(self):
         import pymupdf
         doc = pymupdf.open()
@@ -13527,6 +13586,46 @@ class TestGuideFlow(_GuiCase):
                 page_no=2,
             )
             ocr_available.assert_not_called()
+        finally:
+            window.close()
+
+    def test_full_page_image_mode_sends_page_image_instead_of_text_layer(self):
+        from unittest import mock
+        from PySide6.QtCore import QRect
+        from main import MainWindow
+
+        window = MainWindow()
+        try:
+            window.settings["selection_mode"] = "image"
+            book = mock.Mock()
+            book.has_doc.return_value = True
+            book.render_page_image.return_value = "rendered page"
+            book.page_needs_full_page_ocr.return_value = False
+            window._show_popup = mock.Mock()
+            window._flash_info = mock.Mock()
+            with mock.patch(
+                "main.pdf_utils.qimage_to_pil",
+                return_value="raw PIL page",
+            ) as convert:
+                window._translate_selection(
+                    book,
+                    2,
+                    QRect(0, 0, 800, 1000),
+                    force_ocr=False,
+                    omit_running_header=True,
+                )
+
+            book.page_body_text.assert_not_called()
+            book.render_page_image.assert_called_once_with(2, dpi=300)
+            convert.assert_called_once_with("rendered page")
+            window._show_popup.assert_called_once_with(
+                text=None,
+                pil_image="raw PIL page",
+                ocr_langs=(),
+                book=book,
+                page_no=2,
+                full_page_translation=True,
+            )
         finally:
             window.close()
 

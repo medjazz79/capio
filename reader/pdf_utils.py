@@ -194,10 +194,9 @@ def page_body_text(page: pymupdf.Page) -> tuple[str, str | None]:
     body_sizes.sort()
     typical_size = body_sizes[len(body_sizes) // 2] if body_sizes else 0.0
     page_number: str | None = None
-    kept_blocks: list[str] = []
-    for block in blocks:
-        kept_lines: list[str] = []
-        for line in block.get("lines", []):
+    body_lines: list[tuple[int, int, str, pymupdf.Rect]] = []
+    for block_index, block in enumerate(blocks):
+        for line_index, line in enumerate(block.get("lines", [])):
             spans = [
                 span for span in line.get("spans", [])
                 if str(span.get("text", "")).strip()
@@ -232,11 +231,133 @@ def page_body_text(page: pymupdf.Page) -> tuple[str, str | None]:
             is_bold = any(int(span.get("flags", 0)) & 16 for span in spans)
             if is_top_margin and (is_italic or is_small) and not is_bold:
                 continue
-            kept_lines.append(text)
+            body_lines.append((block_index, line_index, text, rect))
+
+    body_line_map = {
+        (line[0], line[1]): line[2]
+        for line in body_lines
+    }
+    table_lines = _aligned_markdown_tables(body_lines)
+    kept_blocks: list[str] = []
+    for block_index, block in enumerate(blocks):
+        kept_lines: list[str] = []
+        for line_index in range(len(block.get("lines", []))):
+            table = table_lines.get((block_index, line_index))
+            if table is not None:
+                kept_lines.append(table)
+            elif (block_index, line_index) not in table_lines:
+                text = body_line_map.get((block_index, line_index), "")
+                if text:
+                    kept_lines.append(text)
         if kept_lines:
             kept_blocks.append("\n".join(kept_lines))
 
     return "\n\n".join(kept_blocks).strip(), page_number
+
+
+def _aligned_markdown_tables(
+    lines: list[tuple[int, int, str, pymupdf.Rect]],
+) -> dict[tuple[int, int], str | None]:
+    """Reconstruct simple, consistently aligned PDF tables as Markdown."""
+    if len(lines) < 6:
+        return {}
+
+    heights = sorted(line[3].height for line in lines if line[3].height)
+    if not heights:
+        return {}
+    median_height = heights[len(heights) // 2]
+    y_tolerance = max(2.0, median_height * 0.35)
+    x_tolerance = max(12.0, median_height * 1.5)
+    min_column_gap = max(18.0, median_height * 1.5)
+
+    rows: list[tuple[float, list[tuple[int, int, str, pymupdf.Rect]]]] = []
+    for item in sorted(lines, key=lambda line: line[3].y0 + line[3].height / 2):
+        center_y = item[3].y0 + item[3].height / 2
+        if rows and abs(rows[-1][0] - center_y) <= y_tolerance:
+            rows[-1][1].append(item)
+            row, members = rows[-1]
+            rows[-1] = (
+                (row * (len(members) - 1) + center_y) / len(members),
+                members,
+            )
+        else:
+            rows.append((center_y, [item]))
+
+    candidate_rows = []
+    for center_y, members in rows:
+        cells = sorted(members, key=lambda item: item[3].x0)
+        if len(cells) < 2:
+            continue
+        if any(
+            cells[index + 1][3].x0 - cells[index][3].x1 < min_column_gap
+            for index in range(len(cells) - 1)
+        ):
+            continue
+        candidate_rows.append((center_y, cells))
+
+    groups: list[list[tuple[float, list[tuple[int, int, str, pymupdf.Rect]]]]] = []
+    current = []
+    for candidate in candidate_rows:
+        center_y, cells = candidate
+        if current:
+            prev_y, prev_cells = current[-1]
+            aligned = (
+                len(cells) == len(prev_cells)
+                and all(
+                    abs(cell[3].x0 - previous[3].x0) <= x_tolerance
+                    for cell, previous in zip(cells, prev_cells)
+                )
+                and center_y - prev_y <= max(36.0, median_height * 4)
+            )
+            if not aligned:
+                groups.append(current)
+                current = []
+        current.append(candidate)
+    if current:
+        groups.append(current)
+
+    result: dict[tuple[int, int], str | None] = {}
+    for group in groups:
+        if len(group) < 3:
+            continue
+        columns = len(group[0][1])
+        compact_columns = sum(
+            sum(
+                len(re.sub(r"\s+", "", row[1][column][2])) <= 24
+                for row in group
+            ) / len(group) >= 0.6
+            for column in range(columns)
+        )
+        if not compact_columns:
+            continue
+
+        markdown_rows = []
+        rtl_table = sum(
+            bool(re.search(r"[\u0590-\u08FF]", cell[2]))
+            for row in group
+            for cell in row[1]
+        ) > len(group) * columns / 2
+        for row in group:
+            row_cells = row[1]
+            texts = [cell[2] for cell in row_cells]
+            if rtl_table:
+                texts.reverse()
+            markdown_rows.append(
+                "| " + " | ".join(text.replace("|", r"\|") for text in texts)
+                + " |"
+            )
+        markdown_rows.insert(
+            1, "| " + " | ".join("---" for _ in range(columns)) + " |")
+        table_markdown = "\n".join(markdown_rows)
+        member_keys = [
+            (cell[0], cell[1])
+            for row in group
+            for cell in row[1]
+        ]
+        first_key = min(member_keys)
+        for key in member_keys:
+            result[key] = table_markdown if key == first_key else None
+    return result
 
 
 def has_sparse_text_over_scan(page: pymupdf.Page) -> bool:

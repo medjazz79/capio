@@ -170,6 +170,47 @@ class TestTranslationChat(unittest.TestCase):
         self.assertNotIn("<table", speech)
         self.assertNotIn("| Harmonic |", speech)
 
+    def test_translation_rendering_preserves_latex_table_alignment_in_arabic(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QTextTable
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+        from translators.chain import normalize_latex_output
+
+        markdown = (
+            r"\begin{tabular}{|l|c|r|}\hline" "\n"
+            r"يسار & وسط & يمين \\" "\n"
+            r"\hline" "\n"
+            r"أ & ب & ج \\" "\n"
+            r"\hline\end{tabular}"
+        )
+        markdown = normalize_latex_output(markdown)
+        with mock.patch.object(TranslatePopup, "_start_translation_worker"):
+            popup = TranslatePopup(dict(DEFAULTS, target_language="ar"))
+        try:
+            popup._render_markdown(markdown)
+            tables = [
+                frame
+                for frame in popup.result.document().rootFrame().childFrames()
+                if isinstance(frame, QTextTable)
+            ]
+            self.assertEqual(len(tables), 1)
+            table = tables[0]
+            self.assertEqual((table.rows(), table.columns()), (2, 3))
+            expected = (
+                Qt.AlignmentFlag.AlignLeft,
+                Qt.AlignmentFlag.AlignHCenter,
+                Qt.AlignmentFlag.AlignRight,
+            )
+            for column, alignment in enumerate(expected):
+                cell_block = table.cellAt(0, column).firstCursorPosition().block()
+                self.assertEqual(
+                    int(cell_block.blockFormat().alignment()) & 0x7,
+                    int(alignment),
+                )
+        finally:
+            popup.close()
+
     def test_pipe_text_inside_fenced_code_is_not_converted_to_a_table(self):
         from PySide6.QtGui import QTextDocument, QTextTable
         from popup.translate_popup import TranslatePopup

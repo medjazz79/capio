@@ -410,6 +410,21 @@ class TestImageStreamingFlow(unittest.TestCase):
         self.assertIn("شرح قبل المثال", tablature_speech)
         self.assertIn("شرح بعده", tablature_speech)
 
+    def test_nonmusical_latex_tabular_is_normalized_as_markdown_table(self):
+        result = chain.normalize_latex_output(
+            r"\begin{tabular}{|l|c|r|}\hline" "\n"
+            r"Name & Center & Value \\" "\n"
+            r"\hline" "\n"
+            r"A & B & C \\" "\n"
+            r"\hline\end{tabular}"
+        )
+
+        self.assertIn("| Name | Center | Value |", result)
+        self.assertIn("| :--- | :---: | ---: |", result)
+        self.assertIn("| A | B | C |", result)
+        self.assertNotIn(r"\begin{tabular}", result)
+        self.assertNotIn("```music", result)
+
     def test_math_arrays_and_code_are_not_silenced_as_music(self):
         math = chain.normalize_latex_output(
             r"$$\begin{bmatrix}a&b\\c&d\end{bmatrix}$$"

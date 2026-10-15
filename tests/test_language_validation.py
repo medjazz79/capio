@@ -9,6 +9,23 @@ from translators import chain
 
 
 class TestTranslationOutput(unittest.TestCase):
+    def test_translation_prompts_preserve_table_rows_and_columns(self):
+        from translators.prompt import (
+            TABLE_FORMATTING_RULE,
+            system_instructions,
+        )
+        from translators.vision import image_system_instructions
+
+        prompts = (
+            system_instructions(),
+            image_system_instructions(),
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt[:40]):
+                self.assertIn(TABLE_FORMATTING_RULE, prompt)
+                self.assertIn("Do not flatten table cells", prompt)
+                self.assertIn("do not guess or", prompt)
+
     def test_image_prompts_are_concise_and_shared_across_vision_providers(self):
         from translators.vision import (
             image_system_instructions, image_translation_prompt,

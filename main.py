@@ -2044,7 +2044,11 @@ class MainWindow(QMainWindow):
             popup.set_source_content(
                 text=text, pil_image=pil_image, ocr_langs=ocr_langs)
 
-        if omit_running_header and not force_ocr:
+        if (
+            omit_running_header
+            and not force_ocr
+            and self.settings.get("selection_mode", "ocr") != "image"
+        ):
             body_text, page_number = book.page_body_text(page_no)
             if body_text:
                 if page_number:
@@ -2056,7 +2060,7 @@ class MainWindow(QMainWindow):
                     f"{self.target_combo.currentText()}…")
                 return
         if self.settings.get("selection_mode", "ocr") == "image":
-            if force_ocr:
+            if force_ocr or omit_running_header:
                 image = book.render_page_image(page_no, dpi=300)
             else:
                 image = book.render_crop(page_no, rect, dpi=300)

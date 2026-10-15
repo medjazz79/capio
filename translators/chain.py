@@ -360,22 +360,86 @@ def normalize_latex_output(text: str) -> str:
 
     environment = re.compile(
         r"\\begin\{\s*(array|tabular|matrix|pmatrix|bmatrix|cases|aligned|align|"
-        r"equation|gather)\s*\}(?:\s*\{[^{}]*\})?(.*?)"
+        r"equation|gather)\s*\}(?:\s*\{([^{}]*)\})?(.*?)"
         r"\\end\{\s*\1\s*\}",
         re.IGNORECASE | re.DOTALL,
     )
 
     def render_environment(match: re.Match[str]) -> str:
-        body = match.group(2)
-        musical = bool(
+        environment_name = match.group(1).lower()
+        column_spec = match.group(2) or ""
+        body = match.group(3)
+        musical_marker = bool(
             _LATEX_MUSIC_COMMAND.search(body) or
             _LATEX_MUSIC_LABEL.search(body) or
-            _has_latex_tablature_rows(body) or
-            re.search(
+            _has_latex_tablature_rows(body)
+        )
+        note_rows = (
+            environment_name != "tabular"
+            and re.search(
                 r"(?m)^\s*[eBGDAE]\s*(?:&|\\mid|\\vert)|"
                 r"\b[eBGDAE]\|[-0-9]",
                 body,
-            ))
+            )
+        )
+        musical = musical_marker or bool(note_rows)
+        if environment_name == "tabular" and not musical:
+            table_body = re.sub(
+                r"\\(?:hline|toprule|midrule|bottomrule)\b", "", body)
+            table_body = re.sub(
+                r"\\cline\s*\{[^{}]*\}", "", table_body)
+            rows = []
+            for row in re.split(
+                r"\\\\(?:\[[^\]]*\])?", table_body,
+            ):
+                if not row.strip():
+                    continue
+                cells = [
+                    _normalize_latex_inline(cell.strip())
+                    for cell in row.split("&")
+                ]
+                rows.append(cells)
+            column_count = max((len(row) for row in rows), default=0)
+            if column_count < 2:
+                return match.group(0)
+            clean_spec = re.sub(
+                r"(?:>\s*\{[^{}]*\}|<\s*\{[^{}]*\}|@\s*\{[^{}]*\})",
+                "",
+                column_spec,
+            )
+            column_types = re.findall(
+                r"[lcr]|[pmb]\s*\{[^{}]*\}",
+                clean_spec,
+                flags=re.IGNORECASE,
+            )
+            alignments = [
+                {"l": "left", "c": "center", "r": "right"}.get(
+                    column_type[0].lower(), "left")
+                for column_type in column_types
+            ]
+            if len(alignments) != column_count:
+                alignments = ["left"] * column_count
+            separator = {
+                "left": ":---",
+                "center": ":---:",
+                "right": "---:",
+            }
+
+            def pipe_row(cells: list[str]) -> str:
+                cells = (cells + [""] * column_count)[:column_count]
+                cells = [
+                    cell.replace("|", r"\|")
+                    for cell in cells
+                ]
+                return "| " + " | ".join(cells) + " |"
+
+            markdown_rows = [pipe_row(rows[0])]
+            markdown_rows.append(pipe_row([
+                separator[alignment] for alignment in alignments
+            ]))
+            markdown_rows.extend(pipe_row(row) for row in rows[1:])
+            return "\n\n" + "\n".join(markdown_rows) + "\n\n"
+
         body = re.sub(r"\\(?:hline|toprule|midrule|bottomrule)\b", "", body)
         body = re.sub(r"\\cline\s*\{[^{}]*\}", "", body)
         rows = re.split(r"\\\\(?:\[[^\]]*\])?", body)

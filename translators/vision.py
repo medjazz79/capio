@@ -10,6 +10,7 @@ from .prompt import (
     DOMAIN_STYLE_RULES,
     LANGUAGE_NAMES,
     PERIPHERAL_TEXT_RULE,
+    TABLE_FORMATTING_RULE,
 )
 
 
@@ -80,6 +81,7 @@ def image_system_instructions(
         "Write clear, grammatical, natural prose without changing meaning "
         "or resolving genuine ambiguity."
     )
+    prompt += f" {TABLE_FORMATTING_RULE}"
     if target_language == "ar":
         prompt += (
             " For Arabic translations from Latin-script sources, write each "

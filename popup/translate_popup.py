@@ -1891,13 +1891,14 @@ class TranslatePopup(QDialog):
             is_code_block = block_format.hasProperty(
                 QTextFormat.Property.BlockCodeFence)
             is_heading = bool(block_format.headingLevel())
+            cursor = QTextCursor(block)
+            is_table_cell = cursor.currentTable() is not None
             block_format.setLayoutDirection(
                 Qt.LayoutDirection.LeftToRight if is_code_block else direction)
             if is_code_block:
                 block_format.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            else:
+            elif not is_table_cell:
                 block_format.setAlignment(start_alignment)
-            cursor = QTextCursor(block)
             cursor.setBlockFormat(block_format)
             block = block.next()
 

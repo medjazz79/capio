@@ -259,6 +259,10 @@ Works on **both** kinds of PDFs:
   Instructions**; Markdown in model output is rendered automatically, with
   Markdown headings, paragraphs, and musical examples consistently aligned at
   the normal reading edge in both the main reader and floating translator.
+  Pipe-style Markdown tables and ordinary LaTeX `tabular` tables render with
+  visible borders and column alignment. Aligned tables in text-based PDFs are
+  reconstructed as Markdown before translation; **Image** mode sends the
+  rendered full page to a vision model instead of flattening its PDF text.
   Raw LaTeX artifacts trigger
   one corrective translation attempt and are rejected if they persist.
   Translation headings use a compact, consistent size hierarchy around the
