@@ -976,6 +976,9 @@ class FloatButton(QDialog):
                 pass
 
     def translate_pil(self, pil_image) -> bool:
+        # The reader and floating translator share settings. Don't let a
+        # translation start with the previous poll's prompt options.
+        self._reload_settings()
         if self.settings.get("selection_mode", "ocr") == "image":
             clean = pil_image
             _log("image: sending selected pixels directly to the selected model")

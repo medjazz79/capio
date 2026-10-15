@@ -1874,7 +1874,7 @@ class TranslatePopup(QDialog):
     @staticmethod
     def _speech_text_from_document(document: QTextDocument) -> str:
         blocks = []
-        heading_blocks = []
+        speakable_blocks = []
         block = document.begin()
         while block.isValid():
             text = block.text()
@@ -1909,26 +1909,8 @@ class TranslatePopup(QDialog):
                     offset += len(fragment_text)
                     iterator += 1
                 text = "".join(characters)
-            is_heading = bool(block_format.headingLevel())
-            if not is_heading and not is_code:
-                has_bold_text = False
-                is_standalone_bold = True
-                iterator = block.begin()
-                while not iterator.atEnd():
-                    fragment = iterator.fragment()
-                    iterator += 1
-                    if not fragment.isValid() or not fragment.text().strip():
-                        continue
-                    has_bold_text = True
-                    if (
-                        fragment.charFormat().fontWeight()
-                        < QFont.Weight.DemiBold
-                    ):
-                        is_standalone_bold = False
-                        break
-                is_heading = has_bold_text and is_standalone_bold
             blocks.append(text)
-            heading_blocks.append(is_heading)
+            speakable_blocks.append(bool(text.strip()))
             block = block.next()
 
         speech_parts = []
@@ -1939,7 +1921,11 @@ class TranslatePopup(QDialog):
                     r"[.!?…،,;:؛]\s*$", text))
                 separator = (
                     ","
-                    if heading_blocks[index] and not has_terminal_punctuation
+                    if (
+                        speakable_blocks[index]
+                        and speakable_blocks[index + 1]
+                        and not has_terminal_punctuation
+                    )
                     else "\n"
                 )
                 speech_parts.append(separator)

@@ -11529,6 +11529,36 @@ class TestFloat(_GuiCase):
         except RuntimeError:
             pass
 
+    def test_floating_translation_uses_latest_shared_tashkeel_setting(self):
+        from unittest import mock
+        from config.settings import DEFAULTS
+        from main_02 import FloatButton
+
+        floating = FloatButton()
+        floating.settings = dict(
+            DEFAULTS, selection_mode="ocr", arabic_tashkeel=False)
+        latest = dict(floating.settings, arabic_tashkeel=True)
+        try:
+            with (
+                mock.patch("main_02.load", return_value=latest),
+                mock.patch("translators.ocr.is_available", return_value=True),
+                mock.patch(
+                    "translators.ocr.prepare_image",
+                    return_value=object(),
+                ),
+                mock.patch(
+                    "popup.translate_popup.TranslatePopup",
+                ) as popup_type,
+            ):
+                self.assertTrue(floating.translate_pil(object()))
+
+            settings_used = popup_type.call_args.args[0]
+            self.assertTrue(settings_used["arabic_tashkeel"])
+            self.assertEqual(settings_used["target_language"], "ar")
+        finally:
+            floating.popups.clear()
+            self._close_float(floating)
+
     def test_floating_settings_refresh_preserves_floating_languages(self):
         from unittest import mock
         from config.settings import DEFAULTS

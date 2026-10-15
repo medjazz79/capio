@@ -65,6 +65,19 @@ class TestTranslationChat(unittest.TestCase):
             len("الهوية الحقيقية للضحية\nلم تكن هوية الرجل معروفة."),
         )
 
+    def test_speech_adds_a_comma_pause_between_all_paragraphs(self):
+        from popup.translate_popup import TranslatePopup
+
+        cases = (
+            ("المحتويان\n\nالمقدمة", "المحتويان,المقدمة"),
+            ("كلمة مفردة\n\nالجملة التالية", "كلمة مفردة,الجملة التالية"),
+            ("الجملة الأولى.\n\nالجملة الثانية.", "الجملة الأولى.\nالجملة الثانية."),
+        )
+        for markdown, expected in cases:
+            with self.subTest(markdown=markdown):
+                self.assertIn(
+                    expected, TranslatePopup._markdown_speech_text(markdown))
+
     def test_math_dollar_delimiters_do_not_consume_currency_amounts(self):
         from popup.translate_popup import TranslatePopup
 
