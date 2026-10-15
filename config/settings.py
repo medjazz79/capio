@@ -110,6 +110,8 @@ DEFAULTS = {
     "translation_font_latin": "",
     "arabic_tashkeel": False,
     "theme": "Dark Slate",
+    "color_scheme": "system",
+    "pdf_canvas_theme_background": False,
     "speech_engine": "edge",
     "gemini_tts_voice": "Kore",
     "speech_rate": 1.0,
@@ -256,6 +258,14 @@ def load() -> dict:
             pass
     merged = dict(DEFAULTS)
     merged.update({k: v for k, v in data.items() if k in DEFAULTS})
+    if "color_scheme" not in data:
+        merged["color_scheme"] = (
+            "light" if merged.get("theme") == "Pure Light"
+            else "dark" if settings_file_loaded
+            else "system"
+        )
+    if merged.get("color_scheme") not in ("system", "dark", "light"):
+        merged["color_scheme"] = "system"
 
     providers_path = _custom_providers_path()
     providers_file_exists = False

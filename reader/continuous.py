@@ -213,6 +213,7 @@ class ContinuousReader(QScrollArea):
         self._render_worker = None
 
         self._container = QWidget()
+        self._container.setObjectName("pdfPageContainer")
         self._layout = QVBoxLayout(self._container)
         self._layout.setSpacing(8)
         self._layout.setContentsMargins(6, 6, 6, 6)

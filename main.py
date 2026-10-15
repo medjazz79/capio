@@ -74,7 +74,7 @@ from reader.continuous import ContinuousReader  # noqa: F401 (used in tests)
 from translators import ocr
 from translators.prompt import LANGUAGE_CHOICES
 from ui.file_drop import local_document_paths
-from ui.theme import THEMES
+from ui.theme import THEMES, theme_colors
 
 APP_STYLE_TEMPLATE = """
 * {
@@ -255,8 +255,11 @@ QTabBar::tab:hover:!selected {
 
 /* Scroll Area & Canvas */
 QScrollArea#pdfCanvas { 
-    background-color: @canvas@; 
+    background-color: @pdf_canvas@;
     border: none; 
+}
+QWidget#pdfPageContainer {
+    background-color: @pdf_canvas@;
 }
 QSplitter::handle { 
     background-color: @border@; 
@@ -420,11 +423,18 @@ QLabel#thumbItemActive {
 """
 
 
-def app_stylesheet(theme: str = "Dark Slate") -> str:
-    colors = THEMES.get(theme, THEMES["Dark Slate"])
+def app_stylesheet(
+    theme: str = "Dark Slate",
+    scheme: str = "dark",
+    pdf_canvas_theme_background: bool = False,
+) -> str:
+    colors = theme_colors(theme, scheme)
     style = APP_STYLE_TEMPLATE
     for key, value in colors.items():
         style = style.replace(f"@{key}@", value)
+    pdf_canvas = (
+        colors["canvas"] if pdf_canvas_theme_background else "#F1F3F5")
+    style = style.replace("@pdf_canvas@", pdf_canvas)
     return style
 
 
@@ -528,7 +538,11 @@ class MainWindow(QMainWindow):
         self.settings["theme"] = saved_theme if saved_theme in THEMES else "Dark Slate"
         app = QApplication.instance()
         self._previous_app_stylesheet = app.styleSheet()
-        QApplication.instance().setStyleSheet(app_stylesheet(self.settings["theme"]))
+        app.setStyleSheet(app_stylesheet(
+            self.settings["theme"], self.settings.get("color_scheme", "system"),
+            bool(self.settings.get("pdf_canvas_theme_background", False))))
+        app.styleHints().colorSchemeChanged.connect(
+            self._on_system_color_scheme_changed)
         self._closing = False
         self._shutdown_confirmed = False
         self._shutdown_waiting = False
@@ -1392,7 +1406,10 @@ class MainWindow(QMainWindow):
         book.set_thumbs_visible(self.thumbs_action.isChecked())
         if hasattr(book, "apply_theme"):
             try:
-                book.apply_theme(THEMES.get(self.settings.get("theme", "Dark Slate"), THEMES["Dark Slate"]))
+                book.apply_theme(theme_colors(
+                    self.settings.get("theme", "Dark Slate"),
+                    self.settings.get("color_scheme", "system"),
+                ))
             except Exception:
                 pass
         self._update_empty()
@@ -1623,7 +1640,11 @@ class MainWindow(QMainWindow):
         if theme not in THEMES:
             theme = "Dark Slate"
             self.settings["theme"] = theme
-        QApplication.instance().setStyleSheet(app_stylesheet(theme))
+        scheme = self.settings.get("color_scheme", "system")
+        app = QApplication.instance()
+        app.setStyleSheet(app_stylesheet(
+            theme, scheme,
+            bool(self.settings.get("pdf_canvas_theme_background", False))))
         self._sync_theme_button(theme)
         thumbs_visible = bool(self.settings.get("thumbs_visible", False))
         self.thumbs_action.blockSignals(True)
@@ -1632,7 +1653,7 @@ class MainWindow(QMainWindow):
 
         for book in self._iter_books():
             book.set_thumbs_visible(thumbs_visible)
-            book.apply_theme(THEMES[theme])
+            book.apply_theme(theme_colors(theme, scheme))
             book.refresh_content()
         for popup in self.popups:
             if popup.isVisible():
@@ -2347,6 +2368,12 @@ class MainWindow(QMainWindow):
             self.settings = dlg.values()
             self._sync_language_combos()
             save(self.settings)
+            QApplication.instance().setStyleSheet(app_stylesheet(
+                self.settings.get("theme", "Dark Slate"),
+                self.settings.get("color_scheme", "system"),
+                bool(self.settings.get("pdf_canvas_theme_background", False)),
+            ))
+            self._apply_theme_to_books(self.settings.get("theme", "Dark Slate"))
             for popup in self.popups:
                 if popup.isVisible():
                     popup.refresh_display(self.settings)
@@ -2359,13 +2386,31 @@ class MainWindow(QMainWindow):
         if theme not in THEMES:
             return
         self.settings["theme"] = theme
+        if theme == "Pure Light":
+            self.settings["color_scheme"] = "light"
         self._sync_theme_button(theme)
-        QApplication.instance().setStyleSheet(app_stylesheet(theme))
+        QApplication.instance().setStyleSheet(app_stylesheet(
+            theme,
+            self.settings.get("color_scheme", "system"),
+            bool(self.settings.get("pdf_canvas_theme_background", False)),
+        ))
         self._apply_theme_to_books(theme)
         for popup in self.popups:
             if popup.isVisible():
                 popup.refresh_display(self.settings)
         save(self.settings)
+
+    def _on_system_color_scheme_changed(self, _scheme=None) -> None:
+        if self.settings.get("color_scheme", "system") != "system":
+            return
+        theme = self.settings.get("theme", "Dark Slate")
+        QApplication.instance().setStyleSheet(app_stylesheet(
+            theme, "system",
+            bool(self.settings.get("pdf_canvas_theme_background", False))))
+        self._apply_theme_to_books(theme)
+        for popup in self.popups:
+            if popup.isVisible():
+                popup.refresh_display(self.settings)
 
     def _show_model_usage(self, model_label: str, token_line: str) -> None:
         """Put the answering model and its running cost in the toolbar corner.
@@ -2466,7 +2511,8 @@ class MainWindow(QMainWindow):
         panel. Requires `BookView.apply_theme(colors: dict)` to exist in
         reader/bookview.py (it should restyle the thumbs panel/background,
         thumbnail cards, scrollbars, etc. using the same keys as THEMES)."""
-        colors = THEMES.get(theme, THEMES["Dark Slate"])
+        colors = theme_colors(
+            theme, self.settings.get("color_scheme", "system"))
         for book in self._iter_books():
             if hasattr(book, "apply_theme"):
                 try:
@@ -2483,6 +2529,24 @@ class MainWindow(QMainWindow):
                 self._sync_language_combos()
                 self._sync_selection_mode_button()
                 self._refresh_engine_label()
+                theme_changed = (
+                    cur.get("theme") != old.get("theme")
+                    or cur.get("color_scheme") != old.get("color_scheme")
+                    or cur.get("pdf_canvas_theme_background")
+                    != old.get("pdf_canvas_theme_background")
+                )
+                if theme_changed:
+                    theme = cur.get("theme", "Dark Slate")
+                    if theme not in THEMES:
+                        theme = "Dark Slate"
+                        self.settings["theme"] = theme
+                    scheme = cur.get("color_scheme", "system")
+                    QApplication.instance().setStyleSheet(app_stylesheet(
+                        theme, scheme,
+                        bool(cur.get("pdf_canvas_theme_background", False)),
+                    ))
+                    self._sync_theme_button(theme)
+                    self._apply_theme_to_books(theme)
                 if (cur.get("font_size") != old.get("font_size")
                         or cur.get("translation_font")
                         != old.get("translation_font")
@@ -2497,6 +2561,7 @@ class MainWindow(QMainWindow):
                         != old.get("translation_side_margin_px")
                         or cur.get("translation_top_bottom_margin_px")
                         != old.get("translation_top_bottom_margin_px")
+                        or theme_changed
                         or cur.get("explain_mode") != old.get("explain_mode")
                         or cur.get("explain_instructions")
                         != old.get("explain_instructions")):
@@ -2811,7 +2876,9 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         app.removeEventFilter(self._thumbs_wheel_filter)
         if app.styleSheet() == app_stylesheet(
-                self.settings.get("theme", "Dark Slate")):
+                self.settings.get("theme", "Dark Slate"),
+                self.settings.get("color_scheme", "system"),
+                bool(self.settings.get("pdf_canvas_theme_background", False))):
             app.setStyleSheet(self._previous_app_stylesheet)
         self._save_session_soon()
         try:

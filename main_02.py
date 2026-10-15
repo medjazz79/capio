@@ -62,7 +62,7 @@ from PySide6.QtWidgets import (
 from config.settings import load, save
 from popup.translate_popup import TranslatePopup
 from ui.file_drop import local_document_paths
-from ui.theme import THEMES
+from ui.theme import THEMES, theme_colors
 
 log = get_logger("float")
 
@@ -680,6 +680,8 @@ class FloatButton(QDialog):
         app = QApplication.instance()
         if app is not None:
             app.setQuitOnLastWindowClosed(False)
+            app.styleHints().colorSchemeChanged.connect(
+                self._on_system_color_scheme_changed)
 
         pos = self.settings.get("float_pos") or []
         if len(pos) == 2:
@@ -709,8 +711,11 @@ class FloatButton(QDialog):
         self.settings = cur
         self._sync_selection_mode_actions()
         self._sync_explain_action()
-        if cur.get("theme") != old.get("theme"):
+        theme_changed = cur.get("theme") != old.get("theme")
+        scheme_changed = cur.get("color_scheme") != old.get("color_scheme")
+        if theme_changed:
             self._sync_theme_actions()
+        if theme_changed or scheme_changed:
             self._apply_float_theme()
         if (cur.get("font_size") != old.get("font_size")
                 or cur.get("translation_font") != old.get("translation_font")
@@ -723,13 +728,22 @@ class FloatButton(QDialog):
                 or cur.get("line_spacing_px") != old.get("line_spacing_px")
                 or cur.get("translation_side_margin_px")
                 != old.get("translation_side_margin_px")
-                or cur.get("theme") != old.get("theme")
+                or theme_changed
+                or scheme_changed
                 or cur.get("explain_mode") != old.get("explain_mode")
                 or cur.get("explain_instructions")
                 != old.get("explain_instructions")):
             for popup in self.popups:
                 if popup.isVisible():
                     popup.refresh_display(self._popup_settings())
+
+    def _on_system_color_scheme_changed(self, _scheme=None) -> None:
+        if self.settings.get("color_scheme", "system") != "system":
+            return
+        self._apply_float_theme()
+        for popup in self.popups:
+            if popup.isVisible():
+                popup.refresh_display(self._popup_settings())
 
     def event(self, event):
         handled = super().event(event)
@@ -1096,7 +1110,8 @@ class FloatButton(QDialog):
 
     def _apply_float_theme(self) -> None:
         theme = self.settings.get("theme", "Dark Slate")
-        colors = THEMES.get(theme, THEMES["Dark Slate"])
+        colors = theme_colors(
+            theme, self.settings.get("color_scheme", "system"))
         self.btn.setStyleSheet(
             "QPushButton { "
             f"background-color: {colors['accent']}; "
@@ -1125,11 +1140,15 @@ class FloatButton(QDialog):
         if theme not in THEMES:
             raise ValueError(f"Unknown theme: {theme!r}")
         previous = self.settings.get("theme", "Dark Slate")
+        previous_scheme = self.settings.get("color_scheme", "system")
         self.settings["theme"] = theme
+        if theme == "Pure Light":
+            self.settings["color_scheme"] = "light"
         try:
             save(self.settings)
         except OSError:
             self.settings["theme"] = previous
+            self.settings["color_scheme"] = previous_scheme
             self._sync_theme_actions()
             log.exception("could not save floating translator theme")
             QMessageBox.warning(

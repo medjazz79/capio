@@ -36,7 +36,7 @@ from config.settings import (
     MIN_TRANSLATION_TOP_BOTTOM_MARGIN_PX, SETTINGS_PATH, resolve_model,
 )
 from translators.registry import detect_flm_base
-from ui.theme import THEMES, settings_stylesheet
+from ui.theme import THEMES, settings_stylesheet, theme_colors
 
 log = get_logger("settings")
 
@@ -499,7 +499,11 @@ class SettingsDialog(QDialog):
         self._auto_fetch_timers: dict[str, QTimer] = {}
         self._auto_fetch_in_progress: set[str] = set()
         self._auto_fetch_last: dict[str, tuple[str, str]] = {}
-        self.setStyleSheet(settings_stylesheet(self._settings.get("theme", "Dark Slate")))
+        self._settings.setdefault("color_scheme", "system")
+        self.setStyleSheet(settings_stylesheet(
+            self._settings.get("theme", "Dark Slate"),
+            self._settings.get("color_scheme", "system"),
+        ))
         self.probeDone.connect(self._on_probe_done)
         self.verifyDone.connect(self._on_verify_done)
         self.autoModelsFetched.connect(self._on_auto_fetch_done)
@@ -853,9 +857,27 @@ class SettingsDialog(QDialog):
         if not isinstance(theme, str) or theme not in THEMES:
             return
         self._settings["theme"] = theme
-        self.setStyleSheet(settings_stylesheet(theme))
-        # Re-apply per-widget themed styles that were set inline
+        if theme == "Pure Light":
+            self._settings["color_scheme"] = "light"
+            self.color_scheme_combo.setCurrentIndex(
+                self.color_scheme_combo.findData("light"))
+        self._apply_theme_style()
 
+    def _on_color_scheme_changed(self, _idx: int) -> None:
+        scheme = self.color_scheme_combo.currentData()
+        if scheme not in ("system", "dark", "light"):
+            return
+        self._settings["color_scheme"] = scheme
+        if scheme == "dark" and self._settings.get("theme") == "Pure Light":
+            self._settings["theme"] = "Dark Slate"
+            self.header_theme_combo.setCurrentIndex(
+                self.header_theme_combo.findData("Dark Slate"))
+        self._apply_theme_style()
+
+    def _apply_theme_style(self) -> None:
+        theme = self._settings.get("theme", "Dark Slate")
+        scheme = self._settings.get("color_scheme", "system")
+        self.setStyleSheet(settings_stylesheet(theme, scheme))
         try:
             colors = self._theme_colors()
             # model_instructions uses inline surface/border colors
@@ -887,8 +909,10 @@ class SettingsDialog(QDialog):
             self.move(int(position[0]), int(position[1]))
 
     def _theme_colors(self) -> dict[str, str]:
-        return THEMES.get(
-            self._settings.get("theme", "Dark Slate"), THEMES["Dark Slate"])
+        return theme_colors(
+            self._settings.get("theme", "Dark Slate"),
+            self._settings.get("color_scheme", "system"),
+        )
 
     def minimumSizeHint(self) -> QSize:
         return QSize(520, 420)
@@ -1063,6 +1087,33 @@ class SettingsDialog(QDialog):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(16)
         lay.addWidget(self._section_header("STYLE", "Appearance", "Typography and readability controls. Changes apply instantly to any open translation."))
+
+        color_card = QGroupBox("COLOR THEME")
+        color_form = QFormLayout(color_card)
+        color_form.setSpacing(10)
+        self.color_scheme_combo = QComboBox()
+        for label, value in (
+            ("Follow system", "system"),
+            ("Dark", "dark"),
+            ("Light", "light"),
+        ):
+            self.color_scheme_combo.addItem(label, value)
+        scheme = self._settings.get("color_scheme", "system")
+        scheme_index = self.color_scheme_combo.findData(scheme)
+        self.color_scheme_combo.setCurrentIndex(
+            max(0, scheme_index))
+        self.color_scheme_combo.currentIndexChanged.connect(
+            self._on_color_scheme_changed)
+        color_form.addRow("Color scheme", self.color_scheme_combo)
+        self.pdf_canvas_theme_check = QCheckBox(
+            "Match background around PDF pages to theme")
+        self.pdf_canvas_theme_check.setChecked(bool(
+            s.get("pdf_canvas_theme_background", False)))
+        self.pdf_canvas_theme_check.setToolTip(
+            "Use the active theme color in the spaces around pages. "
+            "The PDF page appearance is unchanged.")
+        color_form.addRow(self.pdf_canvas_theme_check)
+        lay.addWidget(color_card)
 
         # ── Typography card ──
         typo_card = QGroupBox("TYPOGRAPHY")
@@ -3956,6 +4007,9 @@ class SettingsDialog(QDialog):
             pass
         out.update({
             "theme": self._settings.get("theme", "Dark Slate"),
+            "color_scheme": self._settings.get("color_scheme", "system"),
+            "pdf_canvas_theme_background":
+                self.pdf_canvas_theme_check.isChecked(),
             "model": self._current_model(),
             "gemini_key": self.gemini_key.text().strip(),
             "opencode_cli_models": list(self._live_cli if self._live_cli is not None else self._settings.get("opencode_cli_models") or []),

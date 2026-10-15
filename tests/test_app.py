@@ -2565,11 +2565,14 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
     def test_font_size_field_uses_selected_settings_theme_colors(self):
         from config.settings import DEFAULTS
         from ui.settings_dialog import SettingsDialog
-        from ui.theme import THEMES
+        from ui.theme import THEMES, theme_colors
 
-        for theme_name, colors in THEMES.items():
+        for theme_name in THEMES:
             with self.subTest(theme=theme_name):
-                dialog = SettingsDialog(dict(DEFAULTS, theme=theme_name))
+                scheme = "light" if theme_name == "Pure Light" else "dark"
+                colors = theme_colors(theme_name, scheme)
+                dialog = SettingsDialog(dict(
+                    DEFAULTS, theme=theme_name, color_scheme=scheme))
                 try:
                     self.assertIn("QDoubleSpinBox", dialog.styleSheet())
                     self.assertIn(
@@ -11333,26 +11336,93 @@ class TestMemoryZoom(_GuiCase):
                 pass
 
     def test_theme_selector_applies_and_saves_theme(self):
-        from main import MainWindow
+        from main import MainWindow, THEMES
         from config.settings import load
+        from ui.theme import theme_colors
         win = MainWindow()
         try:
             self.assertEqual(win.settings["theme"], "Dark Slate")
-            self.assertIn("#0D1117", self.app.styleSheet())
+            self.assertIn(
+                theme_colors("Dark Slate", win.settings["color_scheme"])["accent"],
+                self.app.styleSheet(),
+            )
             self.assertIsNotNone(win.theme_button.parentWidget())
             self.assertEqual(
                 [action.text() for action in win.theme_menu.actions()],
-                ["Dark Slate", "Midnight Blue", "Nordic Gray", "Pure Light"])
+                list(THEMES))
+            self.assertGreaterEqual(len(win.theme_menu.actions()), 16)
             self.assertIn("min-height: 32px", self.app.styleSheet())
             win._theme_actions["Midnight Blue"].trigger()
             self.assertEqual(win.settings["theme"], "Midnight Blue")
-            self.assertIn("#0F172A", self.app.styleSheet())
+            self.assertIn(
+                theme_colors("Midnight Blue", win.settings["color_scheme"])["accent"],
+                self.app.styleSheet(),
+            )
             self.assertEqual(load()["theme"], "Midnight Blue")
             win._theme_actions["Pure Light"].trigger()
             self.assertEqual(win.settings["theme"], "Pure Light")
-            self.assertIn("#F8FAFC", self.app.styleSheet())
+            self.assertEqual(win.settings["color_scheme"], "light")
+            self.assertEqual(load()["color_scheme"], "light")
+            self.assertIn(
+                theme_colors("Pure Light", "light")["accent"],
+                self.app.styleSheet(),
+            )
             win._theme_actions["Nordic Gray"].trigger()
-            self.assertIn("#242933", self.app.styleSheet())
+            self.assertIn(
+                theme_colors("Nordic Gray", win.settings["color_scheme"])["accent"],
+                self.app.styleSheet(),
+            )
+        finally:
+            try:
+                win.close()
+            except RuntimeError:
+                pass
+
+    def test_system_color_scheme_change_updates_main_window_and_popups(self):
+        from unittest import mock
+        from main import MainWindow, app_stylesheet
+
+        win = MainWindow()
+        popup = mock.Mock()
+        popup.isVisible.return_value = True
+        win.popups = [popup]
+        win.settings["color_scheme"] = "system"
+        try:
+            win._on_system_color_scheme_changed()
+
+            self.assertEqual(
+                self.app.styleSheet(),
+                app_stylesheet(win.settings["theme"], "system"),
+            )
+            popup.refresh_display.assert_called_once_with(win.settings)
+        finally:
+            try:
+                win.close()
+            except RuntimeError:
+                pass
+
+    def test_pdf_canvas_theme_setting_reloads_from_shared_settings(self):
+        from unittest import mock
+        from main import MainWindow, app_stylesheet
+
+        win = MainWindow()
+        try:
+            updated = dict(
+                win.settings,
+                pdf_canvas_theme_background=True,
+            )
+            with mock.patch("main.load", return_value=updated):
+                win._reload_settings()
+
+            self.assertTrue(win.settings["pdf_canvas_theme_background"])
+            self.assertEqual(
+                self.app.styleSheet(),
+                app_stylesheet(
+                    win.settings["theme"],
+                    win.settings["color_scheme"],
+                    True,
+                ),
+            )
         finally:
             try:
                 win.close()
@@ -11752,6 +11822,7 @@ class TestFloat(_GuiCase):
         floating.popups = [popup]
         floating.settings = dict(
             DEFAULTS,
+            color_scheme="dark",
             source_language="en",
             target_language="ar",
             float_source_language="de",
@@ -11759,6 +11830,7 @@ class TestFloat(_GuiCase):
         )
         updated = dict(
             floating.settings,
+            color_scheme="light",
             font_size=23,
             line_spacing_px=5,
             translation_side_margin_px=29,
@@ -11774,6 +11846,38 @@ class TestFloat(_GuiCase):
             self.assertEqual(applied["translation_side_margin_px"], 29)
             self.assertEqual(applied["source_language"], "de")
             self.assertEqual(applied["target_language"], "fr")
+            self.assertEqual(applied["color_scheme"], "light")
+            from ui.theme import theme_colors
+            self.assertIn(
+                theme_colors("Dark Slate", "light")["accent"],
+                floating.btn.styleSheet(),
+            )
+        finally:
+            self._close_float(floating)
+
+    def test_floating_system_color_change_refreshes_bubble_and_popups(self):
+        from unittest import mock
+        from config.settings import DEFAULTS
+        from main_02 import FloatButton
+        from ui.theme import theme_colors
+
+        floating = FloatButton()
+        floating.settings = dict(DEFAULTS, color_scheme="system")
+        popup = mock.Mock()
+        popup.isVisible.return_value = True
+        floating.popups = [popup]
+        try:
+            floating._on_system_color_scheme_changed()
+
+            self.assertIn(
+                theme_colors("Dark Slate", "system")["accent"],
+                floating.btn.styleSheet(),
+            )
+            popup.refresh_display.assert_called_once()
+            self.assertEqual(
+                popup.refresh_display.call_args.args[0]["color_scheme"],
+                "system",
+            )
         finally:
             self._close_float(floating)
 

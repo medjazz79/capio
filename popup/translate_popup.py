@@ -58,7 +58,7 @@ from config.settings import (
     MIN_TRANSLATION_SIDE_MARGIN_PX,
     MIN_TRANSLATION_TOP_BOTTOM_MARGIN_PX, load, save,
 )
-from ui.theme import THEMES
+from ui.theme import theme_colors
 
 _MARKDOWN_HTML_TAGS = frozenset({
     "a", "address", "article", "aside", "b", "blockquote", "br", "caption",
@@ -636,8 +636,10 @@ class TranslatePopup(QDialog):
         self.explain_btn.blockSignals(True)
         self.explain_btn.setChecked(enabled)
         self.explain_btn.blockSignals(False)
-        colors = THEMES.get(
-            self.settings.get("theme", "Dark Slate"), THEMES["Dark Slate"])
+        colors = theme_colors(
+            self.settings.get("theme", "Dark Slate"),
+            self.settings.get("color_scheme", "system"),
+        )
         self.explain_btn.setStyleSheet(
             "QPushButton#explainModeButton { "
             "background: transparent; border: 1px solid #d8dde4; "

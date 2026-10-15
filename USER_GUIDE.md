@@ -144,8 +144,12 @@ Works on **both** kinds of PDFs:
   to zoom its pages.
 - Books open progressively; thumbnails are populated only when the pages
   panel is shown, reducing work during PDF loading.
-- Choose **Dark Slate**, **Midnight Blue**, **Nordic Gray**, or **Pure Light**
-  from the toolbar to change the application theme; the selection is remembered.
+- Choose any built-in theme from the toolbar; the selection is remembered.
+  Under **Settings → Appearance**, set **Color scheme** to **Follow system**,
+  **Dark**, or **Light**. Enable **Match background around PDF pages to theme**
+  to color the area around and between pages with the active theme; page content
+  stays unchanged. The floating translator follows the same theme and
+  color-scheme setting.
 - No bars around the pages — messages flash briefly in the window title.
 ## Window layout
 
@@ -278,8 +282,9 @@ language checks, notation handling, speech behavior, provider retries, and
 fallback chain as the main reader. Esc/right-click cancels the selection; the
 taskbar is never covered.
 Drop a PDF onto the floating button to open it in the main PDF reader.
-The bubble and tray menus also offer the same four themes as the reader; theme
-changes made in either app are picked up by the other. If OCR is unavailable,
+The bubble and tray menus also offer the same built-in themes as the reader;
+theme and color-scheme changes made in either app are picked up by the other.
+If OCR is unavailable,
 the floating translator explains that OneOCR from Windows 11 Snipping Tool is
 required and offers Image mode as an alternative.
 
