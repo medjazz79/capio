@@ -2739,7 +2739,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
 
     def test_translation_font_with_extreme_metrics_falls_back_to_ui_font(self):
         from unittest import mock
-        from PySide6.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication, QWidget
         from config.settings import DEFAULTS
         from popup.translate_popup import TranslatePopup
 
@@ -7853,6 +7853,8 @@ class TestReaderZoom(_GuiCase):
             popup._translation_text = "translated"
             popup._render_translation()
             popup.result.show()
+            original_popup_style = popup.styleSheet()
+            original_result_style = popup.result.styleSheet()
             updated = dict(
                 settings,
                 theme="Everforest",
@@ -7867,11 +7869,11 @@ class TestReaderZoom(_GuiCase):
             render.assert_not_called()
             self.assertIs(popup.settings, updated)
             self.assertEqual(popup.result.toPlainText(), "translated")
-            from ui.theme import theme_colors
-            colors = theme_colors("Everforest", "light")
-            self.assertIn(colors["window"], popup.styleSheet())
-            self.assertIn(colors["surface"], popup.result.styleSheet())
-            self.assertIn(colors["text"], popup.result.styleSheet())
+            self.assertEqual(popup.styleSheet(), original_popup_style)
+            self.assertEqual(popup.result.styleSheet(), original_result_style)
+            self.assertIn("#f7f8fa", popup.styleSheet())
+            self.assertIn("#f1f3f6", popup.result.styleSheet())
+            self.assertIn("#222831", popup.result.styleSheet())
             updated_font = dict(
                 updated, font_size=float(settings.get("font_size", 17)) + 1)
             with mock.patch.object(
@@ -7899,6 +7901,74 @@ class TestReaderZoom(_GuiCase):
             except RuntimeError:
                 pass
             popup.close()
+
+    def test_streamed_translation_uses_the_markdown_body_font_size(self):
+        from unittest import mock
+        from PySide6.QtWidgets import QApplication, QWidget
+        from popup.translate_popup import TranslatePopup
+        from PySide6.QtGui import QTextCursor
+
+        from main import app_stylesheet
+
+        app = QApplication.instance()
+        self.assertIsNotNone(app)
+        old_stylesheet = app.styleSheet()
+        app.setStyleSheet(app_stylesheet("Dark Slate", "dark"))
+        settings = dict(DEFAULTS, font_size=28)
+        parent = QWidget()
+        with mock.patch.object(TranslatePopup, "_start_translation_worker"):
+            popup = TranslatePopup(settings, parent=parent)
+        try:
+            streamed_text = (
+                "### Streamed heading\n\n"
+                "Body sentinel with the same text size"
+            )
+            popup._append_streamed_partial(streamed_text[:20])
+            popup._append_streamed_partial(streamed_text)
+            self.assertIn("font-size: 28pt", popup.result.styleSheet())
+            self.assertNotIn("font-size: -1pt", popup.result.styleSheet())
+
+            document = popup.result.document()
+            body_start = document.toPlainText().index("Body sentinel")
+            body_cursor = QTextCursor(document)
+            body_cursor.setPosition(body_start)
+            body_cursor.setPosition(
+                body_start + len("Body sentinel"),
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            streamed_size = body_cursor.charFormat().fontPointSize()
+            self.assertAlmostEqual(streamed_size, 28)
+
+            updated = dict(settings, font_size=30)
+            popup.refresh_display(updated)
+            document = popup.result.document()
+            body_start = document.toPlainText().index("Body sentinel")
+            body_cursor = QTextCursor(document)
+            body_cursor.setPosition(body_start)
+            body_cursor.setPosition(
+                body_start + len("Body sentinel"),
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            self.assertAlmostEqual(
+                body_cursor.charFormat().fontPointSize(), 30)
+
+            popup._translation_text = streamed_text
+            popup._render_translation()
+            document = popup.result.document()
+            body_start = document.toPlainText().index("Body sentinel")
+            body_cursor = QTextCursor(document)
+            body_cursor.setPosition(body_start)
+            body_cursor.setPosition(
+                body_start + len("Body sentinel"),
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            self.assertAlmostEqual(
+                body_cursor.charFormat().font().pointSizeF(), 30)
+            self.assertAlmostEqual(document.defaultFont().pointSizeF(), 30)
+        finally:
+            popup.close()
+            parent.close()
+            app.setStyleSheet(old_stylesheet)
 
     def _badge_after(self, badge):
         from unittest import mock
@@ -11975,25 +12045,25 @@ class TestFloat(_GuiCase):
             app.setStyleSheet(previous_stylesheet)
             self._close_float(floating)
 
-    def test_floating_theme_selection_updates_popup_colors(self):
+    def test_floating_theme_selection_keeps_popup_colors_fixed(self):
         from unittest import mock
-        from config.settings import DEFAULTS
         from main_02 import FloatButton
         from popup.translate_popup import TranslatePopup
-        from ui.theme import theme_colors
 
         floating = FloatButton()
         popup = TranslatePopup(dict(floating.settings))
         floating.popups = [popup]
         popup.show()
         try:
+            original_popup_style = popup.styleSheet()
+            original_result_style = popup.result.styleSheet()
             with mock.patch("main_02.save"):
                 floating._set_theme("Amoled")
 
-            colors = theme_colors("Amoled", floating.settings["color_scheme"])
-            self.assertIn(colors["window"], popup.styleSheet())
-            self.assertIn(colors["surface"], popup.result.styleSheet())
-            self.assertIn(colors["text"], popup.result.styleSheet())
+            self.assertEqual(popup.styleSheet(), original_popup_style)
+            self.assertEqual(popup.result.styleSheet(), original_result_style)
+            self.assertIn("#f7f8fa", popup.styleSheet())
+            self.assertIn("#f1f3f6", popup.result.styleSheet())
             self.assertEqual(popup.settings["theme"], "Amoled")
         finally:
             self._close_float(floating)

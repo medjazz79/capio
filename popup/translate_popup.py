@@ -58,8 +58,21 @@ from config.settings import (
     MIN_TRANSLATION_SIDE_MARGIN_PX,
     MIN_TRANSLATION_TOP_BOTTOM_MARGIN_PX, load, save,
 )
-from ui.theme import theme_colors
 
+_POPUP_COLORS = {
+    "window": "#f7f8fa",
+    "panel": "#f7f8fa",
+    "surface": "#f1f3f6",
+    "surface_hover": "#e9edf2",
+    "text": "#222831",
+    "muted": "#52677f",
+    "border": "#d8dde4",
+    "accent": "#3b82f6",
+    "accent_hover": "#2563eb",
+    "accent_light": "#60a5fa",
+    "selection": "#fff2a8",
+    "warning": "#b45309",
+}
 _MARKDOWN_HTML_TAGS = frozenset({
     "a", "address", "article", "aside", "b", "blockquote", "br", "caption",
     "center", "cite", "code", "dd", "del", "details", "div", "dl", "dt",
@@ -464,7 +477,7 @@ class TranslatePopup(QDialog):
         self._speech_prefetch_timer.setInterval(SPEECH_PREFETCH_DELAY_MS)
         self._speech_prefetch_timer.timeout.connect(self._start_speech_prefetch)
 
-        self._apply_popup_theme()
+        self._apply_popup_style()
         self._start_translation_worker(
             text=source_text if pil_image is None else None,
             pil_image=pil_image,
@@ -611,10 +624,7 @@ class TranslatePopup(QDialog):
         self.explain_btn.blockSignals(True)
         self.explain_btn.setChecked(enabled)
         self.explain_btn.blockSignals(False)
-        colors = theme_colors(
-            self.settings.get("theme", "Dark Slate"),
-            self.settings.get("color_scheme", "system"),
-        )
+        colors = _POPUP_COLORS
         self.explain_btn.setStyleSheet(
             "QPushButton#explainModeButton { "
             f"background: {colors['surface']}; "
@@ -635,7 +645,9 @@ class TranslatePopup(QDialog):
             "Explain mode is off: show translations without an explanation"
         )
 
-    def _save_shared_settings(self, **updates: object) -> bool:
+    def _save_shared_settings(
+        self, *, update_local: bool = True, **updates: object,
+    ) -> bool:
         try:
             persisted = load()
             persisted.update(updates)
@@ -649,7 +661,8 @@ class TranslatePopup(QDialog):
                 "file is writable, then try again.",
             )
             return False
-        self.settings.update(updates)
+        if update_local:
+            self.settings.update(updates)
         return True
 
     def _set_explain_mode(self, enabled: bool) -> None:
@@ -778,6 +791,7 @@ class TranslatePopup(QDialog):
             elif self.result.document().blockCount() > previous_block_count:
                 self._apply_streamed_typography(start_position)
             else:
+                self._apply_streamed_font_size(start_position)
                 self._apply_script_font_families(
                     self.result.document(), start_position)
         else:
@@ -787,6 +801,25 @@ class TranslatePopup(QDialog):
             self.result.setTextCursor(cursor)
             self._apply_streamed_typography()
         self._streamed_partial = text
+
+    def _apply_streamed_font_size(
+        self, start_position: int | None = None,
+    ) -> None:
+        document = self.result.document()
+        point_size = self._translation_font_size(self.settings)
+        font = self._translation_font(self.settings, point_size)
+        document.setDefaultFont(font)
+        end_position = document.characterCount() - 1
+        start = 0 if start_position is None else start_position
+        if point_size <= 0 or end_position <= start:
+            return
+        cursor = QTextCursor(document)
+        cursor.setPosition(start)
+        cursor.setPosition(
+            end_position, QTextCursor.MoveMode.KeepAnchor)
+        char_format = QTextCharFormat()
+        char_format.setFontPointSize(point_size)
+        cursor.mergeCharFormat(char_format)
 
     def _apply_streamed_typography(
         self, start_position: int | None = None,
@@ -805,6 +838,7 @@ class TranslatePopup(QDialog):
         )
         self.result.setLayoutDirection(direction)
         document = self.result.document()
+        self._apply_streamed_font_size(start_position)
         option = document.defaultTextOption()
         option.setTextDirection(direction)
         option.setAlignment(start_alignment)
@@ -933,7 +967,7 @@ class TranslatePopup(QDialog):
         ):
             self.settings = settings
             if theme_changed:
-                self._apply_popup_theme()
+                self._apply_popup_style()
             return
 
         old_explain_mode = bool(self.settings.get("explain_mode", False))
@@ -1033,20 +1067,20 @@ class TranslatePopup(QDialog):
             self._apply_streamed_typography()
         if self._chat_entries:
             self._render_chat_transcript()
-        self._apply_popup_theme()
+        self._apply_popup_style()
 
-    def _apply_popup_theme(self) -> None:
-        colors = theme_colors(
-            self.settings.get("theme", "Dark Slate"),
-            self.settings.get("color_scheme", "system"),
-        )
+    def _apply_popup_style(self) -> None:
+        colors = _POPUP_COLORS
         border = colors["border"]
         text = colors["text"]
         muted = colors["muted"]
-        result_font = self.result.font()
+        translation_font_size = self._translation_font_size(self.settings)
+        translation_font = self._translation_font(
+            self.settings, translation_font_size)
         transcript_font = self.chat_transcript.font()
         input_font = self.chat_input.font()
-        result_family = result_font.family().replace("\\", "\\\\").replace('"', '\\"')
+        result_family = translation_font.family().replace(
+            "\\", "\\\\").replace('"', '\\"')
         transcript_family = transcript_font.family().replace(
             "\\", "\\\\").replace('"', '\\"')
         input_family = input_font.family().replace("\\", "\\\\").replace('"', '\\"')
@@ -1089,8 +1123,9 @@ class TranslatePopup(QDialog):
             f"padding-left: {self._translation_side_margin(self.settings)}px; "
             f"padding-right: {self._translation_side_margin(self.settings)}px; "
             f'font-family: "{result_family}"; '
-            f"font-size: {result_font.pointSizeF():g}pt; }}"
+            f"font-size: {translation_font_size:g}pt; }}"
         )
+        self.result.document().setDefaultFont(translation_font)
         self.chat_transcript.setStyleSheet(
             "QTextBrowser#chatTranscript { "
             f"background-color: {colors['surface']}; color: {text}; "
@@ -1656,25 +1691,27 @@ class TranslatePopup(QDialog):
         )
         if new_size == self._translation_font_size(self.settings):
             return
-        if not self._save_shared_settings(font_size=new_size):
+        if not self._save_shared_settings(
+            update_local=False, font_size=new_size,
+        ):
             return
         owner = self.parentWidget()
         owner_settings = getattr(owner, "settings", None)
-        if isinstance(owner_settings, dict):
-            owner_settings["font_size"] = new_size
-        for popup in getattr(owner, "popups", []):
-            if popup is self or not popup.isVisible():
-                continue
-            popup_settings = getattr(popup, "settings", None)
-            if isinstance(popup_settings, dict):
-                popup_settings["font_size"] = new_size
-                popup.refresh_display(popup_settings)
         scrollbar = self.result.verticalScrollBar()
         previous_max = scrollbar.maximum()
         scroll_fraction = (
             scrollbar.value() / previous_max if previous_max else 0.0
         )
-        self.refresh_display(self.settings)
+        for popup in getattr(owner, "popups", []):
+            if popup is self or not popup.isVisible():
+                continue
+            popup_settings = getattr(popup, "settings", None)
+            if isinstance(popup_settings, dict):
+                popup.refresh_display(
+                    dict(popup_settings, font_size=new_size))
+        self.refresh_display(dict(self.settings, font_size=new_size))
+        if isinstance(owner_settings, dict):
+            owner_settings["font_size"] = new_size
         scrollbar.setValue(round(scroll_fraction * scrollbar.maximum()))
 
     def _apply_line_spacing(self) -> None:
@@ -2479,10 +2516,7 @@ class TranslatePopup(QDialog):
         self.speed_menu.popup(QPoint(x, y))
 
     def _style_speed_button(self) -> None:
-        colors = theme_colors(
-            self.settings.get("theme", "Dark Slate"),
-            self.settings.get("color_scheme", "system"),
-        )
+        colors = _POPUP_COLORS
         self.speed_btn.setStyleSheet(
             "QToolButton { "
             f"background-color: {colors['surface']}; "
