@@ -1110,7 +1110,7 @@ class TranslatePopup(QDialog):
             f"background-color: {colors['panel']}; color: {text}; "
             f"border: 1px solid {border}; }}"
             "QMenu::item:selected { "
-            f"background-color: {colors['selection']}; }}"
+            f"background-color: {colors['selection']}; color: {text}; }}"
             "QSplitter#translationChatSplitter::handle:vertical { "
             f"background-color: {colors['accent_light']}; }}"
             "QSplitter#translationChatSplitter::handle:vertical:hover { "

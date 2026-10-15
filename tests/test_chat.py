@@ -11,6 +11,21 @@ class TestTranslationChat(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_popup_menu_highlight_keeps_readable_text(self):
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        with mock.patch.object(TranslatePopup, "_start_translation_worker"):
+            popup = TranslatePopup(
+                dict(DEFAULTS), floating_language_controls=True)
+        try:
+            self.assertIn(
+                "background-color: #fff2a8; color: #222831",
+                popup.styleSheet(),
+            )
+        finally:
+            popup.close()
+
     def test_fenced_code_blocks_use_compact_colored_monospace_style(self):
         from PySide6.QtGui import QTextDocument
         from popup.translate_popup import TranslatePopup
