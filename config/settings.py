@@ -474,9 +474,9 @@ def _is_dead_prefixed_model(settings: dict, saved: str) -> bool:
 def _is_retired_cli_model(model: str, settings: dict | None = None) -> bool:
     """True when OpenCode itself refuses this model id for any account.
 
-    Zen ids that left the free tier answer 403 for everyone; the CLI surfaces
-    that as a FreeTierError, and keeping a recorded verdict here is how a
-    model measured dead stays out of the picker on the next launch.
+    A current CLI catalog entry is not retired just because it is newer than
+    this app's built-in no-key bridge catalog. Recorded failures still retire
+    it, and legacy free ids absent from the CLI catalog keep the old migration.
     """
     from translators import registry
     check_settings = settings if isinstance(settings, dict) else {}
@@ -484,6 +484,9 @@ def _is_retired_cli_model(model: str, settings: dict | None = None) -> bool:
     if status:
         return True
     bare = model[len(registry.OPENCODE_CLI_PREFIX):]
+    cli_models = check_settings.get("opencode_cli_models")
+    if isinstance(cli_models, list) and bare in cli_models:
+        return False
     return bare not in registry.ZEN_FREE and bare.endswith("-free")
 
 
@@ -496,14 +499,16 @@ def _working_fallback(settings: dict) -> str:
     actually reported instead of guessing the provider prefix.
     """
     from translators import registry
+    from translators import opencode_cli
     cli_models = settings.get("opencode_cli_models")
     if isinstance(cli_models, list):
-        for candidate in cli_models:
-            if not isinstance(candidate, str):
-                continue
-            bare = candidate.rsplit("/", 1)[-1]
-            if bare in registry.ZEN_FREE:
-                return registry.OPENCODE_CLI_PREFIX + candidate
+        status = settings.get("model_status")
+        status = status if isinstance(status, dict) else {}
+        for candidate in opencode_cli.free_models(
+                [item for item in cli_models if isinstance(item, str)]):
+            model = registry.OPENCODE_CLI_PREFIX + candidate
+            if not status.get(model):
+                return model
     if registry.ZEN_FREE:
         try:
             if registry.availability(registry.ZEN_FREE[0], settings)[0]:

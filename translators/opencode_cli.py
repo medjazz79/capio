@@ -15,10 +15,31 @@ from .prompt import system_instructions, user_prompt
 TIMEOUT = 120
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+-]*\Z")
 AGENT_NAME = "harmony-translator"
+_FREE_MODELS_WITHOUT_SUFFIX = frozenset({"big-pickle"})
+_NO_CONSOLE_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class OpenCodeCLIError(RuntimeError):
     """OpenCode CLI is missing, failed, or returned an invalid response."""
+
+
+def free_models(models: list[str]) -> list[str]:
+    """Keep free OpenCode Zen ids from the provider-qualified CLI catalog.
+
+    `opencode models` lists ids without pricing metadata; free Zen ids use the
+    `-free` suffix, with `big-pickle` as the current unsuffixed free model.
+    """
+    free: list[str] = []
+    for model in dict.fromkeys(models):
+        provider, separator, model_id = model.partition("/")
+        if (
+            separator
+            and provider == "opencode"
+            and (model_id.endswith("-free")
+                 or model_id in _FREE_MODELS_WITHOUT_SUFFIX)
+        ):
+            free.append(model)
+    return free
 
 
 def find_executable() -> str | None:
@@ -64,6 +85,7 @@ def list_models(timeout: int = 30) -> list[str]:
             errors="replace",
             timeout=timeout,
             check=False,
+            creationflags=_NO_CONSOLE_WINDOW,
         )
     except subprocess.TimeoutExpired as error:
         raise OpenCodeCLIError("Timed out while listing OpenCode models") from error
@@ -183,6 +205,7 @@ def translate(
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                creationflags=_NO_CONSOLE_WINDOW,
             )
         except subprocess.TimeoutExpired as error:
             raise OpenCodeCLIError(
@@ -255,6 +278,7 @@ def stream_translate(
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    creationflags=_NO_CONSOLE_WINDOW,
                 )
             except OSError as error:
                 raise OpenCodeCLIError(
@@ -382,6 +406,7 @@ def chat(
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                creationflags=_NO_CONSOLE_WINDOW,
             )
         except subprocess.TimeoutExpired as error:
             raise OpenCodeCLIError(

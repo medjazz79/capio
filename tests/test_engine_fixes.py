@@ -1132,6 +1132,33 @@ class TestBadgeNamesTheEngineThatAnswered(unittest.TestCase):
         merged = chain._merge_badges(badges, chosen="gemini-3.5-flash-lite")
         self.assertIn("not your model", merged)
 
+    def test_streaming_403_falls_back_without_retrying_the_blocked_model(self):
+        s = _settings(model="opencode-cli:opencode/space-bunny-free")
+
+        def denied_stream(*_args, **_kwargs):
+            if False:
+                yield ""
+            raise RuntimeError(
+                "403 — free tier blocked for this account")
+
+        with mock.patch(
+            "translators.opencode_cli.stream_translate",
+            side_effect=denied_stream,
+        ) as stream, mock.patch(
+            "translators.opencode_cli.translate",
+        ) as retry, mock.patch(
+            "translators.fallback.gtx_translate",
+            return_value="ترجمة مجانية",
+        ) as free_translation:
+            events = list(chain._stream_single_compatible("source", s))
+
+        self.assertEqual(stream.call_count, 1)
+        retry.assert_not_called()
+        free_translation.assert_called_once()
+        self.assertEqual(events[-1][0], "done")
+        self.assertEqual(events[-1][1], "ترجمة مجانية")
+        self.assertIn("403", events[-1][2])
+
     def test_end_to_end_bridge_page_reports_the_chosen_model_share(self):
         """3 chunks answered by the bridge, 1 by a substitute: the badge must
         count the bridge chunks instead of claiming none used your model."""

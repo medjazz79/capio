@@ -1436,16 +1436,11 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
 
 
 class TestOnlyWorkingModelsAreOffered(_GuiCase):
-    """Every claim here was measured against the live OpenCode Zen gateway and
-    the real OpenCode CLI on 2026-10-07, not guessed from model names:
+    """CLI free-model ids come from OpenCode's refreshed provider catalog.
 
-    * `space-bunny-free` answers 200 with no key at all (HTTP and CLI).
-    * Every other `-free` id answers 403 "free tier can only be used from
-      within OpenCode" -- from plain HTTP *and* from inside the authenticated
-      OpenCode CLI, so the block is an account entitlement, not a transport.
-    * The Zen "credits" ids answer provider.quota: the account has no balance.
-    * OpenCode's own log shows that same 403 on every single day since
-      2026-09-24, so these ids never worked for this machine.
+    The stable no-key bridge catalog is measured separately from the dynamic
+    OpenCode CLI catalog. CLI free-model ids come from the latest CLI model
+    listing and are disabled when a real verification recorded a failure.
     """
 
     # Despite the name, this class also builds real MainWindows and popups, so
@@ -1461,6 +1456,72 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         labels = [label for label, _ in registry.model_groups({})]
         self.assertFalse([x for x in labels if "OpenCode key" in x],
                          f"still asks for a key: {labels}")
+
+    def test_provider_model_groups_are_hidden_until_their_credentials_exist(self):
+        from translators import registry
+        rows = dict(registry.model_groups({}))
+        self.assertEqual(
+            list(rows),
+            [registry.GOOGLE_TRANSLATE_HDR, registry.GOOGLE_TRANSLATE_MODEL],
+        )
+
+        settings = {
+            "gemini_key": "gemini",
+            "groq_key": "groq",
+            "cloudflare_account_id": "account",
+            "cloudflare_token": "cloudflare",
+            "mistral_key": "mistral",
+            "flm_key": "freellm",
+            "openai_base": "https://api.example.invalid/v1",
+            "openai_key": "openai",
+            "openai_model": "example-model",
+            "custom_providers": [{
+                "id": "custom-one",
+                "name": "Custom One",
+                "enabled": True,
+                "base_url": "https://custom.example.invalid/v1",
+                "api_key": "custom",
+                "model": "custom-model",
+            }],
+        }
+        authenticated = dict(registry.model_groups(settings))
+        for header, model in (
+            (registry.GEMINI_HDR, "gemini-3.5-flash-lite"),
+            (registry.GROQ_HDR, "groq:qwen/qwen3.8-27b"),
+            (registry.CF_HDR, "cf:@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+            (registry.MISTRAL_HDR, "mistral:mistral-small-latest"),
+            (registry.FLM_HDR, "flm:auto"),
+            (registry.CUSTOM_HDR, "example-model"),
+            (registry.CUSTOM_PROVIDER_HDR, "custom:custom-one"),
+        ):
+            self.assertIn(header, authenticated)
+            self.assertIn(model, authenticated)
+
+    def test_picker_updates_provider_groups_when_credentials_change(self):
+        from main import SettingsDialog
+        from config.settings import DEFAULTS
+        from translators import registry
+
+        dlg = SettingsDialog(dict(DEFAULTS))
+        try:
+            labels = [dlg.z_model.itemText(i)
+                      for i in range(dlg.z_model.count())]
+            self.assertNotIn(registry.GEMINI_HDR, labels)
+            self.assertIn(registry.GOOGLE_TRANSLATE_HDR, labels)
+
+            dlg.gemini_key.setText("test-key")
+            labels = [dlg.z_model.itemText(i)
+                      for i in range(dlg.z_model.count())]
+            self.assertIn(registry.GEMINI_HDR, labels)
+            self.assertIn("gemini-3.5-flash-lite", labels)
+
+            dlg.gemini_key.clear()
+            labels = [dlg.z_model.itemText(i)
+                      for i in range(dlg.z_model.count())]
+            self.assertNotIn(registry.GEMINI_HDR, labels)
+            self.assertIn(registry.GOOGLE_TRANSLATE_HDR, labels)
+        finally:
+            dlg.close()
 
     def test_models_that_never_answer_are_not_listed(self):
         from translators import registry
@@ -1497,18 +1558,29 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         settings = {"model_status": {model: ""}}
         self.assertTrue(registry.availability(model, settings)[0])
 
+    def test_a_current_cli_free_model_is_not_retired_by_the_static_catalog(self):
+        from config.settings import _is_retired_cli_model
+        model = "opencode-cli:opencode/muse-spark-1.3-contributor-free"
+        self.assertFalse(_is_retired_cli_model(model, {
+            "opencode_cli_models": [
+                "opencode/space-bunny-free",
+                "opencode/muse-spark-1.3-contributor-free",
+            ],
+        }))
+
     def test_verification_status_does_not_disable_the_gemini_group(self):
         from translators import registry
-        # Picker offers Gemini + bridge only; a bridge failure must not
-        # disable Gemini, and CLI ids are no longer offered at all.
+        # The legacy bridge catalog is not offered in the picker; cached CLI
+        # free ids are offered through the current CLI-specific group.
         rows = dict(registry.model_groups({
             "gemini_key": "k",
             "opencode_cli_models": ["opencode/exo-free", "opencode/space-bunny-free"],
             "model_status": {"mimo-v2.6-flash-free": "403"},
         }))
         self.assertTrue(rows["gemini-2.5-flash-lite"])
-        self.assertFalse(rows["mimo-v2.6-flash-free"])
-        self.assertNotIn("opencode-cli:opencode/exo-free", rows)
+        self.assertNotIn("mimo-v2.6-flash-free", rows)
+        self.assertIn("opencode-cli:opencode/exo-free", rows)
+        self.assertIn("opencode-cli:opencode/space-bunny-free", rows)
 
     def test_the_opencode_api_key_is_gone_from_settings(self):
         from config.settings import DEFAULTS
@@ -1519,7 +1591,11 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         saved = {"model": "opencode-cli:opencode/muse-spark-1.3-contributor-free",
                  "opencode_key": "an-old-key", "gemini_key": "k",
                  "opencode_cli_models": ["opencode/space-bunny-free",
-                                         "opencode/muse-spark-1.3-contributor-free"]}
+                                         "opencode/muse-spark-1.3-contributor-free"],
+                 "model_status": {
+                     "opencode-cli:opencode/muse-spark-1.3-contributor-free":
+                         "403 — free tier blocked for this account",
+                 }}
         with mock_opencode_settings(saved) as path:
             merged = settings_module.load()
             settings_module.save(merged)   # persists the migrated values
@@ -1594,6 +1670,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
     def test_the_settings_dialog_no_longer_asks_for_an_opencode_key(self):
         from main import SettingsDialog
         from config.settings import DEFAULTS
+        from translators import registry
         dlg = SettingsDialog(dict(DEFAULTS))
         try:
             self.assertFalse(hasattr(dlg, "z_key"))
@@ -1604,7 +1681,8 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
                 if isinstance(dlg.z_model.itemData(i), str)
             ]
             self.assertNotIn("exo-free", labels)
-            self.assertIn("space-bunny-free", model_ids)
+            self.assertNotIn("space-bunny-free", model_ids)
+            self.assertNotIn(registry.BRIDGE_HDR, labels)
         finally:
             dlg.close()
 
@@ -1714,16 +1792,16 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
     def test_fast_mode_off_orders_bridge_alphabetically(self):
         from translators import registry
         from translators.opencode_bridge import BRIDGE_FREE
-        fast = [label for label, _ in registry.model_groups({"fast_mode": True})]
-        slow = [label for label, _ in registry.model_groups({"fast_mode": False})]
+        from translators.opencode_bridge import ordered_models
+        fast = [label for label, _ in registry.model_groups({
+            "fast_mode": True,
+            "gemini_key": "test-key",
+        })]
         self.assertEqual(fast[0], "── ✦ Gemini — needs a Gemini key ──")
-        fast_bridge = fast[fast.index(registry.BRIDGE_HDR) + 1:
-                           fast.index(registry.GOOGLE_TRANSLATE_HDR)]
-        self.assertEqual(fast_bridge, BRIDGE_FREE)  # measured fastest-first
-        self.assertEqual(fast_bridge[0], "space-bunny-free")
-        slow_bridge = slow[slow.index(registry.BRIDGE_HDR) + 1:
-                           slow.index(registry.GOOGLE_TRANSLATE_HDR)]
-        self.assertEqual(slow_bridge, sorted(slow_bridge))
+        self.assertNotIn(registry.BRIDGE_HDR, fast)
+        self.assertEqual(ordered_models(True), BRIDGE_FREE)
+        self.assertEqual(ordered_models(True)[0], "space-bunny-free")
+        self.assertEqual(ordered_models(False), sorted(BRIDGE_FREE))
 
     def test_chain_stream_off_emits_single_done(self):
         from unittest import mock
@@ -1769,19 +1847,12 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
     def test_settings_fast_mode_roundtrips_and_reorders(self):
         from main import SettingsDialog
         from config.settings import DEFAULTS
-        from translators import registry
         dlg = SettingsDialog(dict(DEFAULTS))
         try:
             self.assertTrue(dlg.fast_check.isChecked())
             self.assertTrue(dlg.values()["fast_mode"])
             dlg.fast_check.setChecked(False)
             self.assertFalse(dlg.values()["fast_mode"])
-            bridge = [
-                dlg.z_model.itemData(i)
-                for i in range(dlg.z_model.count())
-                if dlg.z_model.itemData(i) in registry.ordered_models(True)
-            ]
-            self.assertEqual(bridge, sorted(bridge))
         finally:
             dlg.close()
 
@@ -1798,20 +1869,20 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         self.assertEqual(merged["model"], "groq:qwen/qwen3.8-27b")
         self.assertEqual(resolve_model(merged), "groq:qwen/qwen3.8-27b")
 
-    def test_groq_models_listed_below_bridge_and_gated_by_key(self):
+    def test_groq_models_listed_without_legacy_bridge_group_and_gated_by_key(self):
         from translators import registry
         no_key = [label for label, _ in registry.model_groups({})]
-        self.assertIn(registry.GROQ_HDR, no_key)
-        self.assertIn("groq:qwen/qwen3.8-27b", no_key)
-        rows = dict(registry.model_groups({}))
-        self.assertFalse(rows["groq:qwen/qwen3.8-27b"])
-        ok_rows = dict(registry.model_groups({
+        self.assertNotIn(registry.BRIDGE_HDR, no_key)
+        self.assertNotIn(registry.GROQ_HDR, no_key)
+        self.assertNotIn("groq:qwen/qwen3.8-27b", no_key)
+        authenticated = dict(registry.model_groups({
             "openai_base": "https://api.groq.com/openai/v1",
             "openai_key": "k"}))
-        self.assertTrue(ok_rows["groq:qwen/qwen3.8-27b"])
+        self.assertIn(registry.GROQ_HDR, authenticated)
+        self.assertIn("groq:qwen/qwen3.8-27b", authenticated)
         # Live ids merge above the curated list, de-duplicated.
         live = [label for label, _ in registry.model_groups(
-            {}, live_groq=["new/model"])]
+            {"groq_key": "k"}, live_groq=["new/model"])]
         self.assertLess(live.index("groq:new/model"),
                         live.index("groq:qwen/qwen3.8-27b"))
 
@@ -1901,9 +1972,25 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             }),
         )
 
-    def test_cf_and_mistral_sections_below_groq(self):
+    def test_cf_and_mistral_models_are_hidden_until_credentials_exist(self):
         from translators import registry
-        labels = [label for label, _ in registry.model_groups({})]
+        no_credentials = [label for label, _ in registry.model_groups({})]
+        self.assertNotIn(registry.GROQ_HDR, no_credentials)
+        self.assertNotIn(registry.CF_HDR, no_credentials)
+        self.assertNotIn(registry.MISTRAL_HDR, no_credentials)
+        self.assertNotIn(
+            "cf:@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            no_credentials,
+        )
+        self.assertNotIn("mistral:mistral-small-latest", no_credentials)
+
+        credentials = {
+            "groq_key": "G",
+            "cloudflare_account_id": "ACC",
+            "cloudflare_token": "T",
+            "mistral_key": "M",
+        }
+        labels = [label for label, _ in registry.model_groups(credentials)]
         self.assertLess(labels.index(registry.GROQ_HDR),
                         labels.index(registry.CF_HDR))
         self.assertLess(labels.index(registry.CF_HDR),
@@ -1916,9 +2003,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             self.assertEqual(registry.provider_of(model), provider)
             ok, _ = registry.availability(model, {})
             self.assertFalse(ok)  # no key yet
-            ok, _ = registry.availability(model, {
-                "cloudflare_account_id": "ACC", "cloudflare_token": "T",
-                "mistral_key": "M"})
+            ok, _ = registry.availability(model, credentials)
             self.assertTrue(ok)
 
     def test_groq_image_translation_uses_provider_token(self):
@@ -1940,7 +2025,11 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
 
     def test_vision_model_ids_offered_for_cf_and_mistral(self):
         from translators import registry
-        labels = [label for label, _ in registry.model_groups({})]
+        labels = [label for label, _ in registry.model_groups({
+            "cloudflare_account_id": "ACC",
+            "cloudflare_token": "T",
+            "mistral_key": "M",
+        })]
         self.assertIn("cf:@cf/meta/llama-3.2-11b-vision-instruct", labels)
         self.assertIn("mistral:pixtral-12b-2409", labels)
         self.assertNotIn("cf:@cf/google/gemma-3-12b-it", labels)
@@ -1972,7 +2061,11 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             _ACTIVE_MODEL_ROLE, _FREE_MODEL_ROLE, _IMAGE_CAPABILITY_ROLE,
         )
 
-        dlg = SettingsDialog(dict(DEFAULTS))
+        dlg = SettingsDialog(dict(
+            DEFAULTS,
+            groq_key="G",
+            opencode_cli_models=["opencode/cat-jam-free"],
+        ))
         try:
             items = {
                 dlg.z_model.itemData(i): dlg.z_model.itemText(i)
@@ -2002,7 +2095,10 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             self.assertTrue(dlg.z_model.itemData(
                 text_index, _ACTIVE_MODEL_ROLE))
             self.assertTrue(dlg.z_model.itemData(
-                dlg.z_model.findData("space-bunny-free"), _FREE_MODEL_ROLE))
+                dlg.z_model.findData(
+                    "opencode-cli:opencode/cat-jam-free"),
+                _FREE_MODEL_ROLE,
+            ))
             self.assertEqual(
                 dlg.values()["model"], "groq:openai/gpt-oss-20b")
         finally:
@@ -2019,18 +2115,20 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
 
         dlg = SettingsDialog(dict(
             DEFAULTS,
+            gemini_key="test-gemini-key",
+            groq_key="test-groq-key",
             model="groq:openai/gpt-oss-20b",
-            model_favorites=["space-bunny-free"],
+            model_favorites=["gemini-2.5-flash-lite"],
         ))
         try:
             combo = dlg.z_model
             self.assertEqual(combo.itemText(0), "── ★ Favorites ──")
-            favorite_index = combo.findData("space-bunny-free")
+            favorite_index = combo.findData("gemini-2.5-flash-lite")
             self.assertTrue(combo.itemData(
                 favorite_index, _FAVORITE_MODEL_ROLE))
             self.assertEqual(
                 combo.itemData(favorite_index, _PROVIDER_LABEL_ROLE),
-                "OpenCode bridge free",
+                "Gemini",
             )
             self.assertEqual(
                 combo.itemData(0, _MODEL_GROUP_ROLE),
@@ -2038,8 +2136,8 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             )
             self.assertEqual(
                 [combo.itemData(i) for i in range(1, combo.count())
-                 if combo.itemData(i) == "space-bunny-free"],
-                ["space-bunny-free", "space-bunny-free"],
+                 if combo.itemData(i) == "gemini-2.5-flash-lite"],
+                ["gemini-2.5-flash-lite", "gemini-2.5-flash-lite"],
             )
 
             dlg.show()
@@ -2054,11 +2152,14 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             QTest.qWait(20)
             self.assertEqual(dlg.values()["model_favorites"], [])
             self.assertEqual(dlg._current_model(), "groq:openai/gpt-oss-20b")
-            self.assertEqual(combo.itemText(0), "── ✦ Gemini — needs a Gemini key ──")
-
-            dlg._on_model_favorite_clicked("space-bunny-free")
             self.assertEqual(
-                dlg.values()["model_favorites"], ["space-bunny-free"])
+                combo.itemText(0),
+                "── ✦ Gemini — needs a Gemini key ──",
+            )
+
+            dlg._on_model_favorite_clicked("gemini-2.5-flash-lite")
+            self.assertEqual(
+                dlg.values()["model_favorites"], ["gemini-2.5-flash-lite"])
             self.assertEqual(combo.itemText(0), "── ★ Favorites ──")
             self.assertEqual(dlg._current_model(), "groq:openai/gpt-oss-20b")
         finally:
@@ -3501,11 +3602,19 @@ class TestChain(unittest.TestCase):
             stderr="",
         )
         with mock.patch.object(opencode_cli, "find_executable", return_value="opencode"):
-            with mock.patch.object(opencode_cli.subprocess, "run", return_value=completed):
+            with mock.patch.object(
+                opencode_cli.subprocess,
+                "run",
+                return_value=completed,
+            ) as run:
                 self.assertEqual(
                     opencode_cli.list_models(),
                     ["opencode/glm-5.2", "anthropic/claude-sonnet-4"],
                 )
+        self.assertEqual(
+            run.call_args.kwargs["creationflags"],
+            opencode_cli._NO_CONSOLE_WINDOW,
+        )
 
     def test_opencode_cli_finds_desktop_bundled_executable(self):
         from pathlib import Path
@@ -3546,6 +3655,10 @@ class TestChain(unittest.TestCase):
             self.assertIn("professional translator", agent["prompt"])
             self.assertEqual(command[command.index("--model") + 1], "opencode/glm-5.2")
             self.assertIn("Translate this passage", kwargs["input"])
+            self.assertEqual(
+                kwargs["creationflags"],
+                opencode_cli._NO_CONSOLE_WINDOW,
+            )
             return mock.Mock(returncode=0, stdout=stdout, stderr="")
 
         with mock.patch.object(opencode_cli, "find_executable", return_value="opencode"):
@@ -3563,18 +3676,36 @@ class TestChain(unittest.TestCase):
         self.assertEqual(registry.provider_of(model), "opencode_cli")
         with mock.patch("translators.opencode_cli.find_executable", return_value="opencode"):
             self.assertEqual(registry.availability(model, {}), (True, ""))
-        # The engine still works when already selected, but the picker
-        # offers Gemini + bridge only.
         with mock.patch("translators.opencode_cli.find_executable", return_value="opencode"):
             rows = registry.model_groups(
-                {"opencode_cli_models": ["anthropic/claude-sonnet-4"]},
-                live_cli=["opencode/glm-5.2"],
+                {"opencode_cli_models": ["opencode/space-bunny-free"]},
+                live_cli=[
+                    "opencode/space-bunny-free",
+                    "opencode/big-pickle",
+                    "opencode/claude-haiku-5-5",
+                    "google/gemini-2.5-flash",
+                ],
             )
         labels = [label for label, _ in rows]
-        self.assertNotIn("opencode-cli:anthropic/claude-sonnet-4", labels)
-        self.assertNotIn("opencode-cli:opencode/glm-5.2", labels)
-        self.assertIn(registry.BRIDGE_HDR, labels)
-        self.assertNotIn(registry.CLI_HDR, labels)
+        self.assertIn("opencode-cli:opencode/space-bunny-free", labels)
+        self.assertIn("opencode-cli:opencode/big-pickle", labels)
+        self.assertNotIn("opencode-cli:opencode/claude-haiku-5-5", labels)
+        self.assertNotIn("opencode-cli:google/gemini-2.5-flash", labels)
+        self.assertIn(registry.CLI_HDR, labels)
+        self.assertNotIn(registry.BRIDGE_HDR, labels)
+
+    def test_opencode_cli_free_models_are_filtered_from_live_catalog(self):
+        from translators import opencode_cli
+        self.assertEqual(
+            opencode_cli.free_models([
+                "opencode/cat-jam-free",
+                "opencode/big-pickle",
+                "opencode/claude-haiku-5-5",
+                "google/gemini-2.5-flash",
+                "opencode/cat-jam-free",
+            ]),
+            ["opencode/cat-jam-free", "opencode/big-pickle"],
+        )
 
     def test_chain_passes_custom_instructions_to_selected_ai_model(self):
         from unittest import mock
@@ -7569,20 +7700,18 @@ class TestReaderZoom(_GuiCase):
             # Model names remain clean; image status has its own visible badge.
             self.assertEqual(
                 models["gemini-3.5-flash-lite"], "gemini-3.5-flash-lite")
-            self.assertEqual(models["space-bunny-free"], "space-bunny-free")
             self.assertEqual(dlg.model_image_badge.text(), "IMAGE INPUT")
 
-            # headers are non-selectable; picker offers Gemini + bridge only
-            hdr = dlg.z_model.findText(registry.BRIDGE_HDR)
-            self.assertGreaterEqual(hdr, 0)
-            self.assertFalse(dlg.z_model.model().item(hdr).isEnabled())
+            # Current CLI models are added on refresh; the old bridge group is
+            # intentionally no longer shown in the model picker.
             self.assertEqual(dlg.z_model.findText(registry.ZEN_FREE_HDR), -1)
             self.assertEqual(dlg.z_model.findText(registry.CLI_HDR), -1)
+            self.assertEqual(dlg.z_model.findText(registry.BRIDGE_HDR), -1)
             self.assertEqual(dlg.z_model.findText(registry.CUSTOM_HDR), -1)
 
             # every listed row stays selectable even before its key is set;
             # the engine_hint alone reports why it can't be used yet.
-            for txt in ["gemini-3.5-flash-lite", "space-bunny-free"]:
+            for txt in ["gemini-3.5-flash-lite"]:
                 ix = dlg.z_model.findData(txt)
                 self.assertTrue(dlg.z_model.model().item(ix).isEnabled(), txt)
             ok, reason = registry.availability("gemini-3.5-flash-lite", {})
@@ -7600,19 +7729,24 @@ class TestReaderZoom(_GuiCase):
                 ) as verify:
                     dlg.z_refresh.click()
                     cli_models.assert_called_once()
-                    verify.assert_called_once()
+                    verify.assert_called_once_with(
+                        ["opencode/space-bunny-free", "opencode/exo-free"],
+                        dlg._settings,
+                    )
             texts = [dlg.z_model.itemText(i) for i in range(dlg.z_model.count())]
             models = {
                 dlg.z_model.itemData(i): dlg.z_model.itemText(i)
                 for i in range(dlg.z_model.count())
                 if isinstance(dlg.z_model.itemData(i), str)
             }
-            # CLI models are no longer offered in the picker (engines kept).
+            # CLI-sourced free models appear after refresh; failures are kept
+            # in the model status used by availability and the engine hint.
+            self.assertIn("⌘ space-bunny-free", texts)
+            self.assertIn("⌘ exo-free", texts)
             self.assertNotIn("⌘ opencode/space-bunny-free", texts)
-            self.assertNotIn("⌘ opencode/exo-free", texts)
             self.assertIn("gemini-3.5-flash-lite", models)   # gemini group kept
-            for m in ["mimo-v2.6-flash-free", "muse-spark-1.3-contributor-free"]:
-                self.assertIn(m, models)   # bridge group kept
+            self.assertEqual(texts.count("space-bunny-free"), 1)
+            self.assertNotIn("mimo-v2.6-flash-free", models)
 
             self.assertEqual(dlg.values()["model"], "space-bunny-free")
             dlg._select_model("opencode-cli:opencode/space-bunny-free")
@@ -12918,6 +13052,10 @@ class TestFloat(_GuiCase):
         )
         try:
             with (
+                mock.patch(
+                    "main_02.load",
+                    return_value=dict(floating.settings),
+                ),
                 mock.patch("translators.ocr.is_available", return_value=True),
                 mock.patch("translators.ocr.prepare_image", side_effect=lambda image: image),
                 mock.patch("popup.translate_popup.TranslatePopup") as popup_type,

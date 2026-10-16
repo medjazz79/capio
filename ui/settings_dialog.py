@@ -296,7 +296,10 @@ class _ModelPickerDelegate(QStyledItemDelegate):
 
 def _is_free_model(model: str) -> bool:
     normalized = model.strip().casefold().rstrip("/")
-    return normalized.endswith(("-free", ":free", "/free"))
+    return (
+        normalized.endswith(("-free", ":free", "/free"))
+        or normalized == "opencode-cli:opencode/big-pickle"
+    )
 
 
 def _normalize_model_favorites(value: object) -> list[str]:
@@ -984,7 +987,8 @@ class SettingsDialog(QDialog):
         self.model_image_badge.setMinimumHeight(34)
         self.z_refresh = QPushButton("⟳")
         self.z_refresh.setObjectName("iconBtn")
-        self.z_refresh.setToolTip("Reload Gemini, OpenCode Zen, and OpenCode CLI model lists")
+        self.z_refresh.setToolTip(
+            "Reload Gemini, provider, and current OpenCode CLI free-model lists")
         self.z_refresh.setFixedSize(38, 38)
         self.z_refresh.clicked.connect(self._refresh_zen_models)
 
@@ -3617,7 +3621,12 @@ class SettingsDialog(QDialog):
         def display_model(label: str) -> tuple[str, str]:
             is_cli_model = label.startswith(registry.OPENCODE_CLI_PREFIX)
             is_custom = label.startswith(registry.CUSTOM_PROVIDER_PREFIX)
-            display = (f"⌘ {label[len(registry.OPENCODE_CLI_PREFIX):]}" if is_cli_model else label)
+            display = label
+            if is_cli_model:
+                model_id = label[len(registry.OPENCODE_CLI_PREFIX):]
+                if model_id.startswith("opencode/"):
+                    model_id = model_id[len("opencode/"):]
+                display = f"⌘ {model_id}"
             if registry.provider_of(label) == "google_translate":
                 display = "🌐 Google Translate"
             provider_label = ""
@@ -3735,7 +3744,12 @@ class SettingsDialog(QDialog):
             from translators import registry
             is_cli_model = current.startswith(registry.OPENCODE_CLI_PREFIX)
             is_custom = current.startswith(registry.CUSTOM_PROVIDER_PREFIX)
-            display = (f"⌘ {current[len(registry.OPENCODE_CLI_PREFIX):]}" if is_cli_model else current)
+            display = current
+            if is_cli_model:
+                model_id = current[len(registry.OPENCODE_CLI_PREFIX):]
+                if model_id.startswith("opencode/"):
+                    model_id = model_id[len("opencode/"):]
+                display = f"⌘ {model_id}"
             if is_custom:
                 display = f"🔧 {registry.custom_provider_label(current, self._credentials())}"
             self.z_model.addItem(display, current)
@@ -3927,7 +3941,10 @@ class SettingsDialog(QDialog):
             return
         if not self._live_cli:
             return
-        models = list(self._live_cli)
+        from translators import opencode_cli
+        models = opencode_cli.free_models(self._live_cli)
+        if not models:
+            return
         snapshot = self._settings
 
         def job():

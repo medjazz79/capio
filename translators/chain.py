@@ -1198,8 +1198,9 @@ def _stream_single_compatible(chunk: str, s: dict):
         if not partial.strip():
             raise RuntimeError(f"{chosen} streamed no translation text.")
         final = _prepare_translation(partial.strip())
-    except Exception:
-        translated, fallback_badge = _translate_chunk(chunk, s)
+    except Exception as error:
+        translated, fallback_badge = _translate_free_fallback(
+            chunk, s, chosen, str(error)[:80])
         yield ("partial", translated, "")
         yield ("done", translated, fallback_badge)
         return
@@ -1346,8 +1347,9 @@ def _stream_single_bridge(chunk: str, s: dict):
         if not final:
             raise RuntimeError(f"Bridge {chosen} streamed no text")
         final = _prepare_translation(final)
-    except Exception:
-        arabic, badge = _translate_chunk(chunk, s)
+    except Exception as error:
+        arabic, badge = _translate_free_fallback(
+            chunk, s, chosen, str(error)[:80])
         yield ("partial", arabic, "")
         yield ("done", arabic, badge)
         return
@@ -1691,6 +1693,49 @@ def _is_chosen_engine(engine: str, marked: bool, via_router: bool,
     return False
 
 
+def _translate_free_fallback(
+    chunk: str, s: dict, chosen: str, failure: str,
+) -> tuple[str, str]:
+    from .prompt import LANGUAGE_NAMES
+
+    source_language = s.get("source_language", "auto")
+    target_language = s.get("target_language", "ar")
+    if source_language != "auto" and source_language not in LANGUAGE_NAMES:
+        source_language = "auto"
+    if target_language not in LANGUAGE_NAMES:
+        target_language = "ar"
+    note = f"⚠ chosen model {chosen} failed: {failure}" if failure else \
+           f"⚠ {chosen} could not run"
+    failures: list[tuple[str, str]] = (
+        [("selected translation engine", failure)] if failure else []
+    )
+    if registry.provider_of(chosen) != "google_translate":
+        try:
+            result = fallback.gtx_translate(
+                chunk, source_language, target_language)
+            return result, f"Free service  {note}"
+        except Exception as error:
+            failures.append(("free translation service",
+                             _one_line(error)))
+    try:
+        result = mymemory.translate(
+            chunk,
+            email=s.get("email", ""),
+            source_language=source_language,
+            target_language=target_language,
+        )
+        return result, f"Free service (alt)  {note}"
+    except Exception as error:
+        failures.append(("alternate free translation", _one_line(error)))
+    detail = "".join(f" The {name} said: {reason}."
+                     for name, reason in failures)
+    raise RuntimeError(
+        f"Could not translate into {LANGUAGE_NAMES[target_language]}. "
+        "Check your internet connection or configure a translation model."
+        f"{detail}"
+    )
+
+
 def _translate_chunk(chunk: str, s: dict) -> tuple[str, str]:
     from config.settings import resolve_model
     from .prompt import LANGUAGE_NAMES
@@ -1923,44 +1968,7 @@ def _translate_chunk(chunk: str, s: dict) -> tuple[str, str]:
             except Exception as e:
                 failure = str(e)[:80]
 
-    note = f"⚠ chosen model {chosen} failed: {failure}" if failure else \
-           f"⚠ {chosen} could not run"
-
-    # No second OpenAI-compatible attempt here: the same call already ran (and
-    # failed) in the "chosen engine" step above, so it could only add ~20s of
-    # latency before the free layers.
-    #
-    # Each layer's failure is kept. A bare `except: pass` made every failure
-    # look like a network problem in the terminal message, including an
-    # upstream quota rejection the user could have acted on.
-    failures: list[tuple[str, str]] = (
-        [("selected translation engine", failure)] if failure else []
-    )
-    if provider != "google_translate":
-        try:
-            result = fallback.gtx_translate(
-                chunk, source_language, target_language)
-            return result, f"Free service  {note}"
-        except Exception as error:
-            failures.append(("free translation service",
-                             _one_line(error)))
-    try:
-        result = mymemory.translate(
-            chunk,
-            email=s.get("email", ""),
-            source_language=source_language,
-            target_language=target_language,
-        )
-        return result, f"Free service (alt)  {note}"
-    except Exception as error:
-        failures.append(("alternate free translation", _one_line(error)))
-    detail = "".join(f" The {name} said: {reason}."
-                     for name, reason in failures)
-    raise RuntimeError(
-        f"Could not translate into {LANGUAGE_NAMES[target_language]}. "
-        "Check your internet connection or configure a translation model."
-        f"{detail}"
-    )
+    return _translate_free_fallback(chunk, s, chosen, failure)
 
 
 def _one_line(error: Exception) -> str:
