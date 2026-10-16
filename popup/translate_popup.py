@@ -930,11 +930,6 @@ class TranslatePopup(QDialog):
 
     def refresh_display(self, settings: dict | None = None) -> None:
         """Reapply saved typography after refreshing settings in-place."""
-        theme_changed = settings is not None and (
-            settings.get("theme") != self.settings.get("theme")
-            or settings.get("color_scheme")
-            != self.settings.get("color_scheme")
-        )
         if (
             settings is not None
             and self._rendered_translation_text == self._translation_text
@@ -966,8 +961,6 @@ class TranslatePopup(QDialog):
             )
         ):
             self.settings = settings
-            if theme_changed:
-                self._apply_popup_style()
             return
 
         old_explain_mode = bool(self.settings.get("explain_mode", False))

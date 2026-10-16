@@ -1,4 +1,4 @@
-"""Offline unit tests: chunking, glossary, PDF rect extraction. No network."""
+"""Offline unit tests: chunking, PDF rect extraction. No network."""
 import atexit
 import contextlib
 import json
@@ -2569,7 +2569,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
 
         for theme_name in THEMES:
             with self.subTest(theme=theme_name):
-                scheme = "light" if theme_name == "Pure Light" else "dark"
+                scheme = "dark"
                 colors = theme_colors(theme_name, scheme)
                 dialog = SettingsDialog(dict(
                     DEFAULTS, theme=theme_name, color_scheme=scheme))
@@ -2935,13 +2935,6 @@ class TestChain(unittest.TestCase):
         self.assertNotIn("\\", events[-1][1])
         self.assertTrue(all("\\" not in event[1] for event in events))
 
-    def test_glossary_word_boundaries(self):
-        out = fallback.glossary_partial("tones in Norton and the dominant chord")
-        self.assertIn("tones", out)  # not mangled by French "ton"
-        self.assertIn("Norton", out)
-        self.assertIn("المهيمنة", out)
-        self.assertIn("أكورد", out)
-
     def test_mymemory_parses_reply(self):
         from unittest import mock
         from translators import mymemory
@@ -2997,7 +2990,7 @@ class TestChain(unittest.TestCase):
             with self.assertRaises(Exception):
                 mymemory.translate("hello")
 
-    def test_chain_uses_second_free_before_glossary(self):
+    def test_chain_uses_second_free_service_after_google_fails(self):
         from unittest import mock
         s = dict(DEFAULTS)
         s["model"] = "space-bunny-free"
@@ -3008,7 +3001,7 @@ class TestChain(unittest.TestCase):
                 with mock.patch("translators.fallback.gtx_translate",
                                 side_effect=ConnectionError("down")):
                     with mock.patch("translators.mymemory.translate", return_value="mm-ar"):
-                        arabic, badge = chain.translate("cadence", s)
+                        arabic, badge = chain.translate("hello", s)
                         self.assertEqual(arabic, "mm-ar")
                         self.assertIn("Free service (alt)", badge)
 
@@ -3047,13 +3040,6 @@ class TestChain(unittest.TestCase):
         by_name = {n: (ok, d) for n, ok, d in results}
         self.assertFalse(by_name["★ Your model (gemini-2.0-flash)"][0])
         self.assertIn("SKIPPED", by_name["★ Your model (gemini-2.0-flash)"][1])
-
-    def test_french_glossary(self):
-        out = fallback.glossary_partial("sensible tierce dominante tonique")
-        self.assertIn("الحساسة", out)
-        self.assertIn("الثالثة", out)
-        self.assertIn("المهيمنة", out)
-        self.assertIn("الأساسية", out)
 
     def test_gtx_retries_then_succeeds(self):
         import requests
@@ -4257,7 +4243,7 @@ class TestChain(unittest.TestCase):
             self.assertEqual(chain.translate("source", settings)[0], "traduzione")
         translate.assert_called_once_with("source", "en", "it")
 
-    def test_non_arabic_target_never_uses_arabic_only_glossary(self):
+    def test_non_arabic_target_reports_when_free_services_fail(self):
         from unittest import mock
 
         settings = dict(DEFAULTS)
@@ -4900,24 +4886,8 @@ class TestChain(unittest.TestCase):
     def test_empty_returns_empty(self):
         self.assertEqual(chain.translate("   ", dict(DEFAULTS)), ("", "—"))
 
-    def test_glossary_offline(self):
-        out = fallback.glossary_partial("The dominant resolves to the tonic. Каданс.")
-        self.assertIn("المهيمنة", out)
-        self.assertIn("كادانس", out)
-
-    def test_chain_never_raises_without_network(self):
-        """Every layer above the glossary fails; the glossary still answers.
-
-        This used to call `chain.translate("cadence", dict(DEFAULTS))` for real,
-        which walked the genuine chosen-engine -> Google -> MyMemory ladder with
-        18 s and 15 s timeouts plus retries. The module docstring promises "No
-        network", and the test broke that promise: its runtime and its result
-        both depended on whether the machine running it happened to be online.
-
-        Now every network layer is mocked to raise, so the test measures exactly
-        one thing: the chain does not propagate an exception, and it returns
-        the offline glossary's partial translation rather than nothing.
-        """
+    def test_chain_reports_failure_when_all_services_are_unavailable(self):
+        """The translation chain reports service errors instead of hiding them."""
         from unittest import mock
         from translators import gemini, mymemory, opencode_compat, fallback
 
@@ -4927,8 +4897,8 @@ class TestChain(unittest.TestCase):
             raise offline
 
         settings = dict(DEFAULTS)
-        # Any credentials present would be used for real; with none configured,
-        # the ladder reaches the free layers and then the glossary either way.
+        # Any credentials present would be used for real; clear them so every
+        # network-dependent translation layer is covered by the mocks.
         for key in ("gemini_key", "openai_key", "openai_base", "flm_key",
                     "groq_key", "cf_account", "cloudflare_account_id",
                     "cloudflare_token", "email"):
@@ -4943,17 +4913,12 @@ class TestChain(unittest.TestCase):
                                   side_effect=_no_network), \
                 mock.patch.object(mymemory, "translate",
                                   side_effect=_no_network):
-            arabic, badge = chain.translate("cadence", settings)
+            with self.assertRaisesRegex(
+                RuntimeError, "Could not translate into Arabic"
+            ) as caught:
+                chain.translate("cadence", settings)
 
-        self.assertTrue(arabic, "the chain returned nothing at all")
-        self.assertTrue(badge)
-        # "Cadence" is a known musical term, so the offline glossary translates
-        # it instead of retaining the source word.
-        self.assertIn("كادانس", arabic)
-        self.assertNotIn("cadence", arabic)
-        # ...and the badge must not claim the user's own model answered.
-        self.assertNotIn("◈ chosen", badge)
-        self.assertNotIn("chosen:", badge)
+        self.assertIn("network unreachable", str(caught.exception))
 
 
 class TestPdfUtils(unittest.TestCase):
@@ -8899,14 +8864,15 @@ class TestReaderZoom(_GuiCase):
             finally:
                 pop.close()
 
-    def test_popup_speech_button_activates_after_translation(self):
+    def test_ocr_speech_button_activates_after_final_render(self):
         from unittest import mock
         from popup.translate_popup import TranslatePopup
         from config.settings import DEFAULTS
 
         with mock_chain_translate(
                         return_value=("\u0645\u0631\u062d\u0628\u0627", "\u2726 chosen: test-model")):
-            pop = TranslatePopup(dict(DEFAULTS), source_text="hello")
+            settings = dict(DEFAULTS, selection_mode="ocr")
+            pop = TranslatePopup(settings, source_text="recognized OCR text")
             try:
                 pop.speak_btn.setEnabled(False)
                 pop._on_done("\u0645\u0631\u062d\u0628\u0627", "\u2726 chosen: test-model")
@@ -9990,7 +9956,7 @@ class TestSession(_GuiCase):
             second.reader.verticalScrollBar().setValue(
                 second.reader._labels[1].y() + second.reader._labels[1].height() + 20)
             win.tabs.setCurrentWidget(first)
-            win._theme_actions["Pure Light"].trigger()
+            win._theme_actions["Midnight Blue"].trigger()
             self.app.processEvents()
             deadline = time.time() + 3
             while time.time() < deadline:
@@ -10011,7 +9977,7 @@ class TestSession(_GuiCase):
 
             self.assertEqual(len(saved_before_close["open_tabs"]), 3)
             self.assertEqual(saved_before_close["active_tab"], 0)
-            self.assertEqual(saved_before_close["theme"], "Pure Light")
+            self.assertEqual(saved_before_close["theme"], "Midnight Blue")
             self.assertTrue(saved_before_close["thumbs_visible"])
             self.assertTrue(saved_before_close["window_geometry"])
             self.assertEqual(saved_before_close["open_tabs"][0]["zoom"], 125)
@@ -10104,7 +10070,7 @@ class TestSession(_GuiCase):
                     books[0].splitter.sizes()[0],
                     saved_before_close["open_tabs"][0]["splitter_sizes"][0])
                 self.assertTrue(restored.thumbs_action.isChecked())
-                self.assertTrue(restored._theme_actions["Pure Light"].isChecked())
+                self.assertTrue(restored._theme_actions["Midnight Blue"].isChecked())
                 self.assertEqual(
                     [book.session_state()["scroll_offset"] for book in books[:2]],
                     [item["scroll_offset"]
@@ -11330,7 +11296,7 @@ class TestMemoryZoom(_GuiCase):
             book = window._add_tab(_make_pdf_file("refresh_in_place.pdf"))
             self.assertIsNotNone(book)
             refreshed_settings = dict(window.settings)
-            refreshed_settings.update(theme="Pure Light", thumbs_visible=True)
+            refreshed_settings.update(theme="Nordic Gray", thumbs_visible=True)
             with mock.patch("main.load", return_value=refreshed_settings):
                 with mock.patch.object(book, "refresh_content") as refresh_book:
                     with mock.patch.object(window, "close") as close:
@@ -11339,7 +11305,7 @@ class TestMemoryZoom(_GuiCase):
             self.assertTrue(window.isVisible())
             self.assertIs(window.current_book(), book)
             self.assertTrue(window.thumbs_action.isChecked())
-            self.assertEqual(window.settings["theme"], "Pure Light")
+            self.assertEqual(window.settings["theme"], "Nordic Gray")
             refresh_book.assert_called_once_with()
             close.assert_not_called()
         finally:
@@ -11571,6 +11537,7 @@ class TestMemoryZoom(_GuiCase):
         win = MainWindow()
         try:
             self.assertEqual(win.settings["theme"], "Dark Slate")
+            scheme = win.settings["color_scheme"]
             self.assertIn(
                 theme_colors("Dark Slate", win.settings["color_scheme"])["accent"],
                 self.app.styleSheet(),
@@ -11583,19 +11550,12 @@ class TestMemoryZoom(_GuiCase):
             self.assertIn("min-height: 32px", self.app.styleSheet())
             win._theme_actions["Midnight Blue"].trigger()
             self.assertEqual(win.settings["theme"], "Midnight Blue")
+            self.assertEqual(win.settings["color_scheme"], scheme)
             self.assertIn(
                 theme_colors("Midnight Blue", win.settings["color_scheme"])["accent"],
                 self.app.styleSheet(),
             )
             self.assertEqual(load()["theme"], "Midnight Blue")
-            win._theme_actions["Pure Light"].trigger()
-            self.assertEqual(win.settings["theme"], "Pure Light")
-            self.assertEqual(win.settings["color_scheme"], "light")
-            self.assertEqual(load()["color_scheme"], "light")
-            self.assertIn(
-                theme_colors("Pure Light", "light")["accent"],
-                self.app.styleSheet(),
-            )
             win._theme_actions["Nordic Gray"].trigger()
             self.assertIn(
                 theme_colors("Nordic Gray", win.settings["color_scheme"])["accent"],
@@ -11629,6 +11589,76 @@ class TestMemoryZoom(_GuiCase):
                 win.close()
             except RuntimeError:
                 pass
+
+    def test_app_stylesheet_install_skips_an_identical_sheet(self):
+        from unittest import mock
+        from main import install_app_stylesheet
+
+        with (
+            mock.patch(
+                "main.app_stylesheet",
+                return_value=self.app.styleSheet(),
+            ),
+            mock.patch.object(self.app, "setStyleSheet") as set_style,
+        ):
+            self.assertFalse(install_app_stylesheet())
+
+        set_style.assert_not_called()
+
+    def test_completed_settings_dialog_is_destroyed_immediately(self):
+        from PySide6.QtWidgets import QDialog, QWidget
+        from ui.settings_dialog import destroy_dialog
+
+        parent = QWidget()
+        dialog = QDialog(parent)
+        dialog.show()
+        destroy_dialog(dialog)
+        with self.assertRaises(RuntimeError):
+            dialog.isVisible()
+        self.assertEqual(parent.findChildren(QDialog), [])
+        parent.close()
+
+    def test_main_settings_dialog_is_destroyed_after_save(self):
+        from unittest import mock
+        from PySide6.QtWidgets import QDialog
+        from main import MainWindow
+
+        window = MainWindow()
+        dialog = QDialog(window)
+        try:
+            with (
+                mock.patch("main.SettingsDialog", return_value=dialog),
+                mock.patch.object(dialog, "exec", return_value=1),
+                mock.patch.object(
+                    dialog, "values", return_value=dict(window.settings),
+                    create=True,
+                ),
+                mock.patch("main.save"),
+                mock.patch("main.install_app_stylesheet"),
+            ):
+                window.open_settings()
+
+            with self.assertRaises(RuntimeError):
+                dialog.isVisible()
+            self.assertEqual(window.findChildren(QDialog), [])
+        finally:
+            window.close()
+
+    def test_popup_theme_only_refresh_skips_unchanged_popup_styles(self):
+        from unittest import mock
+        from popup.translate_popup import TranslatePopup
+
+        popup = mock.Mock(spec=TranslatePopup)
+        popup._rendered_translation_text = "already rendered"
+        popup._translation_text = "already rendered"
+        popup._translation_needs_render = False
+        popup.settings = dict(
+            DEFAULTS, theme="Dark Slate", color_scheme="dark")
+
+        TranslatePopup.refresh_display(
+            popup, dict(popup.settings, theme="Nordic Gray"))
+
+        popup._apply_popup_style.assert_not_called()
 
     def test_pdf_canvas_theme_setting_reloads_from_shared_settings(self):
         from unittest import mock
@@ -12114,9 +12144,10 @@ class TestFloat(_GuiCase):
         from PySide6.QtWidgets import QApplication
         from config.settings import DEFAULTS
         from main_02 import FloatButton
-        from ui.theme import THEMES
+        from ui.theme import theme_colors
 
         floating = FloatButton()
+        floating.settings["color_scheme"] = "light"
         popup = mock.Mock()
         popup.isVisible.return_value = True
         floating.popups = [popup]
@@ -12124,20 +12155,21 @@ class TestFloat(_GuiCase):
         previous_stylesheet = app.styleSheet()
         try:
             with mock.patch("main_02.save"):
-                floating._theme_action_sets[0]["Pure Light"].trigger()
+                floating._theme_action_sets[0]["Midnight Blue"].trigger()
 
-            self.assertEqual(floating.settings["theme"], "Pure Light")
-            colors = THEMES["Pure Light"]
+            self.assertEqual(floating.settings["theme"], "Midnight Blue")
+            self.assertEqual(floating.settings["color_scheme"], "light")
+            colors = theme_colors("Midnight Blue", "light")
             self.assertIn(colors["accent"], floating.btn.styleSheet())
             self.assertFalse(floating.btn.icon().isNull())
             self.assertIn(colors["panel"], app.styleSheet())
             self.assertTrue(all(
-                actions["Pure Light"].isChecked()
+                actions["Midnight Blue"].isChecked()
                 for actions in floating._theme_action_sets
             ))
             popup.refresh_display.assert_called_once()
             self.assertEqual(
-                popup.refresh_display.call_args.args[0]["theme"], "Pure Light")
+                popup.refresh_display.call_args.args[0]["theme"], "Midnight Blue")
             if hasattr(floating, "_tray_explain_action"):
                 self.assertEqual(
                     floating._tray_explain_action.isChecked(),
@@ -12352,10 +12384,12 @@ class TestFloat(_GuiCase):
         try:
             with (
                 mock.patch("ui.settings_dialog.SettingsDialog", return_value=dialog),
+                mock.patch("ui.settings_dialog.destroy_dialog") as destroy_dialog,
                 mock.patch("main_02.save"),
             ):
                 floating._open_settings()
 
+            destroy_dialog.assert_called_once_with(dialog)
             popup.refresh_display.assert_called_once()
             applied = popup.refresh_display.call_args.args[0]
             self.assertEqual(applied["font_size"], 25)
@@ -12370,7 +12404,8 @@ class TestFloat(_GuiCase):
         from config.settings import DEFAULTS
         from ui.settings_dialog import SettingsDialog
 
-        dialog = SettingsDialog(dict(DEFAULTS, theme="Pure Light"))
+        dialog = SettingsDialog(dict(
+            DEFAULTS, theme="Dark Slate", color_scheme="light"))
         try:
             style = dialog.styleSheet()
             self.assertIn("background-color: #F8FAFC", style)

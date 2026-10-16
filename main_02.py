@@ -1142,8 +1142,6 @@ class FloatButton(QDialog):
         previous = self.settings.get("theme", "Dark Slate")
         previous_scheme = self.settings.get("color_scheme", "system")
         self.settings["theme"] = theme
-        if theme == "Pure Light":
-            self.settings["color_scheme"] = "light"
         try:
             save(self.settings)
         except OSError:
@@ -1237,31 +1235,35 @@ class FloatButton(QDialog):
         QTimer.singleShot(700, lambda: self.btn.setText(old))
 
     def _open_settings(self) -> None:
-        from ui.settings_dialog import SettingsDialog
+        from ui.settings_dialog import SettingsDialog, destroy_dialog
         dlg = SettingsDialog(self.settings, self)
-        if dlg.exec():
-            previous = self.settings
-            updated = dlg.values()
-            try:
-                save(updated)
-            except OSError:
-                self.settings = previous
-                log.exception("could not save settings from the float tool")
-                QMessageBox.warning(
-                    self,
-                    "Could not save settings",
-                    "Settings could not be saved. Check that the settings "
-                    "file is writable, then try again.",
-                )
+        try:
+            if not dlg.exec():
                 return
-            self.settings = updated
-            self._sync_selection_mode_actions()
-            self._sync_explain_action()
-            self._sync_theme_actions()
-            self._apply_float_theme()
-            for popup in self.popups:
-                if popup.isVisible():
-                    popup.refresh_display(self._popup_settings())
+            updated = dlg.values()
+        finally:
+            destroy_dialog(dlg)
+        previous = self.settings
+        try:
+            save(updated)
+        except OSError:
+            self.settings = previous
+            log.exception("could not save settings from the float tool")
+            QMessageBox.warning(
+                self,
+                "Could not save settings",
+                "Settings could not be saved. Check that the settings "
+                "file is writable, then try again.",
+            )
+            return
+        self.settings = updated
+        self._sync_selection_mode_actions()
+        self._sync_explain_action()
+        self._sync_theme_actions()
+        self._apply_float_theme()
+        for popup in self.popups:
+            if popup.isVisible():
+                popup.refresh_display(self._popup_settings())
 
     def _open_float_languages(self) -> None:
         from ui.float_language_dialog import FloatLanguageDialog

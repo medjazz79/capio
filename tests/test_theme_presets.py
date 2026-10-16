@@ -42,8 +42,8 @@ class TestThemePresets(unittest.TestCase):
                         re.search(canvas_pattern, themed_style).group(1),
                         colors["canvas"],
                     )
-                if name != "Pure Light":
-                    self.assertEqual(dark, THEMES[name])
+                self.assertEqual(dark, THEMES[name])
+        self.assertNotIn("Pure Light", THEMES)
 
     def test_settings_dialog_exposes_the_system_dark_light_preference(self):
         from config.settings import DEFAULTS
@@ -66,6 +66,23 @@ class TestThemePresets(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_settings_dialog_replaces_the_removed_legacy_theme(self):
+        from config.settings import DEFAULTS
+        from ui.settings_dialog import SettingsDialog
+
+        dialog = SettingsDialog(dict(DEFAULTS, theme="Pure Light"))
+        try:
+            offered_themes = [
+                dialog.header_theme_combo.itemData(index)
+                for index in range(dialog.header_theme_combo.count())
+            ]
+            self.assertNotIn("Pure Light", offered_themes)
+            self.assertEqual(
+                dialog.header_theme_combo.currentData(), "Dark Slate")
+            self.assertEqual(dialog.values()["theme"], "Dark Slate")
+        finally:
+            dialog.close()
+
     def test_legacy_theme_settings_keep_their_existing_appearance(self):
         from config.settings import load
 
@@ -81,6 +98,15 @@ class TestThemePresets(unittest.TestCase):
                 settings_path.write_text(
                     json.dumps({"theme": "Pure Light"}), encoding="utf-8")
                 self.assertEqual(load()["color_scheme"], "light")
+                self.assertEqual(load()["theme"], "Dark Slate")
+
+                settings_path.write_text(
+                    json.dumps({
+                        "theme": "Pure Light",
+                        "color_scheme": "dark",
+                    }), encoding="utf-8")
+                self.assertEqual(load()["color_scheme"], "dark")
+                self.assertEqual(load()["theme"], "Dark Slate")
 
     def test_pdf_page_surroundings_render_the_selected_canvas_color(self):
         from PySide6.QtGui import QImage

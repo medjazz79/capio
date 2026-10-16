@@ -266,6 +266,8 @@ def load() -> dict:
         )
     if merged.get("color_scheme") not in ("system", "dark", "light"):
         merged["color_scheme"] = "system"
+    if merged.get("theme") == "Pure Light":
+        merged["theme"] = "Dark Slate"
 
     providers_path = _custom_providers_path()
     providers_file_exists = False

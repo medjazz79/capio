@@ -13,7 +13,10 @@ import json
 import re
 import threading
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QCoreApplication, QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer,
+    Signal,
+)
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
@@ -469,6 +472,13 @@ class _SafeModelComboBox(QComboBox):
 # Main dialog
 # ──────────────────────────────────────────────────────────────────────────────
 
+def destroy_dialog(dialog: QDialog) -> None:
+    """Synchronously delete a completed dialog and its child widget tree."""
+    dialog.deleteLater()
+    QCoreApplication.sendPostedEvents(
+        dialog, QEvent.Type.DeferredDelete)
+
+
 class SettingsDialog(QDialog):
     probeDone = Signal(list)
     verifyDone = Signal()
@@ -500,6 +510,8 @@ class SettingsDialog(QDialog):
         self._auto_fetch_in_progress: set[str] = set()
         self._auto_fetch_last: dict[str, tuple[str, str]] = {}
         self._settings.setdefault("color_scheme", "system")
+        if self._settings.get("theme") not in THEMES:
+            self._settings["theme"] = "Dark Slate"
         self.setStyleSheet(settings_stylesheet(
             self._settings.get("theme", "Dark Slate"),
             self._settings.get("color_scheme", "system"),
@@ -857,10 +869,6 @@ class SettingsDialog(QDialog):
         if not isinstance(theme, str) or theme not in THEMES:
             return
         self._settings["theme"] = theme
-        if theme == "Pure Light":
-            self._settings["color_scheme"] = "light"
-            self.color_scheme_combo.setCurrentIndex(
-                self.color_scheme_combo.findData("light"))
         self._apply_theme_style()
 
     def _on_color_scheme_changed(self, _idx: int) -> None:
@@ -868,10 +876,6 @@ class SettingsDialog(QDialog):
         if scheme not in ("system", "dark", "light"):
             return
         self._settings["color_scheme"] = scheme
-        if scheme == "dark" and self._settings.get("theme") == "Pure Light":
-            self._settings["theme"] = "Dark Slate"
-            self.header_theme_combo.setCurrentIndex(
-                self.header_theme_combo.findData("Dark Slate"))
         self._apply_theme_style()
 
     def _apply_theme_style(self) -> None:

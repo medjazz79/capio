@@ -466,6 +466,22 @@ def app_stylesheet(
 
 APP_STYLE = app_stylesheet()
 
+
+def install_app_stylesheet(
+    theme: str = "Dark Slate",
+    scheme: str = "dark",
+    pdf_canvas_theme_background: bool = False,
+) -> bool:
+    app = QApplication.instance()
+    if app is None:
+        return False
+    stylesheet = app_stylesheet(
+        theme, scheme, pdf_canvas_theme_background)
+    if app.styleSheet() == stylesheet:
+        return False
+    app.setStyleSheet(stylesheet)
+    return True
+
 ZOOM_PRESETS = ["50%", "75%", "80%", "90%", "100%", "125%", "150%",
                 "175%", "200%", "250%", "300%", "400%", "500%",
                 "600%", "800%", "1000%"]
@@ -473,7 +489,9 @@ ZOOM_PRESETS = ["50%", "75%", "80%", "90%", "100%", "125%", "150%",
 MAIN_W, MAIN_H = 1803, 1044
 
 
-from ui.settings_dialog import SettingsDialog  # noqa: F401  (re-exported)
+from ui.settings_dialog import (  # noqa: F401  (re-exported)
+    SettingsDialog, destroy_dialog,
+)
 
 
 class _CtrlWheelThumbsFilter(QObject):
@@ -2414,36 +2432,40 @@ class MainWindow(QMainWindow):
 
     def open_settings(self):
         dlg = SettingsDialog(self.settings, self)
-        if dlg.exec():
-            self.settings = dlg.values()
-            self._sync_language_combos()
-            save(self.settings)
-            QApplication.instance().setStyleSheet(app_stylesheet(
-                self.settings.get("theme", "Dark Slate"),
-                self.settings.get("color_scheme", "system"),
-                bool(self.settings.get("pdf_canvas_theme_background", False)),
-            ))
-            self._apply_theme_to_books(self.settings.get("theme", "Dark Slate"))
-            for popup in self.popups:
-                if popup.isVisible():
-                    popup.refresh_display(self.settings)
-            self._sync_theme_button(self.settings.get("theme", "Dark Slate"))
-            self._sync_selection_mode_button()
-            self._refresh_engine_label()
-            self._flash_info("Settings saved ✓")
+        try:
+            accepted = bool(dlg.exec())
+            updated = dlg.values() if accepted else None
+        finally:
+            destroy_dialog(dlg)
+        if updated is None:
+            return
+        self.settings = updated
+        self._sync_language_combos()
+        save(self.settings)
+        install_app_stylesheet(
+            self.settings.get("theme", "Dark Slate"),
+            self.settings.get("color_scheme", "system"),
+            bool(self.settings.get("pdf_canvas_theme_background", False)),
+        )
+        self._apply_theme_to_books(self.settings.get("theme", "Dark Slate"))
+        for popup in self.popups:
+            if popup.isVisible():
+                popup.refresh_display(self.settings)
+        self._sync_theme_button(self.settings.get("theme", "Dark Slate"))
+        self._sync_selection_mode_button()
+        self._refresh_engine_label()
+        self._flash_info("Settings saved ✓")
 
     def _on_theme_changed(self, theme: str) -> None:
         if theme not in THEMES:
             return
         self.settings["theme"] = theme
-        if theme == "Pure Light":
-            self.settings["color_scheme"] = "light"
         self._sync_theme_button(theme)
-        QApplication.instance().setStyleSheet(app_stylesheet(
+        install_app_stylesheet(
             theme,
             self.settings.get("color_scheme", "system"),
             bool(self.settings.get("pdf_canvas_theme_background", False)),
-        ))
+        )
         self._apply_theme_to_books(theme)
         for popup in self.popups:
             if popup.isVisible():
@@ -2454,9 +2476,9 @@ class MainWindow(QMainWindow):
         if self.settings.get("color_scheme", "system") != "system":
             return
         theme = self.settings.get("theme", "Dark Slate")
-        QApplication.instance().setStyleSheet(app_stylesheet(
+        install_app_stylesheet(
             theme, "system",
-            bool(self.settings.get("pdf_canvas_theme_background", False))))
+            bool(self.settings.get("pdf_canvas_theme_background", False)))
         self._apply_theme_to_books(theme)
         for popup in self.popups:
             if popup.isVisible():
@@ -2591,10 +2613,10 @@ class MainWindow(QMainWindow):
                         theme = "Dark Slate"
                         self.settings["theme"] = theme
                     scheme = cur.get("color_scheme", "system")
-                    QApplication.instance().setStyleSheet(app_stylesheet(
+                    install_app_stylesheet(
                         theme, scheme,
                         bool(cur.get("pdf_canvas_theme_background", False)),
-                    ))
+                    )
                     self._sync_theme_button(theme)
                     self._apply_theme_to_books(theme)
                 if (cur.get("font_size") != old.get("font_size")

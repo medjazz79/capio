@@ -129,9 +129,8 @@ def probe_all(settings: dict) -> list[tuple[str, bool, str]]:
                         f"You have a Gemini key but chose {model}. The chain "
                         f"never switches to it on its own: if {model} fails, "
                         "the free translation services answer (Google "
-                        "Translate, then MyMemory), and if those fail too the "
-                        "offline glossary returns a partial translation with a "
-                        "warning banner. To use your Gemini key, pick a Gemini "
+                        "Translate, then MyMemory). To use your Gemini key, "
+                        "pick a Gemini "
                         "model in Settings → Translation."))
     elif provider == "gemini" and not (s.get("gemini_key") or "").strip():
         results.append(("💡 Hint", True,

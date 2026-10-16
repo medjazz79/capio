@@ -67,15 +67,10 @@ to customize Capio. For daily workflows, see the [User Guide](USER_GUIDE.md).
 6. **No API key:** Google Translate can also be selected explicitly. This uses
    Google's unofficial, keyless web endpoint; it may be rate-limited, changed,
    or unavailable, and selected text is sent to Google. If it fails, the app
-   tries MyMemory and then the offline glossary for Arabic. The glossary is
-   explicitly partial; if it contains no matching terms, the app reports that
-   translation failed instead of presenting unchanged source text as a result.
+   tries MyMemory.
    When another model is selected, the automatic fallback order is Google
    followed by MyMemory with language detection; putting your email in
-   ⚙ Settings raises
-   the MyMemory daily quota ~10x. If unreachable, the built-in offline glossary
-   can translate some selected music terms (RU/EN/IT/DE/ES/FR); it is limited
-   and cannot replace an AI model for general book translation.
+   ⚙ Settings raises the MyMemory daily quota ~10x.
 
 Only the selected AI model is tried; a failed model is not replaced by another
 AI model. If it fails, the app may use the separate free translation services
@@ -115,8 +110,8 @@ equations, and scientific notation keep the representation appropriate to
 their field.
 These instructions are appended to the built-in
 translation rules and are saved with your settings. Leave the field empty to
-use the built-in rules alone. Free online translators and the offline glossary
-do not support custom model instructions. The field grows with the Settings
+use the built-in rules alone. Free online translators do not support custom
+model instructions. The field grows with the Settings
 window, and a vertical splitter lets you resize it with the mouse.
 Gemma 3:4B and Qwen3-VL:2B receive concise model-specific completeness
 reminders to help them retain every paragraph and relevant example. Qwen3-VL's

@@ -1,4 +1,4 @@
-"""Chained translation: chosen model -> other keyed providers -> free -> glossary.
+"""Chained translation: chosen model -> other keyed providers -> free services.
 
 Two rules this module exists to enforce:
 
@@ -1063,12 +1063,16 @@ def translate_stream(text: str, settings: dict):
                 "custom_provider": _stream_single_custom_provider,
             }.get(provider, _stream_single_compatible)
             current = ""
-            for kind, value, badge in streamer(chunk, chunk_settings):
+            for kind, value, badge in streamer(
+                chunk, chunk_settings
+            ):
                 if kind == "partial":
                     current = value
                     yield (
                         "partial",
-                        "\n".join([*parts, current]).translate(_WESTERN_DIGITS),
+                        "\n".join(
+                            [*parts, current]
+                        ).translate(_WESTERN_DIGITS),
                         "",
                     )
                 elif kind == "done":
@@ -1086,8 +1090,7 @@ def translate_stream(text: str, settings: dict):
                         and detected_language
                         and detected_language != target_language
                     ):
-                        current, badge = _translate_chunk(
-                            chunk, chunk_settings)
+                        current, badge = _translate_chunk(chunk, chunk_settings)
                         detected_language = _detect_translation_language(
                             current)
                         if (
@@ -1951,13 +1954,6 @@ def _translate_chunk(chunk: str, s: dict) -> tuple[str, str]:
         return result, f"Free service (alt)  {note}"
     except Exception as error:
         failures.append(("alternate free translation", _one_line(error)))
-    if target_language == "ar":
-        # The glossary replaces known terms and keeps the remaining passage as
-        # is, so it is explicitly labelled as a partial offline translation.
-        try:
-            return fallback.glossary_partial(chunk), f"Offline glossary  {note}"
-        except Exception as error:
-            failures.append(("offline glossary", _one_line(error)))
     detail = "".join(f" The {name} said: {reason}."
                      for name, reason in failures)
     raise RuntimeError(
