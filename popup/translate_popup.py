@@ -84,11 +84,20 @@ _MARKDOWN_HTML_TAGS = frozenset({
 _TABLE_SEPARATOR_CELL = re.compile(r":?-{3,}:?")
 _MUSICAL_ACCIDENTAL_AFTER_NOTE = re.compile(
     r"(?<![A-Za-z])([A-Ga-g])(?=[♭♯#♮])")
+_TRANSLATION_EXPLANATION_ACTIONS = (
+    ("Explain linguistically", "linguistic"),
+    ("Explain simply", "simple"),
+    ("Explain etymologically", "etymological"),
+    ("Translate and explain", "translate_and_explain"),
+    ("Explain in context", "context"),
+)
 
 
 class TranslationTextEdit(QTextEdit):
     positionClicked = Signal(int)
+    backgroundClicked = Signal()
     zoomRequested = Signal(float)
+    explainRequested = Signal(str, str)
 
     def mouseReleaseEvent(self, event) -> None:
         super().mouseReleaseEvent(event)
@@ -96,9 +105,55 @@ class TranslationTextEdit(QTextEdit):
             event.button() == Qt.MouseButton.LeftButton
             and not self.textCursor().hasSelection()
         ):
-            self.positionClicked.emit(
-                self.cursorForPosition(event.position().toPoint()).position()
-            )
+            point = event.position().toPoint()
+            cursor = self.cursorForPosition(point)
+            if self._point_is_over_text(point, cursor):
+                self.positionClicked.emit(cursor.position())
+            else:
+                self.backgroundClicked.emit()
+
+    def _point_is_over_text(self, point, cursor: QTextCursor) -> bool:
+        block = cursor.block()
+        relative_position = cursor.position() - block.position()
+        line = block.layout().lineForTextPosition(relative_position)
+        if not line.isValid():
+            return False
+
+        line_start = QTextCursor(self.document())
+        line_start.setPosition(block.position() + line.textStart())
+        line_start_rect = self.cursorRect(line_start)
+        x_start = line.cursorToX(0)[0]
+        x_end = line.cursorToX(line.textLength())[0]
+        layout_origin_x = line_start_rect.x() - x_start
+        text_left = layout_origin_x + min(x_start, x_end)
+        text_right = layout_origin_x + max(x_start, x_end)
+        line_top = line_start_rect.y()
+        line_bottom = line_top + max(line_start_rect.height(), line.height())
+        return (
+            text_left - 3 <= point.x() <= text_right + 3
+            and line_top <= point.y() < line_bottom
+        )
+
+    def _create_translation_context_menu(self) -> QMenu:
+        menu = self.createStandardContextMenu()
+        selected_text = self.textCursor().selectedText()
+        if selected_text.strip():
+            menu.addSeparator()
+            selected_text = selected_text.replace("\u2029", "\n").replace(
+                "\u2028", "\n").strip()
+            for label, explanation_style in _TRANSLATION_EXPLANATION_ACTIONS:
+                action = menu.addAction(label)
+                action.triggered.connect(
+                    lambda _checked=False, text=selected_text,
+                    style=explanation_style:
+                        self.explainRequested.emit(text, style))
+        return menu
+
+    def contextMenuEvent(self, event) -> None:
+        menu = self._create_translation_context_menu()
+        menu.exec(event.globalPos())
+        menu.deleteLater()
+        event.accept()
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -154,6 +209,8 @@ class TranslatePopup(QDialog):
     translationReady = Signal()
     translationFailed = Signal(str)
     speechFinished = Signal(str)
+    explanationSelectionChanged = Signal(str)
+    explainRequested = Signal(str, str)
 
     def __init__(self, settings: dict, source_text: str | None = None,
                  pil_image=None, ocr_langs=("ru", "en"), parent=None,
@@ -266,7 +323,7 @@ class TranslatePopup(QDialog):
             if self._speech_available
             else speech_missing_message(self._speech_engine))
         self.speak_btn.setEnabled(False)
-        self.speak_btn.clicked.connect(self._toggle_speech)
+        self.speak_btn.clicked.connect(lambda: self._toggle_speech())
 
         # Speed picker: a narrow icon button so the popup keeps its exact size.
         self._speech_rate = normalize_speed(self.settings.get("speech_rate"))
@@ -396,7 +453,12 @@ class TranslatePopup(QDialog):
         self.result.setFrameStyle(0)
         self.result.viewport().setAutoFillBackground(False)
         self.result.positionClicked.connect(self._on_translation_position_clicked)
+        self.result.backgroundClicked.connect(
+            self._on_translation_background_clicked)
         self.result.zoomRequested.connect(self._apply_translation_zoom)
+        self.result.selectionChanged.connect(
+            self._on_explanation_selection_changed)
+        self.result.explainRequested.connect(self.explainRequested.emit)
         translation_layout.addWidget(self.result, 1)
 
         self.chat_panel = QWidget(self)
@@ -1904,6 +1966,12 @@ class TranslatePopup(QDialog):
         self._rendered_translation_text = text
         self._translation_needs_render = False
 
+    def _on_explanation_selection_changed(self) -> None:
+        selected_text = self.result.textCursor().selectedText()
+        selected_text = selected_text.replace("\u2029", "\n").replace(
+            "\u2028", "\n").strip()
+        self.explanationSelectionChanged.emit(selected_text)
+
     def _on_failed(self, err: str) -> None:
         self.spin.hide()
         self.result.setPlainText(err)
@@ -2804,7 +2872,40 @@ class TranslatePopup(QDialog):
                 break
         return next_start if next_start is not None else self._speech_start_offset
 
-    def _toggle_speech(self) -> None:
+    def _next_speech_offset(self) -> int:
+        text = (
+            self._speech_text_override
+            if self._speech_text_override is not None
+            else self._speech_text_from_document(self.result.document())
+        )
+        position_ticks = self._player.position() * 10_000
+        boundaries = self._speech_boundaries.get(self._speech_index, [])
+        for index, (start, duration, source_start, source_end) in enumerate(
+            boundaries
+        ):
+            if start > position_ticks:
+                return source_start
+            if start <= position_ticks < start + duration:
+                if index + 1 < len(boundaries):
+                    return boundaries[index + 1][2]
+                for later_index in sorted(self._speech_boundaries):
+                    if later_index > self._speech_index:
+                        later = self._speech_boundaries[later_index]
+                        if later:
+                            return later[0][2]
+                next_offset = speech_start_offset(text, source_end)
+                return (
+                    len(text) if next_offset < source_end else next_offset
+                )
+        return self._current_speech_offset()
+
+    def _toggle_speech(
+        self,
+        *,
+        advance_to_next_word: bool = False,
+        translation_only: bool = False,
+        preserve_highlight: bool = False,
+    ) -> None:
         if not self._speech_available:
             # Nothing should be able to start a thread that cannot work.
             self.speak_btn.setText("No speech engine")
@@ -2812,18 +2913,44 @@ class TranslatePopup(QDialog):
                 speech_missing_message(self._speech_engine).replace("\n", " "))
             return
         if self._speech_active:
-            self._speech_start_offset = self._current_speech_offset()
+            preserved_highlight = None
+            if preserve_highlight and not translation_only:
+                selections = self.result.extraSelections()
+                if selections and selections[0].cursor.hasSelection():
+                    source_text = self.result.toPlainText()
+                    highlighted_cursor = selections[0].cursor
+                    preserved_highlight = (
+                        qt_to_python_position(
+                            source_text, highlighted_cursor.selectionStart()),
+                        qt_to_python_position(
+                            source_text, highlighted_cursor.selectionEnd()),
+                    )
+            if translation_only and self._speech_text_override is not None:
+                self._speech_start_offset = 0
+                self._speech_text_override = None
+                self._chat_speech_document_start = None
+            elif advance_to_next_word and self._speech_text_override is None:
+                self._speech_start_offset = self._next_speech_offset()
+            else:
+                self._speech_start_offset = self._current_speech_offset()
             self._speech_active = False
             self._pending_speech_offset = None
             self._pending_highlight = None
             self._close_speech_stream_server()
             self._speech_stream_urls.clear()
             self._speech_playing_stream_index = None
-            self._clear_speech_highlight()
+            if preserve_highlight:
+                self._speech_highlight_timer.stop()
+                if translation_only:
+                    self.chat_transcript.setExtraSelections([])
+            else:
+                self._clear_speech_highlight()
             self._player.stop()
             self._pending_player_position_ms = None
             self._pending_player_source = None
             self._player.setSource(QUrl())
+            if preserved_highlight is not None:
+                self._highlight_translation_range(*preserved_highlight)
             if self._speech_worker is not None and self._speech_worker.isRunning():
                 self._speech_worker.requestInterruption()
                 self.speak_btn.setEnabled(
@@ -2840,13 +2967,28 @@ class TranslatePopup(QDialog):
             self.spin.hide()
             return
 
-        self._speech_text_override = (
-            self._markdown_speech_text(self._latest_chat_answer())
-            if not self.chat_panel.isHidden() else None
-        )
+        if translation_only:
+            self._speech_text_override = None
+        else:
+            self._speech_text_override = (
+                self._markdown_speech_text(self._latest_chat_answer())
+                if not self.chat_panel.isHidden() else None
+            )
+        if self._speech_text_override is None:
+            translation_text = self._speech_text_from_document(
+                self.result.document())
+            if self._speech_start_offset >= len(translation_text):
+                self._speech_start_offset = 0
         self._request_speech(
             0 if self._speech_text_override is not None
             else self._speech_start_offset
+        )
+
+    def _on_translation_background_clicked(self) -> None:
+        self._toggle_speech(
+            advance_to_next_word=True,
+            translation_only=True,
+            preserve_highlight=True,
         )
 
     def _on_translation_position_clicked(self, position: int) -> None:
@@ -3823,6 +3965,8 @@ class TranslatePopup(QDialog):
         self._speech_stream_urls.clear()
         self._speech_playing_stream_index = None
         self._speech_boundaries.clear()
+        if not error:
+            self._speech_start_offset = 0
         self._pending_highlight = None
         self._clear_speech_highlight()
         if error and self._speech_worker is not None and self._speech_worker.isRunning():

@@ -44,6 +44,33 @@ from popup.speech_worker import (
 
 log = logging.getLogger("harmony_translator.chat")
 
+_EXPLANATION_INSTRUCTIONS = {
+    "linguistic": (
+        "Explain the selected text linguistically. Describe the relevant "
+        "grammar, wording, structure, register, and any idiomatic or figurative "
+        "language, without adding unrelated detail."
+    ),
+    "simple": (
+        "Explain the selected text in very simple, everyday language. Avoid "
+        "technical terms and use a brief example only if it helps."
+    ),
+    "etymological": (
+        "Explain the selected text etymologically, focusing on the origin and "
+        "history of its important words. Distinguish reliable facts from "
+        "uncertainty and do not invent word origins."
+    ),
+    "translate_and_explain": (
+        "First provide a natural translation of the selected text into the "
+        "source language of the passage when known; otherwise translate it "
+        "into the configured reply language. Then explain its meaning briefly."
+    ),
+    "context": (
+        "Explain what the selected text means in the context of the current "
+        "translation and original passage. Use only context supported by the "
+        "passage."
+    ),
+}
+
 
 class ChatTranscriptBrowser(QTextBrowser):
     textPositionClicked = Signal(int)
@@ -134,6 +161,7 @@ class ChatPanel(QWidget):
         self._entries: list[tuple[str, str]] = []
         self._worker: ChatWorker | None = None
         self._translation_context = ""
+        self._explanation_selection = ""
         try:
             self._chat_font_size = float(
                 self._settings_provider().get("chat_font_size", 12.0))
@@ -160,6 +188,13 @@ class ChatPanel(QWidget):
         self.clear_button = QPushButton("New chat")
         self.clear_button.setObjectName("newChatButton")
         self.clear_button.clicked.connect(self.clear_chat)
+        self.explain_button = QPushButton("Explain")
+        self.explain_button.setObjectName("explainSelectionButton")
+        self.explain_button.setToolTip(
+            "Explain the selected text from the translation")
+        self.explain_button.setEnabled(False)
+        self.explain_button.clicked.connect(
+            lambda: self.explain_selection())
         self.read_aloud_button = QPushButton("Read aloud")
         self.read_aloud_button.setObjectName("chatReadAloud")
         self.read_aloud_button.clicked.connect(self._read_latest_chat_aloud)
@@ -169,6 +204,7 @@ class ChatPanel(QWidget):
         self.stop_speech_button.setEnabled(False)
         chat_actions.addWidget(self.read_aloud_button)
         chat_actions.addWidget(self.stop_speech_button)
+        chat_actions.addWidget(self.explain_button)
         chat_actions.addWidget(self.clear_button)
 
         self.context_notice = QLabel()
@@ -226,6 +262,11 @@ class ChatPanel(QWidget):
     def set_translation_context(self, translated_text: str) -> None:
         self._translation_context = translated_text.strip()
         self._update_context_notice()
+
+    def set_explanation_selection(self, selected_text: str) -> None:
+        self._explanation_selection = selected_text.strip()
+        self.explain_button.setEnabled(
+            bool(self._explanation_selection) and self._worker is None)
 
     def _update_context_notice(self) -> None:
         self.context_notice.clear()
@@ -298,15 +339,31 @@ class ChatPanel(QWidget):
 
     def send_message(self) -> None:
         question = self.input.toPlainText().strip()
+        if not question:
+            return
+        self._send_question(question)
+
+    def explain_selection(self, style: str = "context") -> None:
+        selected_text = self._explanation_selection.strip()
+        if not selected_text:
+            return
+        instruction = _EXPLANATION_INSTRUCTIONS[style]
+        self._send_question(
+            f"{instruction}\n\nSelected text:\n{selected_text}",
+            clear_input=False,
+        )
+
+    def _send_question(self, question: str, *, clear_input: bool = True) -> None:
         if not question or self._worker is not None:
             return
-
         self._stop_speech()
         self._messages.append({"role": "user", "content": question})
         self._entries.append(("user", question))
-        self.input.clear()
+        if clear_input:
+            self.input.clear()
         self.send_button.setEnabled(False)
         self.send_button.setText("…")
+        self.explain_button.setEnabled(False)
         settings = dict(self._settings_provider())
         worker = ChatWorker(
             self._messages, settings, "", self._translation_context)
@@ -343,6 +400,7 @@ class ChatPanel(QWidget):
             self._worker = None
         self.send_button.setText("Send")
         self.send_button.setEnabled(True)
+        self.explain_button.setEnabled(bool(self._explanation_selection))
         if isinstance(worker, ChatWorker):
             worker.deleteLater()
 
@@ -356,21 +414,31 @@ class ChatPanel(QWidget):
         self.input.clear()
 
     def _render(self) -> None:
-        target_language = str(
-            self._settings_provider().get("target_language", "ar"))
-        direction = (
+        settings = self._settings_provider()
+        target_language = str(settings.get("target_language", "ar"))
+        response_language = str(
+            settings.get("chat_reply_language", target_language)
+            if settings.get("chat_reply_language_only", False)
+            else target_language
+        )
+        transcript_direction = (
+            Qt.LayoutDirection.RightToLeft
+            if response_language in {"ar", "fa", "he", "ur"}
+            else Qt.LayoutDirection.LeftToRight
+        )
+        input_direction = (
             Qt.LayoutDirection.RightToLeft
             if target_language in {"ar", "fa", "he", "ur"}
             else Qt.LayoutDirection.LeftToRight
         )
-        self.transcript.setLayoutDirection(direction)
+        self.transcript.setLayoutDirection(transcript_direction)
         option = self.transcript.document().defaultTextOption()
-        option.setTextDirection(direction)
+        option.setTextDirection(transcript_direction)
         option.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.transcript.document().setDefaultTextOption(option)
-        self.input.setLayoutDirection(direction)
+        self.input.setLayoutDirection(input_direction)
         input_option = self.input.document().defaultTextOption()
-        input_option.setTextDirection(direction)
+        input_option.setTextDirection(input_direction)
         input_option.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.input.document().setDefaultTextOption(input_option)
 
@@ -618,7 +686,12 @@ class ChatPanel(QWidget):
         text_format.setForeground(self._speech_highlight_foreground)
         selection.format = text_format
         self.transcript.setExtraSelections([selection])
-        self.transcript.ensureCursorVisible()
+        target_rect = self.transcript.cursorRect(cursor)
+        if not self.transcript.viewport().rect().contains(
+            target_rect.center()
+        ):
+            self.transcript.setTextCursor(cursor)
+            self.transcript.ensureCursorVisible()
 
     def _sync_speech_controls(self) -> None:
         has_assistant_reply = any(

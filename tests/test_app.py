@@ -1347,6 +1347,20 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         self.assertEqual(sidebar.minimumWidth(), 220)
         self.assertEqual(sidebar.maximumWidth(), 500)
 
+    def test_context_menu_fonts_are_enlarged_in_app_and_settings_styles(self):
+        from main import app_stylesheet
+        from ui.theme import settings_stylesheet
+
+        self.assertIn(
+            "QMenu::item { \n    padding: 7px 22px; \n"
+            "    border-radius: 5px;\n    font-size: 16px;",
+            app_stylesheet("Dark Slate"),
+        )
+        self.assertIn(
+            "QMenu::item {\n            font-size: 16px;",
+            settings_stylesheet("Dark Slate"),
+        )
+
     def test_settings_splitters_resize_sidebar_and_results_with_mouse(self):
         from PySide6.QtCore import QPoint, Qt
         from PySide6.QtTest import QTest

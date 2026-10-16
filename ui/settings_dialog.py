@@ -1495,6 +1495,33 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Selection Reading", self.selection_mode)
 
+        from translators.prompt import LANGUAGE_CHOICES
+
+        self.chat_reply_language = QComboBox()
+        self.chat_reply_language.setObjectName("chatReplyLanguage")
+        for label, language_code in LANGUAGE_CHOICES:
+            self.chat_reply_language.addItem(label, language_code)
+        configured_reply_language = self.chat_reply_language.findData(
+            s.get("chat_reply_language", s.get("target_language", "ar")))
+        self.chat_reply_language.setCurrentIndex(
+            max(0, configured_reply_language))
+        self.chat_reply_language_only = QCheckBox(
+            "Reply only in this language")
+        self.chat_reply_language_only.setObjectName(
+            "chatReplyLanguageOnly")
+        self.chat_reply_language_only.setChecked(
+            bool(s.get("chat_reply_language_only", False)))
+        self.chat_reply_language_only.setToolTip(
+            "When enabled, Chat replies must use only the selected language, "
+            "regardless of the translation language or the language of your "
+            "question.")
+        self.chat_reply_language.setEnabled(
+            self.chat_reply_language_only.isChecked())
+        self.chat_reply_language_only.toggled.connect(
+            self.chat_reply_language.setEnabled)
+        form.addRow("Chat Response Language", self.chat_reply_language)
+        form.addRow("", self.chat_reply_language_only)
+
         lay.addWidget(app_card)
 
         instructions_card = QFrame()
@@ -4055,6 +4082,12 @@ class SettingsDialog(QDialog):
             "settings_last_page_version": 3,
             "email": self.email.text().strip(),
             "selection_mode": self.selection_mode.currentData(),
+            "chat_reply_language": (
+                self.chat_reply_language.currentData() or "ar"
+            ),
+            "chat_reply_language_only": (
+                self.chat_reply_language_only.isChecked()
+            ),
             "speech_engine": self.speech_engine.currentData(),
             "gemini_tts_voice": self.gemini_tts_voice.currentData(),
             "speech_rate": self.speech_rate_setting.value(),

@@ -13,17 +13,20 @@ def _model_messages(
     source_language: str,
     target_language: str,
     extra_instructions: str = "",
+    reply_language: str | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
     target_name = LANGUAGE_NAMES.get(target_language, "Arabic")
     source_name = LANGUAGE_NAMES.get(
         source_language, "the automatically detected source language")
     if source_text.strip() or translated_text.strip():
         system = (
-            "You are a helpful tutor for a student reading a music-harmony "
-            f"textbook. Reply in {target_name}. Answer conversationally and "
-            "accurately. Explain only as much as needed. Keep musical notation, "
-            "chord symbols, and quoted source-language terms unchanged when "
-            "relevant. "
+            "You are a helpful assistant discussing the supplied passage. "
+            f"Reply in {target_name}. Answer conversationally and accurately. "
+            "Explain only as much as needed. The user may be reading about any "
+            "subject; do not assume the passage or question is about music or "
+            "harmony. Discuss music only when it is relevant to the passage or "
+            "the user explicitly asks about it. Keep notation and quoted "
+            "source-language terms unchanged when relevant. "
             f"The source language is {source_name}. The passage and its "
             "translation being discussed follow.\n\n"
             f"Original passage:\n{source_text}\n\n"
@@ -31,7 +34,9 @@ def _model_messages(
         )
     else:
         system = (
-            "You are a helpful conversational AI assistant. Answer the user's "
+            "You are a helpful general-purpose conversational AI assistant. "
+            "The user may ask about any subject; do not assume a music-related "
+            "context. Answer the user's "
             f"questions clearly and accurately. Reply in {target_name}. Follow "
             "the user's lead and explain concepts at the level they ask for. Do not "
             "assume access to a book, document, image, or other context that "
@@ -41,8 +46,16 @@ def _model_messages(
     if extra_instructions and (source_text.strip() or translated_text.strip()):
         system += (
             "\n\nAdditional instructions from the translation window. "
-            "Follow them when explaining the passage and answering the student's "
+            "Follow them when explaining the passage and answering the user's "
             f"questions:\n{extra_instructions}"
+        )
+    if reply_language in LANGUAGE_NAMES:
+        reply_language_name = LANGUAGE_NAMES[reply_language]
+        system += (
+            f"\n\nStrict response-language requirement: respond only in "
+            f"{reply_language_name}. Write the entire answer, including "
+            "explanations and follow-up replies, in that language. Do not switch "
+            "to or add another language."
         )
     conversation = [
         {"role": item["role"], "content": item["content"]}
@@ -71,6 +84,10 @@ def reply(
         settings.get("source_language", "auto"),
         settings.get("target_language", "ar"),
         str(settings.get("explain_instructions", "") or ""),
+        (
+            str(settings.get("chat_reply_language") or "")
+            if settings.get("chat_reply_language_only", False) else None
+        ),
     )
     if not conversation or conversation[-1]["role"] != "user":
         raise ValueError("A user message is required to ask the model.")
@@ -137,6 +154,10 @@ def reply_stream(
         settings.get("source_language", "auto"),
         settings.get("target_language", "ar"),
         str(settings.get("explain_instructions", "") or ""),
+        (
+            str(settings.get("chat_reply_language") or "")
+            if settings.get("chat_reply_language_only", False) else None
+        ),
     )
     if not conversation or conversation[-1]["role"] != "user":
         raise ValueError("A user message is required to ask the model.")

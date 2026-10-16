@@ -303,6 +303,9 @@ def settings_stylesheet(
             color: {colors["text"]};
             font-size: 14px;
         }}
+        QMenu::item {{
+            font-size: 16px;
+        }}
         QLabel {{
             color: {colors["text"]};
             font-size: 14px;

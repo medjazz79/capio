@@ -106,6 +106,8 @@ DEFAULTS = {
     "float_target_language": "ar",
     "font_size": 17,
     "chat_font_size": 12.0,
+    "chat_reply_language": "ar",
+    "chat_reply_language_only": False,
     "chat_dock_width": 380,
     "chat_dock_visible": False,
     "translation_font": "",

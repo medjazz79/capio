@@ -323,7 +323,7 @@ QMenu {
 QMenu::item { 
     padding: 7px 22px; 
     border-radius: 5px;
-    font-size: 13px;
+    font-size: 16px;
 }
 QMenu::item:selected { 
     background-color: @selection@; 
@@ -2490,6 +2490,12 @@ class MainWindow(QMainWindow):
             lambda source_popup=popup:
                 self.chat_panel.set_translation_context(
                     source_popup._translation_text))
+        popup.explanationSelectionChanged.connect(
+            self.chat_panel.set_explanation_selection)
+        popup.explainRequested.connect(
+            lambda selected_text, style, source_popup=popup:
+                self._explain_translation_selection(
+                    source_popup, selected_text, style))
         popup.translationFailed.connect(
             lambda error, source_popup=popup:
                 self._on_automatic_page_translation_failed(
@@ -2508,6 +2514,17 @@ class MainWindow(QMainWindow):
         popup.show()
         self.popups.append(popup)
         return popup
+
+    def _explain_translation_selection(
+        self, popup: TranslatePopup, selected_text: str, style: str = "context",
+    ) -> None:
+        selected_text = selected_text.strip()
+        if not selected_text:
+            return
+        self.chat_panel.set_translation_context(popup._translation_text)
+        self.chat_panel.set_explanation_selection(selected_text)
+        self._set_chat_dock_visible(True)
+        self.chat_panel.explain_selection(style)
 
     def open_settings(self):
         dlg = SettingsDialog(self.settings, self)
