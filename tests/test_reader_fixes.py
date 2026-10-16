@@ -984,13 +984,19 @@ class TestOneOCRBackend(OneOCRTestCase):
         from ocr_providers import oneocr_backend as ob
 
         try:
-            with mock.patch("subprocess.run",
-                            side_effect=FileNotFoundError("powershell")):
+            with mock.patch(
+                "subprocess.run",
+                side_effect=FileNotFoundError("powershell"),
+            ) as run:
                 with self.assertLogs(ob.log, level="WARNING") as captured:
                     self.assertIsNone(ob.find_snipping_dir())
             self.assertTrue(
                 any("powershell" in line for line in captured.output),
                 "the real reason was swallowed: %r" % (captured.output,),
+            )
+            self.assertEqual(
+                run.call_args.kwargs["creationflags"],
+                getattr(ob.subprocess, "CREATE_NO_WINDOW", 0),
             )
         finally:
             ob._dir_cache.clear()

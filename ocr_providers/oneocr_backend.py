@@ -84,6 +84,7 @@ _FUNCTIONS = [
 
 _dir_cache: dict = {}
 _dir_cache_lock = threading.Lock()
+_NO_CONSOLE_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # How long a "not found" answer is believed. A hit is cached for the process
 # lifetime; a miss is only cached this long, because the probe spawns
 # PowerShell and can fail for reasons that pass (a locked-down shell, a
@@ -114,7 +115,8 @@ def _find_snipping_dir_uncached() -> Path | None:
             ["powershell", "-NoProfile", "-Command",
              "(Get-AppxPackage -Name 'Microsoft.ScreenSketch' | "
              "Select-Object -First 1).InstallLocation"],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=30,
+            creationflags=_NO_CONSOLE_WINDOW)
     except Exception:
         # Swallowed silently before, so a permissions error and a genuine
         # "not installed" were indistinguishable and both read as "install the
