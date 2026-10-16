@@ -322,9 +322,11 @@ class TestTranslationChat(unittest.TestCase):
         response = mock.Mock()
         response.status_code = 200
         response.iter_lines.return_value = [
-            b'data: {"candidates":[{"content":{"parts":[{"text":"first "}]}}]}',
-            b'data: {"candidates":[{"content":{"parts":[{"text":"second"}]},'
-            b'"finishReason":"STOP"}]}',
+            b'data: {"candidates":[{"content":{"parts":[{"text":"William "}]}}]}',
+            b'data: {"candidates":[{"content":{"parts":[{"text":"Taylor."}]},'
+            b'"finishReason":"STOP","groundingMetadata":{"groundingChunks":['
+            b'{"web":{"uri":"https://example.com/taylor",'
+            b'"title":"Biography"}}]}}]}',
         ]
         with mock.patch(
             "translators.gemini.requests.post", return_value=response,
@@ -336,9 +338,58 @@ class TestTranslationChat(unittest.TestCase):
                 "System",
             ))
 
-        self.assertEqual(chunks, ["first ", "second"])
+        self.assertEqual(
+            chunks,
+            [
+                "William ",
+                "Taylor.",
+                "\n\nSources:\n- [Biography](https://example.com/taylor)",
+            ],
+        )
         self.assertTrue(post.call_args.kwargs["stream"])
+        self.assertEqual(
+            post.call_args.kwargs["json"]["tools"],
+            [gemini.GOOGLE_SEARCH_TOOL],
+        )
         response.close.assert_called_once_with()
+
+    def test_gemini_chat_request_enables_google_search_and_cites_sources(self):
+        from translators import gemini
+
+        response = mock.Mock()
+        response.json.return_value = {
+            "candidates": [{
+                "content": {"parts": [{"text": "Born in 1872; died in 1922."}]},
+                "finishReason": "STOP",
+                "groundingMetadata": {
+                    "groundingChunks": [{
+                        "web": {
+                            "uri": "https://example.com/taylor",
+                            "title": "Biography",
+                        },
+                    }],
+                },
+            }],
+        }
+        with mock.patch(
+            "translators.gemini.requests.post", return_value=response,
+        ) as post:
+            answer = gemini.chat(
+                [{"role": "user", "content": "When was he born and when did he die?"}],
+                "key",
+                "gemini-test",
+                "Use Google Search for missing facts.",
+            )
+
+        self.assertEqual(
+            answer,
+            "Born in 1872; died in 1922.\n\n"
+            "Sources:\n- [Biography](https://example.com/taylor)",
+        )
+        self.assertEqual(
+            post.call_args.kwargs["json"]["tools"],
+            [gemini.GOOGLE_SEARCH_TOOL],
+        )
 
     def test_gemini_chat_stream_retries_transient_service_unavailable(self):
         from translators import gemini
@@ -678,6 +729,13 @@ class TestTranslationChat(unittest.TestCase):
             messages, [{"role": "user", "content": "What is a cadence?"}])
         self.assertIn("general-purpose conversational AI assistant", system)
         self.assertIn("do not assume a music-related context", system)
+        self.assertIn(
+            "when the user asks you to look something up, search the web "
+            "with Google Search before answering",
+            system,
+        )
+        self.assertNotIn(
+            "Do not assume access to a book, document, image", system)
         self.assertIn("Reply in Arabic", system)
         self.assertNotIn("Original passage:", system)
         self.assertNotIn("Translation:", system)
@@ -707,6 +765,14 @@ class TestTranslationChat(unittest.TestCase):
         self.assertIn("respond only in French", system)
         self.assertIn("do not assume the passage or question is about music",
                       system)
+        self.assertIn(
+            "If a requested fact is not in the passage or you are unsure of it",
+            system,
+        )
+        self.assertIn(
+            "Always search when the user asks you to look something up",
+            system,
+        )
 
     def test_settings_can_enable_a_fixed_chat_response_language(self):
         from config.settings import DEFAULTS
@@ -827,9 +893,13 @@ class TestTranslationChat(unittest.TestCase):
                 "role": "user",
                 "content": (
                     "Explain what the selected text means in the context of "
-                    "the current translation and original passage. Use only "
-                    "context supported by the passage.\n\nSelected text:\n"
-                    "motif"
+                    "the current translation and original passage. You may "
+                    "supplement the passage with relevant general knowledge "
+                    "or web research. For factual details not clearly stated "
+                    "in the passage, use the available Google Search tool and "
+                    "cite its sources; do not limit your answer to the "
+                    "passage.\n\n"
+                    "Selected text:\nmotif"
                 ),
             }],
         )

@@ -21,6 +21,7 @@ IMAGE_TIMEOUT = 45
 IMAGE_MAX_OUTPUT_TOKENS = 8192
 TEXT_MIN_OUTPUT_TOKENS = 8192
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
+GOOGLE_SEARCH_TOOL = {"google_search": {}}
 
 # Google answers 503 ("high demand") and 429 (quota) for moments at a time --
 # verified on this key, where a plain retry minutes later succeeded. 400/404
@@ -500,6 +501,25 @@ def _parse(r, model: str) -> str:
     return out
 
 
+def _append_grounding_sources(text: str, metadata: dict | None) -> str:
+    sources = []
+    seen_urls = set()
+    if isinstance(metadata, dict):
+        for chunk in metadata.get("groundingChunks") or []:
+            web = chunk.get("web") if isinstance(chunk, dict) else None
+            if not isinstance(web, dict):
+                continue
+            url = web.get("uri")
+            title = web.get("title") or url
+            if isinstance(url, str) and url.startswith(("https://", "http://")):
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    sources.append(f"- [{title}]({url})")
+    if not sources:
+        return text
+    return f"{text.rstrip()}\n\nSources:\n" + "\n".join(sources)
+
+
 def chat(
     messages: list[dict[str, str]],
     api_key: str,
@@ -520,12 +540,16 @@ def chat(
         json={
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": contents,
+            "tools": [GOOGLE_SEARCH_TOOL],
             "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
         },
         timeout=TIMEOUT,
     )
     response.raise_for_status()
-    return _parse(response, model)
+    text = _parse(response, model)
+    candidate = response.json()["candidates"][0]
+    return _append_grounding_sources(
+        text, candidate.get("groundingMetadata"))
 
 
 def chat_stream(
@@ -549,6 +573,7 @@ def chat_stream(
             "temperature": 0.3,
             "maxOutputTokens": 2048,
         },
+        "tools": [GOOGLE_SEARCH_TOOL],
     }
     for attempt in range(MAX_ATTEMPTS):
         if attempt:
@@ -573,6 +598,8 @@ def chat_stream(
             response.raise_for_status()
             finish_reason = None
             pending_usage = None
+            grounding_chunks = []
+            seen_grounding_urls = set()
             for line in response.iter_lines():
                 if not line:
                     continue
@@ -591,6 +618,16 @@ def chat_stream(
                     ) from error
                 if event.get("usageMetadata"):
                     pending_usage = event["usageMetadata"]
+                if candidate.get("groundingMetadata"):
+                    for chunk in (
+                        candidate["groundingMetadata"].get("groundingChunks")
+                        or []
+                    ):
+                        web = chunk.get("web") if isinstance(chunk, dict) else None
+                        url = web.get("uri") if isinstance(web, dict) else None
+                        if url and url not in seen_grounding_urls:
+                            seen_grounding_urls.add(url)
+                            grounding_chunks.append(chunk)
                 if candidate.get("finishReason"):
                     finish_reason = candidate["finishReason"]
                 content = candidate.get("content") or {}
@@ -607,6 +644,10 @@ def chat_stream(
             if not received_text:
                 raise RuntimeError(
                     f"Gemini returned an empty reply for {model}")
+            sources = _append_grounding_sources(
+                "", {"groundingChunks": grounding_chunks})
+            if sources:
+                yield sources
             return
         except requests.exceptions.Timeout:
             if received_text or attempt + 1 == MAX_ATTEMPTS:

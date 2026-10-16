@@ -67,8 +67,10 @@ _EXPLANATION_INSTRUCTIONS = {
     ),
     "context": (
         "Explain what the selected text means in the context of the current "
-        "translation and original passage. Use only context supported by the "
-        "passage."
+        "translation and original passage. You may supplement the passage with "
+        "relevant general knowledge or web research. For factual details not "
+        "clearly stated in the passage, use the available Google Search tool "
+        "and cite its sources; do not limit your answer to the passage."
     ),
 }
 
