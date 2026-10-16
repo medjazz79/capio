@@ -105,6 +105,9 @@ DEFAULTS = {
     "float_source_language": "auto",
     "float_target_language": "ar",
     "font_size": 17,
+    "chat_font_size": 12.0,
+    "chat_dock_width": 380,
+    "chat_dock_visible": False,
     "translation_font": "",
     "translation_font_arabic": "",
     "translation_font_latin": "",
@@ -394,6 +397,20 @@ def load() -> dict:
         MIN_TRANSLATION_FONT_SIZE,
         min(MAX_TRANSLATION_FONT_SIZE, font_size),
     )
+    try:
+        chat_font_size = float(merged.get("chat_font_size", 12.0))
+    except (TypeError, ValueError):
+        chat_font_size = 12.0
+    if not 0.0 < chat_font_size < float("inf"):
+        chat_font_size = 12.0
+    merged["chat_font_size"] = min(30.0, max(8.0, chat_font_size))
+    try:
+        chat_dock_width = int(merged.get("chat_dock_width", 380))
+    except (TypeError, ValueError):
+        chat_dock_width = 380
+    merged["chat_dock_width"] = max(320, min(900, chat_dock_width))
+    if not isinstance(merged.get("chat_dock_visible"), bool):
+        merged["chat_dock_visible"] = False
     # A saved model that cannot answer any more must not stay selected: it
     # would fail on every selection with a badge the user cannot act on.
     #

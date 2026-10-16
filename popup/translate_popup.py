@@ -92,7 +92,10 @@ class TranslationTextEdit(QTextEdit):
 
     def mouseReleaseEvent(self, event) -> None:
         super().mouseReleaseEvent(event)
-        if event.button() == Qt.MouseButton.LeftButton:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and not self.textCursor().hasSelection()
+        ):
             self.positionClicked.emit(
                 self.cursorForPosition(event.position().toPoint()).position()
             )
@@ -314,6 +317,7 @@ class TranslatePopup(QDialog):
         self.explain_btn.setCheckable(True)
         self.explain_btn.toggled.connect(self._set_explain_mode)
         self._sync_explain_button()
+        self.explain_btn.hide()
         self.previous_page_btn = QPushButton("◀")
         self.previous_page_btn.setFixedSize(30, 26)
         self.previous_page_btn.setStyleSheet("font-size: 16px; padding: 0;")
@@ -349,6 +353,7 @@ class TranslatePopup(QDialog):
         self.chat_btn.setEnabled(False)
         self.chat_btn.setMinimumWidth(92)
         self.chat_btn.clicked.connect(self._on_chat_button_clicked)
+        self.chat_btn.hide()
         self.source_language_btn = self._create_language_button(
             "source", "Translate from", settings.get("source_language", "auto"))
         self.target_language_btn = self._create_language_button(
@@ -362,8 +367,6 @@ class TranslatePopup(QDialog):
         if self._floating_language_controls:
             self.language_action_layout.addWidget(self.target_language_btn)
             self.language_action_layout.addWidget(self.source_language_btn)
-        self.language_action_layout.addWidget(self.chat_btn)
-        self.language_action_layout.addWidget(self.explain_btn)
         header_layout.addWidget(self.language_action_group)
         header_layout.addWidget(self.copy_btn)
         header_layout.addWidget(self.speak_btn)

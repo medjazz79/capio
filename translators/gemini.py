@@ -525,3 +525,82 @@ def chat(
     )
     response.raise_for_status()
     return _parse(response, model)
+
+
+def chat_stream(
+    messages: list[dict[str, str]],
+    api_key: str,
+    model: str,
+    system_prompt: str,
+):
+    """Yield conversational reply text as Gemini generates it."""
+    url = f"{API_ROOT}/models/{model}:streamGenerateContent?alt=sse"
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [
+            {
+                "role": "model" if item["role"] == "assistant" else "user",
+                "parts": [{"text": item["content"]}],
+            }
+            for item in messages
+        ],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 2048,
+        },
+    }
+    response = None
+    for attempt in range(MAX_ATTEMPTS):
+        if attempt:
+            time.sleep(_backoff(attempt))
+        response = requests.post(
+            url,
+            headers=_auth(api_key),
+            json=payload,
+            timeout=TIMEOUT,
+            stream=True,
+        )
+        if response.status_code not in RETRY_STATUSES:
+            break
+        response.close()
+    assert response is not None
+    received_text = False
+    finish_reason = None
+    pending_usage = None
+    try:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
+                continue
+            chunk = (
+                line.decode("utf-8", "replace")
+                if isinstance(line, bytes) else line
+            )
+            if not chunk.startswith("data:"):
+                continue
+            try:
+                event = json.loads(chunk[len("data:"):].strip())
+                candidate = event["candidates"][0]
+            except (ValueError, KeyError, IndexError, TypeError) as error:
+                raise RuntimeError(
+                    f"Unexpected streamed reply from Gemini ({model})"
+                ) from error
+            if event.get("usageMetadata"):
+                pending_usage = event["usageMetadata"]
+            if candidate.get("finishReason"):
+                finish_reason = candidate["finishReason"]
+            content = candidate.get("content") or {}
+            for part in content.get("parts") or []:
+                delta = part.get("text", "")
+                if delta:
+                    received_text = True
+                    yield delta
+    finally:
+        response.close()
+    if pending_usage:
+        from . import usage as _usage
+
+        _usage.note(model, pending_usage, "gemini")
+    _validate_finish_reason(finish_reason)
+    if not received_text:
+        raise RuntimeError(f"Gemini returned an empty reply for {model}")

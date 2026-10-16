@@ -1497,6 +1497,13 @@ class TestGatewayExhaustionIsNotRetried(unittest.TestCase):
                     "source", "https://api.groq.com/openai/v1", "k", "m")
         self.assertEqual(post.call_count, opencode_compat.RATE_LIMIT_RETRIES + 1)
 
+    def test_list_error_response_does_not_raise_attribute_error(self):
+        response = mock.Mock()
+        response.headers = {}
+        response.json.return_value = [["unexpected response"]]
+
+        self.assertFalse(opencode_compat._is_gateway_exhaustion(response))
+
 
 # --- 9. the 429 retry loop must not leak responses --------------------------
 

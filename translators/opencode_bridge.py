@@ -501,3 +501,33 @@ def chat(
     if not output:
         raise RuntimeError(f"Bridge returned an empty chat reply for {model}")
     return output
+
+
+def chat_stream(
+    messages: list[dict[str, str]],
+    model: str,
+    system_prompt: str,
+    settings: dict,
+):
+    """Yield conversational text deltas through the selected bridge."""
+    level = effort_for(model, settings)
+    user_text = messages[-1]["content"] if messages else ""
+    if model in RESPONSES_MODELS:
+        yield from _iter_responses(
+            user_text,
+            model,
+            instructions=system_prompt,
+            level=level,
+            chat_messages=messages,
+        )
+        return
+    yield from _iter_chat(
+        user_text,
+        model,
+        instructions=system_prompt,
+        level=level,
+        chat_messages=[
+            {"role": "system", "content": system_prompt},
+            *messages,
+        ],
+    )

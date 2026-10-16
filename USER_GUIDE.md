@@ -97,11 +97,12 @@ Works on **both** kinds of PDFs:
 
 ## Use
 
-- Use the two toolbar language selectors to choose a source and target. The
-  source selector includes **Auto** (the default) plus Arabic, French, English,
-  Russian, Italian, Spanish, and German; the target selector offers those
-  seven languages. Choices are remembered. For example, **Auto → Italiano**
-  detects the selected passage's language and translates it into Italian.
+- Choose source and target languages from the language controls in the
+  translation popup. The source selector includes **Auto** (the default) plus
+  Arabic, French, English, Russian, Italian, Spanish, and German; the target
+  selector offers those seven languages. Choices are remembered. For example,
+  **Auto → Italiano** detects the selected passage's language and translates
+  it into Italian.
   Translation prompts for text and images explicitly require the selected
   target language even when the source is **Auto**. Longer model replies are
   checked; a mismatched reply gets one corrective request, and is rejected if
@@ -111,15 +112,20 @@ Works on **both** kinds of PDFs:
   selection. The selected target language is used for both text and OCR
   from scanned pages. Long passages are sent in larger, sentence-aware batches
   to reduce sequential model requests while preserving the full text.
-- Use **Explain** in the translation popup (or right-click the floating bubble
-  and choose **Explain**) to ask the selected model to add a concise explanation
-  below each translation, in the target language. The setting is shared and
-  remembered; switch it off for translation only.
-- Use **Chat** beside Explain to ask follow-up questions about the selected
-  passage and its translation. Replies use the selected model; the conversation stays with
-  that popup and does not replace or edit the translation. Send a message with
-  **Send** or Ctrl+Enter. Drag the blue divider between the translation and
-  chat to resize the chat area.
+- Use **Chat** in the main toolbar, between **Pages** and **Settings**, to open
+  a separate chat panel on the right. It uses the selected model and keeps the
+  conversation while the app remains open. Use **Read aloud** to read the
+  latest response, or click a word to read from that word through the end of
+  that response; **Stop** ends playback, and the spoken word is highlighted.
+  Send with **Send** or Enter (Shift+Enter starts a new line); choose
+  **New chat** to clear the conversation. Responses stream into the transcript
+  as the selected model generates them. The Chat panel width and its font size
+  are remembered between launches.
+- Chat automatically receives the most recently completed translated passage,
+  so you can ask follow-up questions about it. It does not receive the original
+  book page or source text. The translation popup remains separate and no
+  longer contains Chat or Explain buttons. The floating translator's
+  **Explain** menu option can still add an explanation below a translation.
 - Right-click inside the main window, a page, or a thumbnail to choose
   **Refresh** (reapply saved settings and redraw open pages and thumbnails in
   place) or **ReOpen** (save the open session and restart the app, loading

@@ -59,7 +59,8 @@ from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QPainter
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QDockWidget, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QMenu, QMessageBox,
     QInputDialog, QPushButton, QPlainTextEdit, QTabBar, QTabWidget, QTextEdit,
     QToolBar, QToolButton, QVBoxLayout,
     QWidget, QSpinBox,
@@ -74,6 +75,7 @@ from reader.continuous import ContinuousReader  # noqa: F401 (used in tests)
 from translators import ocr
 from translators.prompt import LANGUAGE_CHOICES
 from ui.file_drop import local_document_paths
+from ui.chat_panel import ChatPanel
 from ui.theme import THEMES, theme_colors
 
 APP_STYLE_TEMPLATE = """
@@ -83,6 +85,15 @@ APP_STYLE_TEMPLATE = """
 QMainWindow, QDialog { 
     background-color: @window@; 
     color: @text@; 
+}
+QDockWidget#chatDock {
+    border-left: 1px solid @accent_light@;
+}
+QDockWidget#chatDock::title {
+    background-color: @toolbar@;
+    color: @text@;
+    border-bottom: 1px solid @accent_light@;
+    padding: 5px;
 }
 QWidget { 
     color: @text@; 
@@ -293,6 +304,14 @@ QSplitter::handle {
 }
 QSplitter::handle:hover {
     background-color: @accent_light@;
+}
+QMainWindow::separator {
+    width: 5px;
+    background-color: transparent;
+    border-left: 1px solid @border@;
+}
+QMainWindow::separator:hover {
+    border-left-color: @accent_light@;
 }
 QMenu { 
     background-color: @panel@; 
@@ -524,17 +543,39 @@ class _CtrlWheelThumbsFilter(QObject):
             widget = widget.parentWidget()
         return False
 
+    def _is_chat_context_target(self, target: QWidget | None) -> bool:
+        widget = target
+        chat_dock = getattr(self._window, "chat_dock", None)
+        while widget is not None:
+            if (
+                widget is chat_dock
+                or widget.objectName() == "standaloneChatTranscript"
+            ):
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    def _is_chat_context_position(self, position: QPoint) -> bool:
+        chat_dock = getattr(self._window, "chat_dock", None)
+        if chat_dock is None or not chat_dock.isVisible():
+            return False
+        top_left = chat_dock.mapToGlobal(QPoint(0, 0))
+        return QRect(top_left, chat_dock.size()).contains(position)
+
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.ContextMenu:
             target = obj if isinstance(obj, QWidget) else None
+            position = event.globalPos()
             if (
                 target is not None
                 and target.window() is self._window
                 and target is not self._window.tabs.tabBar()
                 and not self._is_thumbnail_context_target(target)
                 and not self._is_page_canvas_context_target(target)
+                and not self._is_chat_context_target(target)
+                and not self._is_chat_context_position(position)
             ):
-                self._window._show_app_context_menu(event.globalPos())
+                self._window._show_app_context_menu(position)
                 return True
         if event.type() == QEvent.Type.Wheel:
             if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -700,9 +741,9 @@ class MainWindow(QMainWindow):
             self.fit_menu.addAction(label, callback)
         self.fit_button.setMenu(self.fit_menu)
         bar.addWidget(self.fit_button)
-        bar.addSeparator()
 
-        self.source_combo = QComboBox()
+        self.source_combo = QComboBox(self)
+        self.source_combo.hide()
         self.source_combo.setObjectName("sourceLanguageCombo")
         self.source_combo.setToolTip(
             "Source language — Auto detects it, or choose a language")
@@ -715,11 +756,8 @@ class MainWindow(QMainWindow):
         self.source_combo.setMinimumWidth(90)
         self.source_combo.currentIndexChanged.connect(
             self._on_source_language_changed)
-        bar.addWidget(self.source_combo)
-        direction = QLabel("→")
-        direction.setToolTip("Translate from the selected source language")
-        bar.addWidget(direction)
-        self.target_combo = QComboBox()
+        self.target_combo = QComboBox(self)
+        self.target_combo.hide()
         self.target_combo.setObjectName("targetLanguageCombo")
         self.target_combo.setToolTip("Language to translate into")
         for label, code in LANGUAGE_CHOICES:
@@ -729,7 +767,6 @@ class MainWindow(QMainWindow):
         self.target_combo.setMinimumWidth(90)
         self.target_combo.currentIndexChanged.connect(
             self._on_target_language_changed)
-        bar.addWidget(self.target_combo)
         bar.addSeparator()
 
         self.thumbs_action = QAction("🖼  Pages", self)
@@ -739,6 +776,11 @@ class MainWindow(QMainWindow):
         self.thumbs_action.toggled.connect(self._toggle_thumbs)
         bar.addAction(self.thumbs_action)
         bar.addSeparator()
+
+        self.chat_action = QAction("💬  Chat", self)
+        self.chat_action.setObjectName("chatDockAction")
+        self.chat_action.setToolTip("Open a separate chat with the selected model")
+        self.chat_action.setCheckable(True)
 
         add_action("⚙  Settings", self.open_settings, "API keys and options")
         bar.addSeparator()
@@ -774,7 +816,6 @@ class MainWindow(QMainWindow):
         self.selection_mode_button.setFixedWidth(72)
         self.selection_mode_button.clicked.connect(
             self._toggle_selection_mode)
-        bar.addWidget(self.selection_mode_button)
         self._sync_selection_mode_button()
 
         # Right-hand corner: which model answered, and what it has cost in
@@ -785,17 +826,17 @@ class MainWindow(QMainWindow):
         self.model_readout.setAlignment(
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
         self.model_readout.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
-        self.model_readout.setMinimumWidth(160)
+        self.model_readout.setMinimumWidth(0)
         self.model_readout.setToolTip("Model that answered, and its running cost.")
-        spacer = QWidget(self)
-        spacer.setFixedWidth(14)
-        bar.addWidget(spacer)
-        bar.addWidget(self.model_readout)
-        self._model_readout_resize_timer = QTimer(self)
-        self._model_readout_resize_timer.setSingleShot(True)
-        self._model_readout_resize_timer.timeout.connect(
-            self._sync_model_readout_width)
-        QTimer.singleShot(0, self._sync_model_readout_width)
+        self.toolbar_right_controls = QWidget(bar)
+        self.toolbar_right_controls.setObjectName("toolbarRightControls")
+        self.selection_mode_button.setParent(self.toolbar_right_controls)
+        self.chat_button = QToolButton(self.toolbar_right_controls)
+        self.chat_button.setDefaultAction(self.chat_action)
+        self.model_readout.setParent(self.toolbar_right_controls)
+        self.addAction(self.chat_action)
+        bar.installEventFilter(self)
+        QTimer.singleShot(0, self._layout_toolbar_right_controls)
         self._show_model_usage("", "")
 
         self._settings_poll = QTimer(self)
@@ -890,14 +931,47 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.tabs.hide()
 
+        self.chat_dock = QDockWidget("Chat", self)
+        self.chat_dock.setObjectName("chatDock")
+        self.chat_dock.setAllowedAreas(
+            Qt.DockWidgetArea.RightDockWidgetArea)
+        self.chat_dock.setMinimumWidth(320)
+        self.chat_panel = ChatPanel(lambda: self.settings, self.chat_dock)
+        self.chat_panel.transcript.refreshRequested.connect(
+            self._refresh_application)
+        self.chat_panel.transcript.reopenRequested.connect(
+            self._reopen_application)
+        self.chat_dock.setWidget(self.chat_panel)
+        self._apply_theme_to_chat_panel()
+        self.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea, self.chat_dock)
+        try:
+            saved_chat_width = int(self.settings.get("chat_dock_width", 380))
+        except (TypeError, ValueError):
+            saved_chat_width = 380
+        saved_chat_width = max(320, min(saved_chat_width, 900))
+        self.resizeDocks(
+            [self.chat_dock], [saved_chat_width], Qt.Orientation.Horizontal)
+        self._chat_dock_user_visible = bool(
+            self.settings.get("chat_dock_visible", False))
+        self.chat_action.toggled.connect(self._set_chat_dock_visible)
+        self.chat_dock.visibilityChanged.connect(
+            self._on_chat_dock_visibility_changed)
+        self.chat_dock.setVisible(self._chat_dock_user_visible)
+
         self._flash_token = 0
         self._geo_timer = QTimer(self)
         self._geo_timer.setSingleShot(True)
         self._geo_timer.setInterval(500)
         self._geo_timer.timeout.connect(self._save_session_live)
+        self.chat_dock.visibilityChanged.connect(
+            lambda _visible: self._schedule_geometry_save())
+        self.chat_dock.installEventFilter(self)
 
         self._refresh_engine_label()
         self._apply_startup_geometry()
+        self.resizeDocks(
+            [self.chat_dock], [saved_chat_width], Qt.Orientation.Horizontal)
 
         QTimer.singleShot(400, self._warm_ocr)
         QTimer.singleShot(0, self._restore_session)
@@ -1709,6 +1783,7 @@ class MainWindow(QMainWindow):
         app.setStyleSheet(app_stylesheet(
             theme, scheme,
             bool(self.settings.get("pdf_canvas_theme_background", False))))
+        self._apply_theme_to_chat_panel()
         self._sync_theme_button(theme)
         thumbs_visible = bool(self.settings.get("thumbs_visible", False))
         self.thumbs_action.blockSignals(True)
@@ -2411,6 +2486,10 @@ class MainWindow(QMainWindow):
         popup.translationReady.connect(
             lambda source_popup=popup:
                 self._on_automatic_page_translation_ready(source_popup))
+        popup.translationReady.connect(
+            lambda source_popup=popup:
+                self.chat_panel.set_translation_context(
+                    source_popup._translation_text))
         popup.translationFailed.connect(
             lambda error, source_popup=popup:
                 self._on_automatic_page_translation_failed(
@@ -2447,6 +2526,7 @@ class MainWindow(QMainWindow):
             self.settings.get("color_scheme", "system"),
             bool(self.settings.get("pdf_canvas_theme_background", False)),
         )
+        self._apply_theme_to_chat_panel()
         self._apply_theme_to_books(self.settings.get("theme", "Dark Slate"))
         for popup in self.popups:
             if popup.isVisible():
@@ -2466,6 +2546,7 @@ class MainWindow(QMainWindow):
             self.settings.get("color_scheme", "system"),
             bool(self.settings.get("pdf_canvas_theme_background", False)),
         )
+        self._apply_theme_to_chat_panel()
         self._apply_theme_to_books(theme)
         for popup in self.popups:
             if popup.isVisible():
@@ -2479,6 +2560,7 @@ class MainWindow(QMainWindow):
         install_app_stylesheet(
             theme, "system",
             bool(self.settings.get("pdf_canvas_theme_background", False)))
+        self._apply_theme_to_chat_panel()
         self._apply_theme_to_books(theme)
         for popup in self.popups:
             if popup.isVisible():
@@ -2527,15 +2609,6 @@ class MainWindow(QMainWindow):
             tip += f"\nLast selection: {token_line}"
         self.model_readout.setToolTip(tip)
 
-    def _sync_model_readout_width(self) -> None:
-        """Use the remaining toolbar width so the readout stays centered."""
-        if not hasattr(self, "model_readout"):
-            return
-        toolbar = self._toolbar
-        left = self.model_readout.mapTo(toolbar, QPoint(0, 0)).x()
-        available = toolbar.contentsRect().right() - left + 1
-        self.model_readout.setFixedWidth(max(160, available))
-
     def _model_running_total(self) -> tuple[int, int, int]:
         """(total, prompt, completion) this session has spent on that model."""
         try:
@@ -2552,6 +2625,39 @@ class MainWindow(QMainWindow):
             return (total, int(row.get("in") or 0), int(row.get("out") or 0))
         except Exception:
             return (0, 0, 0)
+
+    def _layout_toolbar_right_controls(self) -> None:
+        toolbar = self._toolbar
+        toolbar_bounds = toolbar.contentsRect()
+        theme_button_right = self.theme_button.mapTo(
+            toolbar, QPoint(self.theme_button.width(), 0)).x()
+        left = max(theme_button_right + 8, toolbar_bounds.left())
+        right = toolbar_bounds.right() + 1
+        width = max(0, right - left)
+        height = toolbar_bounds.height()
+        self.toolbar_right_controls.setGeometry(
+            left, toolbar_bounds.top(), width, height)
+
+        chat_width = min(self.chat_button.sizeHint().width(), width)
+        image_width = min(
+            self.selection_mode_button.sizeHint().width(),
+            max(0, width - chat_width),
+        )
+        self.chat_button.setGeometry(
+            width - chat_width, 0, chat_width, height)
+        self.selection_mode_button.setGeometry(
+            0, 0, image_width, height)
+        middle_width = max(
+            0,
+            self.chat_button.geometry().left()
+            - (self.selection_mode_button.geometry().right() + 1),
+        )
+        label_width = min(self.model_readout.sizeHint().width(), middle_width)
+        gap = max(0, (middle_width - label_width) // 2)
+        label_left = self.selection_mode_button.geometry().right() + 1 + gap
+        self.model_readout.setGeometry(
+            label_left, 0, label_width, height)
+        self.toolbar_right_controls.raise_()
 
     def _sync_theme_button(self, theme: str) -> None:
         for name, action in self._theme_actions.items():
@@ -2592,6 +2698,11 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+    def _apply_theme_to_chat_panel(self) -> None:
+        self.chat_panel.apply_theme(theme_colors(
+            self.settings.get("theme", "Dark Slate"),
+            self.settings.get("color_scheme", "system")))
+
     def _reload_settings(self):
         try:
             cur = load()
@@ -2617,6 +2728,7 @@ class MainWindow(QMainWindow):
                         theme, scheme,
                         bool(cur.get("pdf_canvas_theme_background", False)),
                     )
+                    self._apply_theme_to_chat_panel()
                     self._sync_theme_button(theme)
                     self._apply_theme_to_books(theme)
                 if (cur.get("font_size") != old.get("font_size")
@@ -2743,6 +2855,14 @@ class MainWindow(QMainWindow):
             self.settings["thumbs_visible"] = self.thumbs_action.isChecked()
             self.settings["window_geometry"] = bytes(
                 self.saveGeometry().toBase64()).decode("ascii")
+            self.settings["chat_dock_visible"] = (
+                self._chat_dock_user_visible)
+            if (
+                self._chat_dock_user_visible
+                and not self.isMinimized()
+                and self.chat_dock.width() >= 320
+            ):
+                self.settings["chat_dock_width"] = self.chat_dock.width()
             book = self.current_book()
             if book is not None and book.path:
                 self.settings["last_pdf"] = book.path
@@ -2846,15 +2966,41 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(ms, _restore)
 
+    def _set_chat_dock_visible(self, visible: bool) -> None:
+        self._chat_dock_user_visible = visible
+        self.chat_dock.setVisible(visible)
+
+    def _on_chat_dock_visibility_changed(self, visible: bool) -> None:
+        if self.isMinimized():
+            return
+        self._chat_dock_user_visible = visible
+        if self.chat_action.isChecked() != visible:
+            self.chat_action.setChecked(visible)
+
     def moveEvent(self, e) -> None:
         super().moveEvent(e)
         self._schedule_geometry_save()
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
-        if hasattr(self, "_model_readout_resize_timer"):
-            self._model_readout_resize_timer.start()
         self._schedule_geometry_save()
+
+    def eventFilter(self, obj, event) -> bool:
+        if (
+            obj is getattr(self, "_toolbar", None)
+            and event.type() == QEvent.Type.Resize
+            and hasattr(self, "toolbar_right_controls")
+        ):
+            self._layout_toolbar_right_controls()
+        if (
+            obj is getattr(self, "chat_dock", None)
+            and event.type() == QEvent.Type.Resize
+            and hasattr(self, "_geo_timer")
+        ):
+            if obj.isVisible() and obj.width() >= 320:
+                self.settings["chat_dock_width"] = obj.width()
+            self._schedule_geometry_save()
+        return super().eventFilter(obj, event)
 
     def _schedule_geometry_save(self) -> None:
         if not self._closing and not self._geo_timer.isActive():
@@ -2908,18 +3054,19 @@ class MainWindow(QMainWindow):
             if any(
                 popup.isVisible() or getattr(popup, "_close_pending", False)
                 for popup in self.popups
-            ):
+            ) or self.chat_panel.is_busy or self.chat_panel.is_speech_busy:
                 e.ignore()
                 QTimer.singleShot(100, self.close)
                 return
             self._shutdown_waiting = False
         else:
+            self.chat_panel.stop_speech()
             for popup in list(self.popups):
                 popup.close()
             if any(
                 popup.isVisible() or getattr(popup, "_close_pending", False)
                 for popup in self.popups
-            ):
+            ) or self.chat_panel.is_busy or self.chat_panel.is_speech_busy:
                 self._shutdown_waiting = True
                 e.ignore()
                 QTimer.singleShot(100, self.close)

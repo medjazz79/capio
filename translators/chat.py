@@ -17,17 +17,28 @@ def _model_messages(
     target_name = LANGUAGE_NAMES.get(target_language, "Arabic")
     source_name = LANGUAGE_NAMES.get(
         source_language, "the automatically detected source language")
-    system = (
-        "You are a helpful tutor for a student reading a music-harmony textbook. "
-        f"Reply in {target_name}. Answer the student's questions conversationally "
-        "and accurately. Explain only as much as needed. Keep musical notation, "
-        "chord symbols, and quoted source-language terms unchanged when relevant. "
-        f"The source language is {source_name}. The passage and its translation "
-        "being discussed follow.\n\nOriginal passage:\n{source_text}\n\n"
-        f"Translation:\n{translated_text}"
-    )
+    if source_text.strip() or translated_text.strip():
+        system = (
+            "You are a helpful tutor for a student reading a music-harmony "
+            f"textbook. Reply in {target_name}. Answer conversationally and "
+            "accurately. Explain only as much as needed. Keep musical notation, "
+            "chord symbols, and quoted source-language terms unchanged when "
+            "relevant. "
+            f"The source language is {source_name}. The passage and its "
+            "translation being discussed follow.\n\n"
+            f"Original passage:\n{source_text}\n\n"
+            f"Translation:\n{translated_text}"
+        )
+    else:
+        system = (
+            "You are a helpful conversational AI assistant. Answer the user's "
+            f"questions clearly and accurately. Reply in {target_name}. Follow "
+            "the user's lead and explain concepts at the level they ask for. Do not "
+            "assume access to a book, document, image, or other context that "
+            "the user has not included in the conversation."
+        )
     extra_instructions = extra_instructions.strip()
-    if extra_instructions:
+    if extra_instructions and (source_text.strip() or translated_text.strip()):
         system += (
             "\n\nAdditional instructions from the translation window. "
             "Follow them when explaining the passage and answering the student's "
@@ -106,3 +117,84 @@ def reply(
             "Chat with this model requires an OpenAI-compatible base URL "
             "and API key in Settings.")
     return opencode_compat.chat(conversation, base, key, model, system)
+
+
+def reply_stream(
+    messages: list[dict[str, str]],
+    settings: dict,
+    source_text: str,
+    translated_text: str,
+):
+    """Yield reply deltas from the selected model without changing providers."""
+    from config.settings import resolve_model
+
+    model = resolve_model(settings)
+    provider = registry.provider_of(model)
+    system, conversation = _model_messages(
+        messages,
+        source_text,
+        translated_text,
+        settings.get("source_language", "auto"),
+        settings.get("target_language", "ar"),
+        str(settings.get("explain_instructions", "") or ""),
+    )
+    if not conversation or conversation[-1]["role"] != "user":
+        raise ValueError("A user message is required to ask the model.")
+
+    if provider == "gemini":
+        api_key = (settings.get("gemini_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("Chat with this Gemini model requires a Gemini API key.")
+        yield from gemini.chat_stream(conversation, api_key, model, system)
+        return
+    if provider == "bridge":
+        yield from opencode_bridge.chat_stream(
+            conversation, model, system, settings)
+        return
+    if provider == "opencode":
+        yield from opencode_zen.chat_stream(conversation, model, system)
+        return
+    if provider == "opencode_cli":
+        yield from opencode_cli.chat_stream(
+            conversation, model[len(registry.OPENCODE_CLI_PREFIX):], system)
+        return
+    if provider in {"groq", "cf", "mistral"}:
+        base, key = registry.provider_creds(provider, settings)
+        if not base or not key:
+            raise RuntimeError(
+                f"Chat requires a {provider.upper()} API key in Settings.")
+        prefix = {
+            "groq": registry.GROQ_PREFIX,
+            "cf": registry.CF_PREFIX,
+            "mistral": registry.MISTRAL_PREFIX,
+        }[provider]
+        yield from opencode_compat.stream_chat(
+            conversation, base, key, model[len(prefix):], system)
+        return
+    if provider == "custom_provider":
+        cfg = registry.custom_provider_config(model, settings)
+        if cfg is None:
+            raise RuntimeError("Custom provider not found — re-add it in Settings → Custom Providers.")
+        base, key, provider_model = cfg
+        if not base or not key or not provider_model:
+            raise RuntimeError("Custom provider is incomplete — fill Base URL, API Key and Model in Settings.")
+        entry = registry.get_custom_provider(settings, model)
+        reasoning = bool(entry.get("reasoning_enabled")) if entry else False
+        yield from opencode_compat.stream_chat(
+            conversation,
+            base,
+            key,
+            provider_model,
+            system,
+            reasoning_enabled=reasoning,
+        )
+        return
+
+    base = (settings.get("openai_base") or "").strip()
+    key = (settings.get("openai_key") or "").strip()
+    if not base or not key:
+        raise RuntimeError(
+            "Chat with this model requires an OpenAI-compatible base URL "
+            "and API key in Settings.")
+    yield from opencode_compat.stream_chat(
+        conversation, base, key, model, system)

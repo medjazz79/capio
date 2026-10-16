@@ -189,8 +189,13 @@ def _is_gateway_exhaustion(response) -> bool:
     if response.headers.get(ROUTED_VIA_HEADER):
         return False  # something did answer; this is a per-key limit
     try:
-        error = response.json().get("error", {})
+        body = response.json()
     except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error", {})
+    if not isinstance(error, dict):
         return False
     if str(error.get("code", "")).lower() == "routing_exhausted":
         return True
@@ -674,7 +679,12 @@ def _record_usage(raw, model: str, provider: str = "") -> dict:
 def _reply_text(r, model: str = "") -> str:
     try:
         data = r.json()
-        choice = data["choices"][0]
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("response has no choices")
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise ValueError("response choice is not an object")
     except (KeyError, IndexError, TypeError, ValueError) as e:
         raise RuntimeError("Unexpected reply from the OpenAI-compatible endpoint") from e
     if isinstance(data, dict) and data.get("usage"):
@@ -684,7 +694,20 @@ def _reply_text(r, model: str = "") -> str:
             "OpenAI-compatible reply was cut off — try a shorter selection"
         )
     try:
-        return choice["message"]["content"].strip()
+        message = choice["message"]
+        if not isinstance(message, dict):
+            raise TypeError("response message is not an object")
+        content = message["content"]
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
+                and isinstance(part.get("text"), str)
+            )
+        if not isinstance(content, str) or not content.strip():
+            raise TypeError("response content is not text")
+        return content.strip()
     except (KeyError, TypeError, AttributeError) as e:
         raise RuntimeError("Unexpected reply from the OpenAI-compatible endpoint") from e
 
@@ -848,11 +871,22 @@ def stream_translate(
                 choice = event["choices"][0]
             except (KeyError, IndexError, TypeError, AttributeError):
                 continue
+            if not isinstance(choice, dict):
+                raise RuntimeError(
+                    "Unexpected streaming reply from the "
+                    "OpenAI-compatible endpoint: choice is not an object.")
             if choice.get("finish_reason") == "length":
                 truncated = True
-            delta = (choice.get("delta") or {}).get("content")
-            if delta:
-                yield delta
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                content = (
+                    delta.get("content")
+                    or delta.get("reasoning_content")
+                )
+            else:
+                content = None
+            if isinstance(content, str) and content:
+                yield content
     finally:
         try:
             response.close()
@@ -895,21 +929,7 @@ def translate(
         timeout=TRANSLATION_TIMEOUT,
     )
     r.raise_for_status()
-    data = r.json()
-    if isinstance(data, dict) and data.get("usage"):
-        _record_usage(data["usage"], model)
-    try:
-        choice = data["choices"][0]
-    except (KeyError, IndexError, TypeError) as e:
-        raise RuntimeError("رد غير متوقع من الخادم المتوافق مع OpenAI") from e
-    if choice.get("finish_reason") == "length":
-        raise RuntimeError(
-            "OpenAI-compatible reply was cut off — try a shorter selection"
-        )
-    try:
-        return choice["message"]["content"].strip()
-    except (KeyError, TypeError) as e:
-        raise RuntimeError("رد غير متوقع من الخادم المتوافق مع OpenAI") from e
+    return _reply_text(r, model)
 
 
 def translate_image(
@@ -942,22 +962,7 @@ def translate_image(
     if report is not None:
         report["routed_via"] = routing_badge(response)
     response.raise_for_status()
-    try:
-        choice = response.json()["choices"][0]
-        message = choice["message"]
-    except (KeyError, IndexError, TypeError) as error:
-        raise RuntimeError(
-            "Unexpected image-translation response from the OpenAI-compatible endpoint"
-        ) from error
-    if choice.get("finish_reason") == "length":
-        raise RuntimeError("Image translation reply was cut off")
-    content = message.get("content")
-    if isinstance(content, list):
-        content = "".join(
-            part.get("text", "") for part in content if isinstance(part, dict))
-    if not isinstance(content, str) or not content.strip():
-        raise RuntimeError("The selected model returned no image translation")
-    return content.strip()
+    return _reply_text(response, model)
 
 
 def stream_translate_image(
@@ -1023,9 +1028,18 @@ def stream_translate_image(
                 choice = event["choices"][0]
             except (KeyError, IndexError, TypeError, AttributeError):
                 continue
+            if not isinstance(choice, dict):
+                raise RuntimeError(
+                    "Unexpected streaming image reply from the "
+                    "OpenAI-compatible endpoint: choice is not an object.")
             if choice.get("finish_reason") == "length":
                 truncated = True
-            delta = (choice.get("delta") or {}).get("content")
+            delta_block = choice.get("delta")
+            delta = (
+                delta_block.get("content")
+                if isinstance(delta_block, dict)
+                else None
+            )
             # reasoning models may send reasoning_content separately — ignore it
             if isinstance(delta, list):
                 delta = "".join(
@@ -1076,24 +1090,83 @@ def chat(
         timeout=TRANSLATION_TIMEOUT,
     )
     response.raise_for_status()
+    return _reply_text(response, model)
+
+
+def stream_chat(
+    messages: list[dict[str, str]],
+    base_url: str,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    reasoning_enabled: bool = False,
+):
+    """Yield conversational text deltas from an OpenAI-compatible endpoint."""
+    base = base_url.rstrip("/")
+    payload: dict = {
+        "model": model,
+        "temperature": 0.3,
+        "max_tokens": 2048,
+        "stream": True,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            *messages,
+        ],
+    }
+    payload.update(_reasoning_parameters(model, reasoning_enabled, base))
+    response = _post_stream(payload, base, api_key, TRANSLATION_TIMEOUT)
+    received_text = False
+    truncated = False
     try:
-        body = response.json()
-        choice = body["choices"][0]
-        message = choice["message"]
-    except (KeyError, IndexError, TypeError) as error:
+        if response.status_code != 200:
+            response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
+                continue
+            chunk = (
+                line.decode("utf-8", "replace")
+                if isinstance(line, bytes) else line
+            )
+            if not chunk.startswith("data:"):
+                continue
+            data = chunk[len("data:"):].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                event = json.loads(data)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                raise RuntimeError(
+                    "Unexpected streaming reply from the "
+                    "OpenAI-compatible endpoint.")
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                _record_usage(usage, model)
+            choices = event.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                raise RuntimeError(
+                    "Unexpected streaming reply from the "
+                    "OpenAI-compatible endpoint: choice is not an object.")
+            if choice.get("finish_reason") == "length":
+                truncated = True
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                content = delta.get("content")
+                if isinstance(content, list):
+                    content = "".join(
+                        part.get("text", "") for part in content
+                        if isinstance(part, dict))
+                if isinstance(content, str) and content:
+                    received_text = True
+                    yield content
+    finally:
+        response.close()
+    if truncated:
         raise RuntimeError(
-            "Unexpected chat response from the OpenAI-compatible endpoint"
-        ) from error
-    if isinstance(body, dict) and body.get("usage"):
-        _record_usage(body["usage"], model)
-    if choice.get("finish_reason") == "length":
-        raise RuntimeError("The chat reply was cut off; ask a shorter question.")
-    content = message.get("content")
-    if isinstance(content, list):
-        content = "".join(
-            part.get("text", "")
-            for part in content if isinstance(part, dict)
-        )
-    if not isinstance(content, str) or not content.strip():
-        raise RuntimeError("The selected model returned an empty chat reply.")
-    return content.strip()
+            "OpenAI-compatible chat reply was cut off — try a shorter question")
+    if not received_text:
+        raise RuntimeError("The selected model returned an empty chat reply")

@@ -241,3 +241,16 @@ def chat(
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError(f"OpenCode returned an empty chat reply for {model}")
     return content.strip()
+
+
+def chat_stream(messages: list[dict[str, str]], model: str, system_prompt: str):
+    """Yield conversational text deltas from OpenCode Zen."""
+    yield from _stream_response({
+        "model": model,
+        "temperature": 0.3,
+        "max_tokens": 4096,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            *messages,
+        ],
+    }, model)

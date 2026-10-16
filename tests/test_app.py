@@ -3091,6 +3091,23 @@ class TestChain(unittest.TestCase):
             with self.assertRaises(Exception):
                 mymemory.translate("hello")
 
+    def test_mymemory_rejects_list_response_without_attribute_error(self):
+        from unittest import mock
+        from translators import mymemory
+        import requests
+
+        resp = mock.Mock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = [["unexpected response"]]
+        with (
+            mock.patch.object(requests, "get", return_value=resp),
+            mock.patch("time.sleep"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "Unexpected reply format from MyMemory"
+            ):
+                mymemory.translate("hello")
+
     def test_chain_uses_second_free_service_after_google_fails(self):
         from unittest import mock
         s = dict(DEFAULTS)
@@ -10292,11 +10309,8 @@ class TestMemoryZoom(_GuiCase):
     def _make_pdf(self, name, pages=1):
         return _make_pdf_file(name, pages)
 
-    def test_explain_button_is_blue_only_when_hovered_or_active(self):
-        from PySide6.QtCore import QPoint
-        from PySide6.QtTest import QTest
+    def test_chat_and_explain_controls_are_removed_from_translation_popup(self):
         from popup.translate_popup import TranslatePopup
-        from ui.theme import THEMES
         from unittest import mock
 
         with mock_chain_translate(return_value=("translation", "Test")):
@@ -10304,74 +10318,12 @@ class TestMemoryZoom(_GuiCase):
             try:
                 popup.show()
                 self.app.processEvents()
-                colors = THEMES[popup.settings.get("theme", "Dark Slate")]
-                button = popup.explain_btn
-
-                def rendered_background():
-                    image = button.grab().toImage()
-                    return image.pixelColor(
-                        image.width() // 2, image.height() // 2).name()
-
-                def has_white_text():
-                    image = button.grab().toImage()
-                    return any(
-                        image.pixelColor(x, y).name() == "#ffffff"
-                        for y in range(image.height())
-                        for x in range(image.width())
-                    )
-
-                QTest.mouseMove(popup, QPoint(0, 0))
-                self.app.processEvents()
-                self.assertFalse(button.isChecked())
-                self.assertFalse(button.underMouse())
-                self.assertIn(
-                    "background: transparent; border: 1px solid #d8dde4;",
-                    button.styleSheet(),
-                )
-                self.assertIn("color: #3f4a57;", button.styleSheet())
-                idle_image = button.grab().toImage()
+                self.assertTrue(popup.chat_btn.isHidden())
+                self.assertTrue(popup.explain_btn.isHidden())
                 self.assertEqual(
-                    idle_image.pixelColor(
-                        idle_image.width() // 2,
-                        idle_image.height() // 2,
-                    ).alpha(),
-                    0,
-                )
-
-                QTest.mouseMove(button, button.rect().center())
-                self.app.processEvents()
+                    popup.language_action_layout.indexOf(popup.chat_btn), -1)
                 self.assertEqual(
-                    rendered_background(), colors["accent"].lower())
-                self.assertTrue(has_white_text())
-
-                QTest.mouseMove(popup, QPoint(0, 0))
-                self.app.processEvents()
-                with (
-                    mock.patch.object(
-                        popup, "_save_shared_settings",
-                        side_effect=lambda **updates: (
-                            popup.settings.update(updates) or True)),
-                    mock.patch.object(
-                        popup, "_retranslate_for_current_languages"),
-                ):
-                    button.click()
-                    self.app.processEvents()
-                    self.assertTrue(button.isChecked())
-                    self.assertEqual(
-                        rendered_background(), colors["accent"].lower())
-                    self.assertTrue(has_white_text())
-
-                    button.click()
-                    self.app.processEvents()
-                self.assertFalse(button.isChecked())
-                idle_image = button.grab().toImage()
-                self.assertEqual(
-                    idle_image.pixelColor(
-                        idle_image.width() // 2,
-                        idle_image.height() // 2,
-                    ).alpha(),
-                    0,
-                )
+                    popup.language_action_layout.indexOf(popup.explain_btn), -1)
             finally:
                 popup.close()
 
@@ -11676,6 +11628,11 @@ class TestMemoryZoom(_GuiCase):
                 theme_colors("Dark Slate", win.settings["color_scheme"])["accent"],
                 self.app.styleSheet(),
             )
+            self.assertIn(
+                theme_colors(
+                    "Dark Slate", win.settings["color_scheme"])["surface"],
+                win.chat_panel.styleSheet(),
+            )
             self.assertIsNotNone(win.theme_button.parentWidget())
             self.assertEqual(
                 [action.text() for action in win.theme_menu.actions()],
@@ -11688,6 +11645,11 @@ class TestMemoryZoom(_GuiCase):
             self.assertIn(
                 theme_colors("Midnight Blue", win.settings["color_scheme"])["accent"],
                 self.app.styleSheet(),
+            )
+            self.assertIn(
+                theme_colors(
+                    "Midnight Blue", win.settings["color_scheme"])["surface"],
+                win.chat_panel.styleSheet(),
             )
             self.assertEqual(load()["theme"], "Midnight Blue")
             win._theme_actions["Nordic Gray"].trigger()
@@ -11716,6 +11678,11 @@ class TestMemoryZoom(_GuiCase):
             self.assertEqual(
                 self.app.styleSheet(),
                 app_stylesheet(win.settings["theme"], "system"),
+            )
+            from ui.theme import theme_colors
+            self.assertIn(
+                theme_colors(win.settings["theme"], "system")["surface"],
+                win.chat_panel.styleSheet(),
             )
             popup.refresh_display.assert_called_once_with(win.settings)
         finally:
@@ -13620,7 +13587,7 @@ class TestGuideFlow(_GuiCase):
         finally:
             window.close()
 
-    def test_model_usage_readout_is_ltr_centered_and_expands_with_toolbar(self):
+    def test_model_usage_readout_is_between_image_and_chat(self):
         from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication, QToolBar
         from translators import usage
@@ -13641,14 +13608,30 @@ class TestGuideFlow(_GuiCase):
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
             )
             toolbar = window.findChild(QToolBar)
-            initial_width = readout.width()
-            window.resize(window.width() + 300, window.height())
-            self.app.processEvents()
-            self.assertGreater(readout.width(), initial_width)
-            self.assertEqual(
-                readout.mapTo(toolbar, readout.rect().bottomRight()).x(),
-                toolbar.contentsRect().right(),
-            )
+            chat_button = window.chat_button
+            self.assertIsNotNone(chat_button)
+            original_width = window.width()
+            observed_gaps = []
+            for width in (original_width, original_width - 100):
+                window.resize(width, window.height())
+                self.app.processEvents()
+                image_left = window.selection_mode_button.mapTo(
+                    toolbar, window.selection_mode_button.rect().topLeft()).x()
+                label_left = readout.mapTo(
+                    toolbar, readout.rect().topLeft()).x()
+                chat_left = chat_button.mapTo(
+                    toolbar, chat_button.rect().topLeft()).x()
+                image_right = image_left + window.selection_mode_button.width()
+                label_right = label_left + readout.width()
+                observed_gaps.append(
+                    (label_left - image_right, chat_left - label_right))
+                self.assertEqual(
+                    chat_left + chat_button.width(),
+                    toolbar.contentsRect().right() + 1,
+                )
+                self.assertLessEqual(
+                    abs(observed_gaps[-1][0] - observed_gaps[-1][1]), 1)
+            self.assertLess(observed_gaps[1][0], observed_gaps[0][0])
             self.assertEqual(readout.styleSheet(), "")
             colors = theme_colors(
                 window.settings.get("theme", "Dark Slate"),

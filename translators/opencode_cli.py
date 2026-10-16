@@ -235,6 +235,25 @@ def stream_translate(
     if not MODEL_ID.fullmatch(model) or "/" not in model:
         raise ValueError("OpenCode model must use provider/model format")
 
+    yield from _stream_run(
+        user_prompt(text, source_language, target_language),
+        model,
+        system_instructions(instructions, source_language, target_language),
+        "Translate text without using tools",
+        "translation",
+        timeout,
+    )
+
+
+def _stream_run(
+    input_text: str,
+    model: str,
+    system_prompt: str,
+    agent_description: str,
+    output_name: str,
+    timeout: int,
+):
+    """Stream text events from one tools-disabled OpenCode CLI run."""
     executable = _executable()
     with tempfile.TemporaryDirectory(prefix="harmony-translator-opencode-") as temp:
         project = Path(temp)
@@ -243,9 +262,8 @@ def stream_translate(
             "agent": {
                 AGENT_NAME: {
                     "mode": "primary",
-                    "description": "Translate text without using tools",
-                    "prompt": system_instructions(
-                        instructions, source_language, target_language),
+                    "description": agent_description,
+                    "prompt": system_prompt,
                     "permission": {
                         "read": "deny", "edit": "deny", "glob": "deny",
                         "grep": "deny", "list": "deny", "bash": "deny",
@@ -297,8 +315,7 @@ def stream_translate(
             timer.start()
             try:
                 assert process.stdin is not None
-                process.stdin.write(user_prompt(
-                    text, source_language, target_language))
+                process.stdin.write(input_text)
                 process.stdin.close()
                 assert process.stdout is not None
                 for line in process.stdout:
@@ -337,7 +354,33 @@ def stream_translate(
                     f"{detail[:300] or 'no error details'}")
             if not received_text:
                 raise OpenCodeCLIError(
-                    "OpenCode CLI returned no translation text")
+                    f"OpenCode CLI returned no {output_name} text")
+
+
+def chat_stream(
+    messages: list[dict[str, str]],
+    model: str,
+    system_prompt: str,
+    timeout: int = TIMEOUT,
+):
+    """Yield conversational reply text as OpenCode CLI generates it."""
+    if not MODEL_ID.fullmatch(model) or "/" not in model:
+        raise ValueError("OpenCode model must use provider/model format")
+    if not messages or messages[-1].get("role") != "user":
+        raise ValueError("A user message is required to ask the model.")
+
+    dialogue = "\n\n".join(
+        f"{'Student' if item['role'] == 'user' else 'Tutor'}:\n{item['content']}"
+        for item in messages
+    )
+    yield from _stream_run(
+        dialogue,
+        model,
+        system_prompt,
+        "Tutor in a conversation without using tools",
+        "chat reply",
+        timeout,
+    )
 
 
 def chat(
