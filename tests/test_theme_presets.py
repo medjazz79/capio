@@ -66,6 +66,23 @@ class TestThemePresets(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_unchecked_settings_checkboxes_are_visible_in_every_theme(self):
+        from ui.theme import THEMES, settings_stylesheet, theme_colors
+
+        for theme in THEMES:
+            for scheme in ("dark", "light"):
+                with self.subTest(theme=theme, scheme=scheme):
+                    colors = theme_colors(theme, scheme)
+                    stylesheet = settings_stylesheet(theme, scheme)
+                    indicator_style = (
+                        "QCheckBox::indicator {\n"
+                        "            width: 14px; height: 14px;\n"
+                        f"            border: 1.5px solid {colors['accent_light']};\n"
+                        "            border-radius: 3px;\n"
+                        f"            background-color: {colors['surface_hover']};"
+                    )
+                    self.assertIn(indicator_style, stylesheet)
+
     def test_settings_dialog_replaces_the_removed_legacy_theme(self):
         from config.settings import DEFAULTS
         from ui.settings_dialog import SettingsDialog

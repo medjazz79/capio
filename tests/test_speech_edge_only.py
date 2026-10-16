@@ -800,6 +800,147 @@ class TestSpeechSynthesis(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Edge synthesis failed"):
                 asyncio.run(worker._make_segment(0))
 
+    def test_edge_handshake_429_retries_before_audio(self):
+        class RateLimited(Exception):
+            status = 429
+            headers = {"Retry-After": "0"}
+
+        class FakeCommunicate:
+            requests = 0
+
+            def __init__(self, *_args, **_kwargs):
+                type(self).requests += 1
+                self.request_number = type(self).requests
+
+            async def stream(self):
+                if self.request_number == 1:
+                    raise RateLimited("rate limited")
+                yield {"type": "audio", "data": b"audio"}
+
+        worker = speech_worker.SpeechWorker(
+            "hello", target_language="en", fast=False, stream_audio=False)
+        delays = []
+
+        async def no_wait(delay):
+            delays.append(delay)
+
+        try:
+            with mock.patch.object(
+                speech_worker,
+                "edge_tts",
+                type("Edge", (), {"Communicate": FakeCommunicate}),
+            ), mock.patch.object(speech_worker.asyncio, "sleep", new=no_wait):
+                path, _ = asyncio.run(worker._make_segment(0))
+            self.assertEqual(FakeCommunicate.requests, 2)
+            self.assertEqual(delays, [0.0])
+            self.assertEqual(Path(path).read_bytes(), b"audio")
+        finally:
+            worker.cleanup_output()
+
+    def test_edge_handshake_429_retry_limit_and_error_redaction(self):
+        class RateLimited(Exception):
+            status = 429
+            headers = {"Retry-After": "0"}
+
+        class FakeCommunicate:
+            requests = 0
+
+            def __init__(self, *_args, **_kwargs):
+                type(self).requests += 1
+
+            def stream(self):
+                return self
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise RateLimited(
+                    "429, url='wss://example.invalid/tts?secret=value'")
+
+        worker = speech_worker.SpeechWorker(
+            "hello", target_language="en", fast=False, stream_audio=False)
+
+        async def no_wait(_delay):
+            return None
+
+        with mock.patch.object(
+            speech_worker,
+            "edge_tts",
+            type("Edge", (), {"Communicate": FakeCommunicate}),
+        ), mock.patch.object(speech_worker.asyncio, "sleep", new=no_wait):
+            with self.assertRaises(RateLimited):
+                asyncio.run(worker._make_segment(0))
+
+        self.assertEqual(
+            FakeCommunicate.requests,
+            speech_worker.EDGE_TTS_MAX_RATE_LIMIT_RETRIES + 1,
+        )
+        message = speech_worker._speech_error_message(RateLimited(
+            "429, url='wss://example.invalid/tts?secret=value'"))
+        self.assertIn("HTTP 429", message)
+        self.assertNotIn("secret=value", message)
+
+    def test_non_429_edge_error_is_not_retried_and_url_is_redacted(self):
+        class FailedCommunicate:
+            requests = 0
+
+            def __init__(self, *_args, **_kwargs):
+                type(self).requests += 1
+
+            def stream(self):
+                return self
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise RuntimeError(
+                    "connection failed: wss://example.invalid/tts?secret=value")
+
+        worker = speech_worker.SpeechWorker(
+            "hello", target_language="en", fast=False, stream_audio=False)
+        with mock.patch.object(
+            speech_worker,
+            "edge_tts",
+            type("Edge", (), {"Communicate": FailedCommunicate}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "connection failed"):
+                asyncio.run(worker._make_segment(0))
+
+        self.assertEqual(FailedCommunicate.requests, 1)
+        message = speech_worker._speech_error_message(RuntimeError(
+            "connection failed: wss://example.invalid/tts?secret=value"))
+        self.assertNotIn("secret=value", message)
+        self.assertIn("[service URL]", message)
+
+    def test_edge_429_after_audio_does_not_replay_partial_audio(self):
+        class RateLimited(Exception):
+            status = 429
+            headers = {"Retry-After": "0"}
+
+        class FakeCommunicate:
+            requests = 0
+
+            def __init__(self, *_args, **_kwargs):
+                type(self).requests += 1
+
+            async def stream(self):
+                yield {"type": "audio", "data": b"partial"}
+                raise RateLimited("late rate limit")
+
+        worker = speech_worker.SpeechWorker(
+            "hello", target_language="en", fast=False, stream_audio=False)
+        with mock.patch.object(
+            speech_worker,
+            "edge_tts",
+            type("Edge", (), {"Communicate": FakeCommunicate}),
+        ):
+            with self.assertRaises(RateLimited):
+                asyncio.run(worker._make_segment(0))
+
+        self.assertEqual(FakeCommunicate.requests, 1)
+
     def test_saved_segment_contains_every_edge_audio_chunk(self):
         class StreamCommunicate:
             def __init__(self, *_args, **_kwargs):

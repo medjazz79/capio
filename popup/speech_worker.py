@@ -5,6 +5,8 @@ import asyncio
 import base64
 import binascii
 from contextvars import ContextVar
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import math
@@ -109,6 +111,8 @@ CONTINUOUS_FIRST_CHUNK_LENGTH = 240
 MAX_CHUNK_LENGTH = 1200
 MAX_PARALLEL_SEGMENTS = 3
 CONTINUOUS_PREFETCH_SEGMENTS = 2
+EDGE_TTS_MAX_RATE_LIMIT_RETRIES = 2
+EDGE_TTS_MAX_RETRY_DELAY_SECONDS = 10.0
 _MP3_BITRATE_BPS = 48_000
 _TICKS_PER_SECOND = 10_000_000
 
@@ -300,6 +304,41 @@ def speech_missing_message(engine: str = "edge") -> str:
     if engine != "edge":
         return f"Unsupported read-aloud engine: {engine!r}"
     return MISSING_SPEECH_MESSAGE
+
+
+def _edge_tts_retry_delay(error: Exception, retry_index: int) -> float:
+    headers = getattr(error, "headers", None)
+    retry_after = headers.get("Retry-After") if headers is not None else None
+    if retry_after:
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                delay = 0.75 * (2 ** retry_index)
+    else:
+        delay = 0.75 * (2 ** retry_index)
+    return min(
+        EDGE_TTS_MAX_RETRY_DELAY_SECONDS,
+        max(0.0, delay),
+    )
+
+
+def _speech_error_message(error: Exception) -> str:
+    if getattr(error, "status", None) == 429:
+        return (
+            "Edge TTS is temporarily rate-limited (HTTP 429). "
+            "Wait a little and try again."
+        )
+    return re.sub(
+        r"\b(?:https?|wss?)://[^\s'\"<>]+",
+        "[service URL]",
+        str(error),
+    )
 
 
 def speech_available(engine: str = "edge", api_key: str = "") -> bool:
@@ -619,7 +658,7 @@ class SpeechWorker(QThread):
             if self._trace is not None:
                 self._trace.mark(
                     "worker_failed", error_type=type(exc).__name__)
-            self.failed.emit(str(exc))
+            self.failed.emit(_speech_error_message(exc))
         finally:
             if self._fast:
                 _prune_cache()
@@ -972,6 +1011,7 @@ class SpeechWorker(QThread):
         first_boundary = True
         audio_write_total_ms = 0.0
         audio_write_max_ms = 0.0
+        rate_limit_retries = 0
 
         async def write_audio(
             server: AudioStreamServer, stream_token: str, audio_data: bytes
@@ -995,10 +1035,13 @@ class SpeechWorker(QThread):
                     segment=index,
                     voice=voice,
                 )
-            communicate = edge_tts.Communicate(
-                synthesis_text, voice, rate=self._rate,
-                boundary="WordBoundary"
-            )
+            def make_communicate():
+                return edge_tts.Communicate(
+                    synthesis_text, voice, rate=self._rate,
+                    boundary="WordBoundary"
+                )
+
+            communicate = make_communicate()
             if ssml_language is not None:
                 language_token = _EDGE_TTS_LANGUAGE.set(ssml_language)
             stream_iterator = communicate.stream().__aiter__()
@@ -1009,6 +1052,32 @@ class SpeechWorker(QThread):
                     chunk = await stream_iterator.__anext__()
                 except StopAsyncIteration:
                     break
+                except Exception as exc:
+                    if (
+                        getattr(exc, "status", None) == 429
+                        and not chunks
+                        and not boundaries
+                        and rate_limit_retries
+                        < EDGE_TTS_MAX_RATE_LIMIT_RETRIES
+                    ):
+                        delay = _edge_tts_retry_delay(
+                            exc, rate_limit_retries)
+                        rate_limit_retries += 1
+                        if self._trace is not None:
+                            self._trace.mark(
+                                "edge_rate_limited_retry",
+                                once=False,
+                                segment=index,
+                                retry=rate_limit_retries,
+                                delay_seconds=delay,
+                            )
+                        await asyncio.sleep(delay)
+                        if self.isInterruptionRequested():
+                            raise asyncio.CancelledError()
+                        communicate = make_communicate()
+                        stream_iterator = communicate.stream().__aiter__()
+                        continue
+                    raise
                 if chunk["type"] == "audio":
                     audio = chunk["data"]
                     chunks.append(audio)

@@ -624,10 +624,10 @@ def settings_stylesheet(
             font-weight: 600;
         }}
         QCheckBox::indicator {{
-            width: 12px; height: 12px;
-            border: 1.5px solid {colors["border"]};
+            width: 14px; height: 14px;
+            border: 1.5px solid {colors["accent_light"]};
             border-radius: 3px;
-            background-color: {colors["surface"]};
+            background-color: {colors["surface_hover"]};
         }}
         QCheckBox::indicator:hover {{
             border-color: {colors["accent_light"]};
