@@ -1265,7 +1265,7 @@ class TestTranslationChat(unittest.TestCase):
 
     def test_chat_transcript_context_menu_can_select_and_copy_all_text(self):
         from PySide6.QtCore import Qt
-        from PySide6.QtGui import QKeySequence
+        from PySide6.QtGui import QKeySequence, QTextCursor
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QMenu
         from ui.chat_panel import ChatPanel
@@ -1281,6 +1281,7 @@ class TestTranslationChat(unittest.TestCase):
         panel.show()
         self.app.processEvents()
         transcript = panel.transcript
+        transcript.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.assertEqual(
             transcript.contextMenuPolicy(),
             Qt.ContextMenuPolicy.NoContextMenu,
@@ -1310,6 +1311,8 @@ class TestTranslationChat(unittest.TestCase):
             )
             menu = menus[0]
             self.assertIs(menu, transcript._context_menu)
+            self.assertEqual(
+                menu.layoutDirection(), Qt.LayoutDirection.LeftToRight)
             menu.hide()
             self.app.processEvents()
 
@@ -1350,6 +1353,9 @@ class TestTranslationChat(unittest.TestCase):
         menu.hide()
         self.app.processEvents()
 
+        cursor = transcript.textCursor()
+        cursor.clearSelection()
+        transcript.setTextCursor(cursor)
         QTest.mouseClick(
             transcript.viewport(),
             Qt.MouseButton.RightButton,
@@ -1364,7 +1370,33 @@ class TestTranslationChat(unittest.TestCase):
             self.app.clipboard().text(),
             "You\nUser message.\n\nChat\nModel answer.",
         )
+        self.assertFalse(
+            transcript.textCursor().hasSelection(),
+            "copying the chat must not select its transcript",
+        )
         menu.hide()
+
+        cursor = transcript.textCursor()
+        cursor.setPosition(
+            transcript.document().find("Model answer.").selectionStart())
+        cursor.setPosition(
+            cursor.position() + len("Model answer."),
+            QTextCursor.MoveMode.KeepAnchor,
+        )
+        transcript.setTextCursor(cursor)
+        QTest.mouseClick(
+            transcript.viewport(),
+            Qt.MouseButton.RightButton,
+            pos=transcript.cursorRect(
+                transcript.document().find("Model answer.")).center(),
+        )
+        self.app.processEvents()
+        self.assertTrue(transcript._context_menu.isVisible())
+        transcript._context_menu.actions()[0].trigger()
+        self.assertEqual(self.app.clipboard().text(), "Model answer.")
+        self.assertEqual(
+            transcript.textCursor().selectedText(), "Model answer.")
+        transcript._context_menu.hide()
 
     def test_chat_hides_intro_text_and_styles_dock_resize_handle(self):
         from main import app_stylesheet

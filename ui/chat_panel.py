@@ -17,6 +17,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -107,6 +108,7 @@ class ChatTranscriptBrowser(QTextBrowser):
 
     def _create_context_menu(self) -> QMenu:
         menu = QMenu(self)
+        menu.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         copy_action = menu.addAction("Copy")
         copy_action.setShortcut(QKeySequence.StandardKey.Copy)
         copy_action.setEnabled(bool(self.toPlainText().strip()))
@@ -123,9 +125,14 @@ class ChatTranscriptBrowser(QTextBrowser):
         return menu
 
     def _copy_chat_text(self) -> None:
-        if not self.textCursor().hasSelection():
-            self.selectAll()
-        self.copy()
+        cursor = self.textCursor()
+        text = (
+            cursor.selectedText()
+            if cursor.hasSelection()
+            else self.toPlainText()
+        )
+        QApplication.clipboard().setText(
+            text.replace("\u2029", "\n").replace("\u2028", "\n"))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
