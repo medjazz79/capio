@@ -13612,9 +13612,16 @@ class TestGuideFlow(_GuiCase):
             self.assertIsNotNone(chat_button)
             original_width = window.width()
             observed_gaps = []
+            standard_height = window.theme_button.height()
             for width in (original_width, original_width - 100):
                 window.resize(width, window.height())
                 self.app.processEvents()
+                self.assertEqual(
+                    window.selection_mode_button.height(), standard_height)
+                self.assertEqual(chat_button.height(), standard_height)
+                self.assertEqual(
+                    window.selection_mode_button.y(), window.theme_button.y())
+                self.assertEqual(chat_button.y(), window.theme_button.y())
                 image_left = window.selection_mode_button.mapTo(
                     toolbar, window.selection_mode_button.rect().topLeft()).x()
                 label_left = readout.mapTo(

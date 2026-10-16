@@ -2634,9 +2634,10 @@ class MainWindow(QMainWindow):
         left = max(theme_button_right + 8, toolbar_bounds.left())
         right = toolbar_bounds.right() + 1
         width = max(0, right - left)
-        height = toolbar_bounds.height()
+        height = self.theme_button.height()
+        top = self.theme_button.y()
         self.toolbar_right_controls.setGeometry(
-            left, toolbar_bounds.top(), width, height)
+            left, top, width, height)
 
         chat_width = min(self.chat_button.sizeHint().width(), width)
         image_width = min(
