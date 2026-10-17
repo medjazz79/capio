@@ -143,16 +143,6 @@ DOMAIN_STYLE_RULES = (
 
 GENERAL_DOMAIN_RULES = f"{GENERAL_DOMAIN_RULES} {DOMAIN_STYLE_RULES}"
 
-TABLE_FORMATTING_RULE = (
-    "When the source contains a table, preserve it as a Markdown pipe table "
-    "with one Markdown row per source row and one cell per source column, "
-    "including the required header-separator row. Do not flatten table cells "
-    "into separate paragraphs, lists, or blockquotes. Keep the caption outside "
-    "the table. If the supplied text has lost the table's row or column "
-    "boundaries and their associations are not clear, do not guess or "
-    "rearrange values."
-)
-
 _MUSIC_CONTEXT = re.compile(
     r"\b(?:music(?:al)?|harmony|harmonic|chord(?:s)?|tablature|"
     r"ukulele|guitar|piano|violin|melody|melodic|cadence|clef|"
@@ -221,10 +211,8 @@ LAYOUT_RULES = (
     "Do not merge "
     "paragraphs or add paragraph breaks where the source has none. Do not "
     "flatten structured content into one paragraph or invent "
-    "headings. Preserve code, equations, and other structured notation "
-    "according to their source-domain conventions. "
-    + TABLE_FORMATTING_RULE
-    + " "
+    "headings. Preserve code, equations, tables, and other structured "
+    "notation according to their source-domain conventions. "
     + GENERAL_DOMAIN_RULES
     + " Do not "
     "add symbols, italics, code formatting, or bold to ordinary text. "

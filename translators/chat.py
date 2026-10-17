@@ -1,9 +1,27 @@
 """Conversational requests routed through the currently selected model."""
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from . import gemini, opencode_bridge, opencode_cli, opencode_compat, opencode_zen
 from . import registry
 from .prompt import LANGUAGE_NAMES
+
+
+_GEMINI_SEARCH_INSTRUCTIONS = (
+    "\n\nGoogle Search is available. Use it whenever it can improve the "
+    "accuracy or completeness of your answer, including factual details "
+    "beyond the supplied passage. Clearly distinguish sourced facts from "
+    "inference and cite the sources returned by the tool."
+)
+_GEMINI_NO_SEARCH_INSTRUCTIONS = (
+    "\n\nGoogle Search is unavailable for this response. Do not claim to have "
+    "searched the web or invent citations. If answering a factual question, "
+    "make clear that the answer is based on model knowledge and is unverified."
+)
+def _is_search_quota_error(error: RuntimeError) -> bool:
+    return str(error).startswith(
+        "Google Search request was rejected with HTTP 429.")
 
 
 def _model_messages(
@@ -13,59 +31,27 @@ def _model_messages(
     source_language: str,
     target_language: str,
     extra_instructions: str = "",
-    reply_language: str | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
     target_name = LANGUAGE_NAMES.get(target_language, "Arabic")
     source_name = LANGUAGE_NAMES.get(
         source_language, "the automatically detected source language")
-    if source_text.strip() or translated_text.strip():
-        system = (
-            "You are a helpful assistant discussing the supplied passage. "
-            f"Reply in {target_name}. Answer conversationally and accurately. "
-            "Explain only as much as needed. The user may be reading about any "
-            "subject; do not assume the passage or question is about music or "
-            "harmony. Discuss music only when it is relevant to the passage or "
-            "the user explicitly asks about it. Keep notation and quoted "
-            "source-language terms unchanged when relevant. Treat the passage "
-            "as useful context, not as the only source of information. Do not "
-            "refuse a question just because its answer is not in the passage. "
-            "If a requested fact is not in the passage or you are unsure of "
-            "it, search the web with Google Search before answering. Always "
-            "search when the user asks you to look something up. Do not say "
-            "that a fact is unavailable just because it is missing from the "
-            "passage. Cite the sources returned by the search tool. "
-            f"The source language is {source_name}. The passage and its "
-            "translation being discussed follow.\n\n"
-            f"Original passage:\n{source_text}\n\n"
-            f"Translation:\n{translated_text}"
-        )
-    else:
-        system = (
-            "You are a helpful general-purpose conversational AI assistant. "
-            "The user may ask about any subject; do not assume a music-related "
-            "context. Answer the user's "
-            f"questions clearly and accurately. Reply in {target_name}. Follow "
-            "the user's lead and explain concepts at the level they ask for. Do not "
-            "refuse a question merely because the answer is outside the "
-            "conversation. For factual questions that need current or "
-            "externally verified information, or when the user asks you to "
-            "look something up, search the web with Google Search before "
-            "answering. Cite the sources returned by the search tool."
-        )
+    system = (
+        "You are a helpful tutor for a student reading a music-harmony textbook. "
+        f"Reply in {target_name}. Your response MUST use the selected target "
+        "language; do not switch to English or another language unless the "
+        "student explicitly requests it. Answer the student's questions conversationally "
+        "and accurately. Explain only as much as needed. Keep musical notation, "
+        "chord symbols, and quoted source-language terms unchanged when relevant. "
+        f"The source language is {source_name}. The passage and its translation "
+        "being discussed follow.\n\nOriginal passage:\n{source_text}\n\n"
+        f"Translation:\n{translated_text}"
+    )
     extra_instructions = extra_instructions.strip()
-    if extra_instructions and (source_text.strip() or translated_text.strip()):
+    if extra_instructions:
         system += (
             "\n\nAdditional instructions from the translation window. "
-            "Follow them when explaining the passage and answering the user's "
+            "Follow them when explaining the passage and answering the student's "
             f"questions:\n{extra_instructions}"
-        )
-    if reply_language in LANGUAGE_NAMES:
-        reply_language_name = LANGUAGE_NAMES[reply_language]
-        system += (
-            f"\n\nStrict response-language requirement: respond only in "
-            f"{reply_language_name}. Write the entire answer, including "
-            "explanations and follow-up replies, in that language. Do not switch "
-            "to or add another language."
         )
     conversation = [
         {"role": item["role"], "content": item["content"]}
@@ -74,6 +60,12 @@ def _model_messages(
         and isinstance(item.get("content"), str)
     ]
     return system, conversation
+
+
+def _reply_language(settings: dict) -> str:
+    if settings.get("chat_reply_language_only", False):
+        return str(settings.get("chat_reply_language", "ar"))
+    return str(settings.get("target_language", "ar"))
 
 
 def reply(
@@ -92,21 +84,36 @@ def reply(
         source_text,
         translated_text,
         settings.get("source_language", "auto"),
-        settings.get("target_language", "ar"),
+        _reply_language(settings),
         str(settings.get("explain_instructions", "") or ""),
-        (
-            str(settings.get("chat_reply_language") or "")
-            if settings.get("chat_reply_language_only", False) else None
-        ),
     )
     if not conversation or conversation[-1]["role"] != "user":
         raise ValueError("A user message is required to ask the model.")
+    use_google_search = provider == "gemini"
 
     if provider == "gemini":
         api_key = (settings.get("gemini_key") or "").strip()
         if not api_key:
             raise RuntimeError("Chat with this Gemini model requires a Gemini API key.")
-        return gemini.chat(conversation, api_key, model, system)
+        if not use_google_search:
+            return gemini.chat(conversation, api_key, model, system)
+        try:
+            return gemini.chat(
+                conversation, api_key, model,
+                system + _GEMINI_SEARCH_INSTRUCTIONS,
+                use_google_search=True,
+            )
+        except RuntimeError as error:
+            if not _is_search_quota_error(error):
+                raise
+            answer = gemini.chat(
+                conversation,
+                api_key,
+                model,
+                system + _GEMINI_NO_SEARCH_INSTRUCTIONS,
+                use_google_search=False,
+            )
+            return answer
     if provider == "bridge":
         return opencode_bridge.chat(conversation, model, system, settings)
     if provider == "opencode":
@@ -151,8 +158,8 @@ def reply_stream(
     settings: dict,
     source_text: str,
     translated_text: str,
-):
-    """Yield reply deltas from the selected model without changing providers."""
+) -> Iterator[str]:
+    """Yield reply text deltas from streaming-capable selected providers."""
     from config.settings import resolve_model
 
     model = resolve_model(settings)
@@ -162,32 +169,50 @@ def reply_stream(
         source_text,
         translated_text,
         settings.get("source_language", "auto"),
-        settings.get("target_language", "ar"),
+        _reply_language(settings),
         str(settings.get("explain_instructions", "") or ""),
-        (
-            str(settings.get("chat_reply_language") or "")
-            if settings.get("chat_reply_language_only", False) else None
-        ),
     )
     if not conversation or conversation[-1]["role"] != "user":
         raise ValueError("A user message is required to ask the model.")
+    use_google_search = provider == "gemini"
 
     if provider == "gemini":
         api_key = (settings.get("gemini_key") or "").strip()
         if not api_key:
-            raise RuntimeError("Chat with this Gemini model requires a Gemini API key.")
-        yield from gemini.chat_stream(conversation, api_key, model, system)
+            raise RuntimeError(
+                "Chat with this Gemini model requires a Gemini API key.")
+        if not use_google_search:
+            yield from gemini.stream_chat(
+                conversation, api_key, model, system)
+            return
+        try:
+            yield from gemini.stream_chat(
+                conversation,
+                api_key,
+                model,
+                system + _GEMINI_SEARCH_INSTRUCTIONS,
+                use_google_search=True,
+            )
+        except RuntimeError as error:
+            if not _is_search_quota_error(error):
+                raise
+            yield from gemini.stream_chat(
+                conversation,
+                api_key,
+                model,
+                system + _GEMINI_NO_SEARCH_INSTRUCTIONS,
+                use_google_search=False,
+            )
         return
     if provider == "bridge":
-        yield from opencode_bridge.chat_stream(
+        yield from opencode_bridge.stream_chat(
             conversation, model, system, settings)
         return
     if provider == "opencode":
-        yield from opencode_zen.chat_stream(conversation, model, system)
+        yield from opencode_zen.stream_chat(conversation, model, system)
         return
     if provider == "opencode_cli":
-        yield from opencode_cli.chat_stream(
-            conversation, model[len(registry.OPENCODE_CLI_PREFIX):], system)
+        yield reply(messages, settings, source_text, translated_text)
         return
     if provider in {"groq", "cf", "mistral"}:
         base, key = registry.provider_creds(provider, settings)
@@ -205,20 +230,17 @@ def reply_stream(
     if provider == "custom_provider":
         cfg = registry.custom_provider_config(model, settings)
         if cfg is None:
-            raise RuntimeError("Custom provider not found — re-add it in Settings → Custom Providers.")
+            raise RuntimeError(
+                "Custom provider not found — re-add it in Settings → Custom Providers.")
         base, key, provider_model = cfg
         if not base or not key or not provider_model:
-            raise RuntimeError("Custom provider is incomplete — fill Base URL, API Key and Model in Settings.")
+            raise RuntimeError(
+                "Custom provider is incomplete — fill Base URL, API Key and Model in Settings.")
         entry = registry.get_custom_provider(settings, model)
         reasoning = bool(entry.get("reasoning_enabled")) if entry else False
         yield from opencode_compat.stream_chat(
-            conversation,
-            base,
-            key,
-            provider_model,
-            system,
-            reasoning_enabled=reasoning,
-        )
+            conversation, base, key, provider_model, system,
+            reasoning_enabled=reasoning)
         return
 
     base = (settings.get("openai_base") or "").strip()

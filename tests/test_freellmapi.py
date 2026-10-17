@@ -192,9 +192,7 @@ class TestFreeLLMPicker(unittest.TestCase):
 
     def test_router_entries_and_live_models_are_offered(self):
         labels = [label for label, _ in registry.model_groups(
-            {"flm_key": "K"},
-            live_flm=["groq/qwen3.8-27b", "google/gemini-2.5-flash"],
-        )]
+            {}, live_flm=["groq/qwen3.8-27b", "google/gemini-2.5-flash"])]
         self.assertIn(registry.FLM_HDR, labels)
         for entry in registry.FLM_ROUTER_MODELS:
             self.assertIn(f"{registry.FLM_PREFIX}{entry}", labels)
@@ -203,8 +201,8 @@ class TestFreeLLMPicker(unittest.TestCase):
 
     def test_section_is_disabled_without_a_token(self):
         rows = dict(registry.model_groups({}))
-        self.assertNotIn(registry.FLM_HDR, rows)
-        self.assertNotIn(f"{registry.FLM_PREFIX}auto", rows)
+        self.assertTrue(rows[registry.FLM_HDR] is False)
+        self.assertFalse(rows[f"{registry.FLM_PREFIX}auto"])
 
     def test_section_is_enabled_with_a_token(self):
         rows = dict(registry.model_groups({"flm_key": "K"}))

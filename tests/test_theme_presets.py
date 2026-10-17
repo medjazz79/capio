@@ -42,8 +42,45 @@ class TestThemePresets(unittest.TestCase):
                         re.search(canvas_pattern, themed_style).group(1),
                         colors["canvas"],
                     )
-                self.assertEqual(dark, THEMES[name])
-        self.assertNotIn("Pure Light", THEMES)
+                if name != "Pure Light":
+                    self.assertEqual(dark, THEMES[name])
+
+    def test_chat_splitter_and_dock_marker_follow_every_theme(self):
+        from main import app_stylesheet
+        from ui.chat_panel import ChatPanel
+        from ui.theme import THEMES, theme_colors
+
+        panel = ChatPanel(lambda: {})
+        try:
+            for name in THEMES:
+                for scheme in ("dark", "light"):
+                    with self.subTest(theme=name, scheme=scheme):
+                        colors = theme_colors(name, scheme)
+                        app_style = app_stylesheet(name, scheme)
+                        separator_style = app_style.split(
+                            "QMainWindow::separator {", 1)[1].split("}", 1)[0]
+                        self.assertIn(
+                            "background-color: transparent",
+                            separator_style,
+                        )
+                        self.assertIn("width: 1px", separator_style)
+
+                        panel.apply_theme(colors)
+                        panel_style = panel.styleSheet()
+                        self.assertIn(
+                            f"background-color: {colors['border']}",
+                            panel_style,
+                        )
+                        self.assertIn(
+                            f"background-color: {colors['accent']}",
+                            panel_style,
+                        )
+                        self.assertIn(
+                            f"color: {colors['text']}",
+                            panel_style,
+                        )
+        finally:
+            panel.close()
 
     def test_settings_dialog_exposes_the_system_dark_light_preference(self):
         from config.settings import DEFAULTS
@@ -66,40 +103,6 @@ class TestThemePresets(unittest.TestCase):
         finally:
             dialog.close()
 
-    def test_unchecked_settings_checkboxes_are_visible_in_every_theme(self):
-        from ui.theme import THEMES, settings_stylesheet, theme_colors
-
-        for theme in THEMES:
-            for scheme in ("dark", "light"):
-                with self.subTest(theme=theme, scheme=scheme):
-                    colors = theme_colors(theme, scheme)
-                    stylesheet = settings_stylesheet(theme, scheme)
-                    indicator_style = (
-                        "QCheckBox::indicator {\n"
-                        "            width: 14px; height: 14px;\n"
-                        f"            border: 1.5px solid {colors['accent_light']};\n"
-                        "            border-radius: 3px;\n"
-                        f"            background-color: {colors['surface_hover']};"
-                    )
-                    self.assertIn(indicator_style, stylesheet)
-
-    def test_settings_dialog_replaces_the_removed_legacy_theme(self):
-        from config.settings import DEFAULTS
-        from ui.settings_dialog import SettingsDialog
-
-        dialog = SettingsDialog(dict(DEFAULTS, theme="Pure Light"))
-        try:
-            offered_themes = [
-                dialog.header_theme_combo.itemData(index)
-                for index in range(dialog.header_theme_combo.count())
-            ]
-            self.assertNotIn("Pure Light", offered_themes)
-            self.assertEqual(
-                dialog.header_theme_combo.currentData(), "Dark Slate")
-            self.assertEqual(dialog.values()["theme"], "Dark Slate")
-        finally:
-            dialog.close()
-
     def test_legacy_theme_settings_keep_their_existing_appearance(self):
         from config.settings import load
 
@@ -115,15 +118,6 @@ class TestThemePresets(unittest.TestCase):
                 settings_path.write_text(
                     json.dumps({"theme": "Pure Light"}), encoding="utf-8")
                 self.assertEqual(load()["color_scheme"], "light")
-                self.assertEqual(load()["theme"], "Dark Slate")
-
-                settings_path.write_text(
-                    json.dumps({
-                        "theme": "Pure Light",
-                        "color_scheme": "dark",
-                    }), encoding="utf-8")
-                self.assertEqual(load()["color_scheme"], "dark")
-                self.assertEqual(load()["theme"], "Dark Slate")
 
     def test_pdf_page_surroundings_render_the_selected_canvas_color(self):
         from PySide6.QtGui import QImage

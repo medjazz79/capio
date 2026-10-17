@@ -40,16 +40,8 @@ def translate(
             )
             r.raise_for_status()
             data = r.json()
-            if not isinstance(data, dict):
-                raise RuntimeError(
-                    "Unexpected reply format from MyMemory translation service")
             status = data.get("responseStatus")
-            response_data = data.get("responseData")
-            if not isinstance(response_data, dict):
-                raise RuntimeError(
-                    "Unexpected reply format from MyMemory translation service")
-            translated_text = response_data.get("translatedText")
-            out = translated_text.strip() if isinstance(translated_text, str) else ""
+            out = ((data.get("responseData") or {}).get("translatedText") or "").strip()
             bad_markers = ("MYMEMORY WARNING", "INVALID", "QUERY LENGTH LIMIT",
                            "NO QUERY SPECIFIED", "PLEASE SELECT")
             if status != 200 or not out or out.upper().startswith(bad_markers):

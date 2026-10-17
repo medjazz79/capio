@@ -24,7 +24,8 @@ SPEECH_PREFETCH_MAX_CHARS = 8000
 SPEECH_AUTO_SCROLL_RESUME_MS = 1400
 from PySide6.QtCore import QEvent, QPoint, QRect, QUrl, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetricsF, QTextBlockFormat, QTextCharFormat,
+    QColor, QContextMenuEvent, QDesktopServices, QFont, QFontMetricsF,
+    QTextBlockFormat, QTextCharFormat,
     QTextCursor, QTextDocument, QTextFormat, QTextOption,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -84,13 +85,6 @@ _MARKDOWN_HTML_TAGS = frozenset({
 _TABLE_SEPARATOR_CELL = re.compile(r":?-{3,}:?")
 _MUSICAL_ACCIDENTAL_AFTER_NOTE = re.compile(
     r"(?<![A-Za-z])([A-Ga-g])(?=[♭♯#♮])")
-_TRANSLATION_EXPLANATION_ACTIONS = (
-    ("Explain linguistically", "linguistic"),
-    ("Explain simply", "simple"),
-    ("Explain etymologically", "etymological"),
-    ("Translate and explain", "translate_and_explain"),
-    ("Explain in context", "context"),
-)
 
 
 class TranslationTextEdit(QTextEdit):
@@ -99,61 +93,75 @@ class TranslationTextEdit(QTextEdit):
     zoomRequested = Signal(float)
     explainRequested = Signal(str, str)
 
-    def mouseReleaseEvent(self, event) -> None:
-        super().mouseReleaseEvent(event)
-        if (
-            event.button() == Qt.MouseButton.LeftButton
-            and not self.textCursor().hasSelection()
+    def create_context_menu(self) -> QMenu:
+        selected_text = self.textCursor().selectedText().replace(
+            "\u2029", "\n").strip()
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu::item { font-size: 16px; padding: 9px 24px; }")
+        copy_action = menu.addAction("Copy")
+        copy_action.setEnabled(bool(selected_text))
+        copy_action.triggered.connect(self.copy)
+        select_all_action = menu.addAction("Select All")
+        select_all_action.setEnabled(bool(self.toPlainText().strip()))
+        select_all_action.triggered.connect(self.selectAll)
+        menu.addSeparator()
+        for label, style in (
+            ("Explain linguistically", "linguistic"),
+            ("Explain etymologically", "etymological"),
+            ("Explain simply", "simple"),
+            ("Explain in context", "context"),
         ):
-            point = event.position().toPoint()
-            cursor = self.cursorForPosition(point)
-            if self._point_is_over_text(point, cursor):
-                self.positionClicked.emit(cursor.position())
-            else:
-                self.backgroundClicked.emit()
-
-    def _point_is_over_text(self, point, cursor: QTextCursor) -> bool:
-        block = cursor.block()
-        relative_position = cursor.position() - block.position()
-        line = block.layout().lineForTextPosition(relative_position)
-        if not line.isValid():
-            return False
-
-        line_start = QTextCursor(self.document())
-        line_start.setPosition(block.position() + line.textStart())
-        line_start_rect = self.cursorRect(line_start)
-        x_start = line.cursorToX(0)[0]
-        x_end = line.cursorToX(line.textLength())[0]
-        layout_origin_x = line_start_rect.x() - x_start
-        text_left = layout_origin_x + min(x_start, x_end)
-        text_right = layout_origin_x + max(x_start, x_end)
-        line_top = line_start_rect.y()
-        line_bottom = line_top + max(line_start_rect.height(), line.height())
-        return (
-            text_left - 3 <= point.x() <= text_right + 3
-            and line_top <= point.y() < line_bottom
-        )
-
-    def _create_translation_context_menu(self) -> QMenu:
-        menu = self.createStandardContextMenu()
-        selected_text = self.textCursor().selectedText()
-        if selected_text.strip():
-            menu.addSeparator()
-            selected_text = selected_text.replace("\u2029", "\n").replace(
-                "\u2028", "\n").strip()
-            for label, explanation_style in _TRANSLATION_EXPLANATION_ACTIONS:
-                action = menu.addAction(label)
-                action.triggered.connect(
-                    lambda _checked=False, text=selected_text,
-                    style=explanation_style:
-                        self.explainRequested.emit(text, style))
+            action = menu.addAction(label)
+            action.setEnabled(bool(selected_text))
+            action.triggered.connect(
+                lambda _checked=False, selected_style=style,
+                text=selected_text: self.explainRequested.emit(
+                    selected_style, text))
         return menu
 
-    def contextMenuEvent(self, event) -> None:
-        menu = self._create_translation_context_menu()
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        menu = self.create_context_menu()
         menu.exec(event.globalPos())
-        menu.deleteLater()
-        event.accept()
+
+    def mousePressEvent(self, event) -> None:
+        self._click_start = event.position().toPoint()
+        self._click_had_selection = self.textCursor().hasSelection()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        point = event.position().toPoint()
+        if (
+            self._click_had_selection
+            or self.textCursor().hasSelection()
+            or (point - self._click_start).manhattanLength()
+            > QApplication.startDragDistance()
+            or self.anchorAt(point)
+        ):
+            return
+
+        document_point = point + QPoint(
+            self.horizontalScrollBar().value(),
+            self.verticalScrollBar().value(),
+        )
+        hit_position = self.document().documentLayout().hitTest(
+            document_point, Qt.HitTestAccuracy.ExactHit)
+        if hit_position < 0:
+            self.backgroundClicked.emit()
+            return
+        position = self.cursorForPosition(point).position()
+        text = self.toPlainText()
+        python_position = qt_to_python_position(text, position)
+        if (
+            python_position >= len(text)
+            or text[python_position].isspace()
+        ):
+            self.backgroundClicked.emit()
+            return
+        self.positionClicked.emit(position)
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -188,8 +196,23 @@ class ChatTranscriptBrowser(QTextBrowser):
     paragraphClicked = Signal(int)
 
     def mousePressEvent(self, event) -> None:
+        self._click_start = event.position().toPoint()
+        self._click_had_selection = self.textCursor().hasSelection()
         super().mousePressEvent(event)
-        cursor = self.cursorForPosition(event.position().toPoint())
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        point = event.position().toPoint()
+        if (
+            self._click_had_selection
+            or self.textCursor().hasSelection()
+            or (point - self._click_start).manhattanLength()
+            > QApplication.startDragDistance()
+        ):
+            return
+        cursor = self.cursorForPosition(point)
         self.paragraphClicked.emit(cursor.position())
 
 
@@ -209,8 +232,7 @@ class TranslatePopup(QDialog):
     translationReady = Signal()
     translationFailed = Signal(str)
     speechFinished = Signal(str)
-    explanationSelectionChanged = Signal(str)
-    explainRequested = Signal(str, str)
+    explanationRequested = Signal(str, str)
 
     def __init__(self, settings: dict, source_text: str | None = None,
                  pil_image=None, ocr_langs=("ru", "en"), parent=None,
@@ -229,6 +251,7 @@ class TranslatePopup(QDialog):
         self._chat_worker: ChatWorker | None = None
         self._chat_messages: list[dict[str, str]] = []
         self._chat_entries: list[dict[str, str]] = []
+        self._chat_partial_text = ""
         self._translation_generation = 0
         self._streamed_partial = ""
         self._translation_text = ""
@@ -323,7 +346,7 @@ class TranslatePopup(QDialog):
             if self._speech_available
             else speech_missing_message(self._speech_engine))
         self.speak_btn.setEnabled(False)
-        self.speak_btn.clicked.connect(lambda: self._toggle_speech())
+        self.speak_btn.clicked.connect(self._toggle_speech)
 
         # Speed picker: a narrow icon button so the popup keeps its exact size.
         self._speech_rate = normalize_speed(self.settings.get("speech_rate"))
@@ -366,15 +389,6 @@ class TranslatePopup(QDialog):
         self.pin_btn.setCheckable(True)
         self.pin_btn.setChecked(False)
         self.pin_btn.clicked.connect(self._toggle_pin)
-        self.explain_btn = QPushButton("Explain")
-        self.explain_btn.setObjectName("explainModeButton")
-        self.explain_btn.setFixedSize(84, 26)
-        self.explain_btn.setToolTip(
-            "Add a concise explanation below the translation")
-        self.explain_btn.setCheckable(True)
-        self.explain_btn.toggled.connect(self._set_explain_mode)
-        self._sync_explain_button()
-        self.explain_btn.hide()
         self.previous_page_btn = QPushButton("◀")
         self.previous_page_btn.setFixedSize(30, 26)
         self.previous_page_btn.setStyleSheet("font-size: 16px; padding: 0;")
@@ -403,14 +417,6 @@ class TranslatePopup(QDialog):
         self.page_number_label.toggled.connect(
             self._on_automatic_page_reading_toggled)
         self.page_number_label.hide()
-        self.chat_btn = QPushButton("Chat")
-        self.chat_btn.setFixedHeight(26)
-        self.chat_btn.setToolTip(
-            "Ask follow-up questions about this passage")
-        self.chat_btn.setEnabled(False)
-        self.chat_btn.setMinimumWidth(92)
-        self.chat_btn.clicked.connect(self._on_chat_button_clicked)
-        self.chat_btn.hide()
         self.source_language_btn = self._create_language_button(
             "source", "Translate from", settings.get("source_language", "auto"))
         self.target_language_btn = self._create_language_button(
@@ -456,9 +462,7 @@ class TranslatePopup(QDialog):
         self.result.backgroundClicked.connect(
             self._on_translation_background_clicked)
         self.result.zoomRequested.connect(self._apply_translation_zoom)
-        self.result.selectionChanged.connect(
-            self._on_explanation_selection_changed)
-        self.result.explainRequested.connect(self.explainRequested.emit)
+        self.result.explainRequested.connect(self.explanationRequested)
         translation_layout.addWidget(self.result, 1)
 
         self.chat_panel = QWidget(self)
@@ -467,7 +471,9 @@ class TranslatePopup(QDialog):
         chat_layout.setSpacing(4)
         self.chat_transcript = ChatTranscriptBrowser(self.chat_panel)
         self.chat_transcript.setObjectName("chatTranscript")
+        self.chat_transcript.setOpenLinks(False)
         self.chat_transcript.setOpenExternalLinks(False)
+        self.chat_transcript.anchorClicked.connect(self._open_chat_link)
         self.chat_transcript.installEventFilter(self)
         self.chat_transcript.viewport().installEventFilter(self)
         self.chat_transcript.verticalScrollBar().installEventFilter(self)
@@ -475,6 +481,10 @@ class TranslatePopup(QDialog):
             self._on_chat_transcript_clicked)
         self.chat_transcript.setMinimumHeight(90)
         self.chat_transcript.setMaximumHeight(190)
+        self._chat_render_timer = QTimer(self)
+        self._chat_render_timer.setSingleShot(True)
+        self._chat_render_timer.setInterval(60)
+        self._chat_render_timer.timeout.connect(self._render_chat_transcript)
         for widget in (
             self.result,
             self.result.viewport(),
@@ -488,7 +498,7 @@ class TranslatePopup(QDialog):
         self.chat_input.setObjectName("chatInput")
         self.chat_input.setPlaceholderText(
             "Ask a question, then press Send or Ctrl+Enter…")
-        self.chat_input.setFixedHeight(58)
+        self.chat_input.setFixedHeight(50)
         self.chat_input.sendRequested.connect(self._send_chat)
         chat_layout.addWidget(self.chat_transcript)
         self.chat_composer = QHBoxLayout()
@@ -496,10 +506,18 @@ class TranslatePopup(QDialog):
         self.chat_composer.setSpacing(5)
         self.chat_send_btn = QPushButton("Send", self.chat_panel)
         self.chat_send_btn.setObjectName("chatSendButton")
-        self.chat_send_btn.setFixedSize(62, 58)
+        self.chat_send_btn.setFixedSize(58, 42)
         self.chat_send_btn.setToolTip("Send message (Ctrl+Enter)")
         self.chat_send_btn.clicked.connect(self._send_chat)
+        self.chat_speed_btn = QToolButton(self.chat_panel)
+        self.chat_speed_btn.setObjectName("chatReadingSpeedButton")
+        self.chat_speed_btn.setText("»")
+        self.chat_speed_btn.setFixedSize(24, 26)
+        self.chat_speed_btn.setToolTip(
+            f"Reading speed: {self._speech_rate:.2f}x")
+        self.chat_speed_btn.clicked.connect(self._show_speed_menu)
         self.chat_composer.addWidget(self.chat_input, 1)
+        self.chat_composer.addWidget(self.chat_speed_btn)
         self.chat_composer.addWidget(self.chat_send_btn)
         chat_layout.addLayout(self.chat_composer)
         self.chat_panel.hide()
@@ -684,32 +702,6 @@ class TranslatePopup(QDialog):
               and self.settings.get("selection_mode") == "image"):
             self._start_translation_worker(pil_image=self._source_image)
 
-    def _sync_explain_button(self) -> None:
-        enabled = bool(self.settings.get("explain_mode", False))
-        self.explain_btn.blockSignals(True)
-        self.explain_btn.setChecked(enabled)
-        self.explain_btn.blockSignals(False)
-        colors = _POPUP_COLORS
-        self.explain_btn.setStyleSheet(
-            "QPushButton#explainModeButton { "
-            f"background: {colors['surface']}; "
-            f"border: 1px solid {colors['border']}; "
-            "border-radius: 4px; padding: 0 7px; font-size: 12px; "
-            f"color: {colors['text']}; }}"
-            "QPushButton#explainModeButton:hover, "
-            "QPushButton#explainModeButton:checked { "
-            f"background-color: {colors['accent']}; "
-            f"color: {colors['text']}; }}"
-            "QPushButton#explainModeButton:checked:hover { "
-            f"background-color: {colors['accent_hover']}; "
-            f"color: {colors['text']}; }}"
-        )
-        self.explain_btn.setToolTip(
-            "Explain mode is on: add an explanation below translations"
-            if enabled else
-            "Explain mode is off: show translations without an explanation"
-        )
-
     def _save_shared_settings(
         self, *, update_local: bool = True, **updates: object,
     ) -> bool:
@@ -730,13 +722,6 @@ class TranslatePopup(QDialog):
             self.settings.update(updates)
         return True
 
-    def _set_explain_mode(self, enabled: bool) -> None:
-        if not self._save_shared_settings(explain_mode=bool(enabled)):
-            self._sync_explain_button()
-            return
-        self._sync_explain_button()
-        self._retranslate_for_current_languages()
-
     def _start_translation_worker(
         self,
         text: str | None = None,
@@ -747,8 +732,9 @@ class TranslatePopup(QDialog):
         self._translation_generation += 1
         self._chat_messages.clear()
         self._chat_entries.clear()
+        self._chat_partial_text = ""
+        self._chat_render_timer.stop()
         self.chat_transcript.clear()
-        self.chat_btn.setEnabled(False)
         self.chat_send_btn.setEnabled(False)
         self._toggle_chat_panel(False)
         generation = self._translation_generation
@@ -995,6 +981,11 @@ class TranslatePopup(QDialog):
 
     def refresh_display(self, settings: dict | None = None) -> None:
         """Reapply saved typography after refreshing settings in-place."""
+        theme_changed = settings is not None and (
+            settings.get("theme") != self.settings.get("theme")
+            or settings.get("color_scheme")
+            != self.settings.get("color_scheme")
+        )
         if (
             settings is not None
             and self._rendered_translation_text == self._translation_text
@@ -1026,6 +1017,8 @@ class TranslatePopup(QDialog):
             )
         ):
             self.settings = settings
+            if theme_changed:
+                self._apply_popup_style()
             return
 
         old_explain_mode = bool(self.settings.get("explain_mode", False))
@@ -1068,11 +1061,6 @@ class TranslatePopup(QDialog):
         self._refresh_speech_controls()
         explain_mode = bool(self.settings.get("explain_mode", False))
         explain_instructions = self.settings.get("explain_instructions", "")
-        self._sync_explain_button()
-        self.chat_btn.setEnabled(
-            bool(getattr(self, "_translation_text", "").strip())
-            and self._chat_worker is None
-        )
         self.chat_send_btn.setEnabled(
             bool(getattr(self, "_translation_text", "").strip())
             and self._chat_worker is None
@@ -1168,11 +1156,7 @@ class TranslatePopup(QDialog):
             f"background-color: {colors['panel']}; color: {text}; "
             f"border: 1px solid {border}; }}"
             "QMenu::item:selected { "
-            f"background-color: {colors['selection']}; color: {text}; }}"
-            "QSplitter#translationChatSplitter::handle:vertical { "
-            f"background-color: {colors['accent_light']}; }}"
-            "QSplitter#translationChatSplitter::handle:vertical:hover { "
-            f"background-color: {colors['accent']}; }}"
+            f"background-color: {colors['selection']}; }}"
         )
         self.result.setStyleSheet(
             "QTextEdit#translationResult { "
@@ -1212,7 +1196,6 @@ class TranslatePopup(QDialog):
             f"background-color: {colors['selection']}; "
             f"border-color: {colors['accent']}; color: {text}; }}"
         )
-        self._sync_explain_button()
         self._style_speed_button()
         self.speed_menu.setStyleSheet(
             "QMenu { "
@@ -1589,7 +1572,6 @@ class TranslatePopup(QDialog):
         self.spin.hide()
         self._translation_text = translated_text
         self._translation_needs_render = bool(translated_text)
-        self.chat_btn.setEnabled(bool(translated_text.strip()))
         self.chat_send_btn.setEnabled(
             bool(translated_text.strip()) and self._chat_worker is None)
         self.result.show()
@@ -1949,14 +1931,13 @@ class TranslatePopup(QDialog):
             is_code_block = block_format.hasProperty(
                 QTextFormat.Property.BlockCodeFence)
             is_heading = bool(block_format.headingLevel())
-            cursor = QTextCursor(block)
-            is_table_cell = cursor.currentTable() is not None
             block_format.setLayoutDirection(
                 Qt.LayoutDirection.LeftToRight if is_code_block else direction)
             if is_code_block:
                 block_format.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            elif not is_table_cell:
+            else:
                 block_format.setAlignment(start_alignment)
+            cursor = QTextCursor(block)
             cursor.setBlockFormat(block_format)
             block = block.next()
 
@@ -1966,17 +1947,10 @@ class TranslatePopup(QDialog):
         self._rendered_translation_text = text
         self._translation_needs_render = False
 
-    def _on_explanation_selection_changed(self) -> None:
-        selected_text = self.result.textCursor().selectedText()
-        selected_text = selected_text.replace("\u2029", "\n").replace(
-            "\u2028", "\n").strip()
-        self.explanationSelectionChanged.emit(selected_text)
-
     def _on_failed(self, err: str) -> None:
         self.spin.hide()
         self.result.setPlainText(err)
         self.result.show()
-        self.chat_btn.setEnabled(False)
         self.chat_send_btn.setEnabled(False)
 
     def _toggle_chat_panel(self, visible: bool) -> None:
@@ -1994,7 +1968,6 @@ class TranslatePopup(QDialog):
                 )
                 self.content_splitter.setSizes(
                     [max(80, available - chat_height), chat_height])
-        self.chat_btn.setText("اشرح بعمق" if visible else "Chat")
         self.speak_btn.setText(self._speech_idle_label())
         self.speak_btn.setToolTip(
             "Read the latest model answer aloud with Edge TTS"
@@ -2004,12 +1977,6 @@ class TranslatePopup(QDialog):
             self._speech_available and bool(self._current_speech_text().strip()))
         if visible:
             self.chat_input.setFocus()
-
-    def _on_chat_button_clicked(self) -> None:
-        if self.chat_panel.isHidden():
-            self._toggle_chat_panel(True)
-        else:
-            self._toggle_chat_panel(False)
 
     def _apply_chat_direction(self) -> None:
         direction = (
@@ -2036,6 +2003,13 @@ class TranslatePopup(QDialog):
             "speaker": speaker,
         })
         self._render_chat_transcript()
+
+    def _open_chat_link(self, url: QUrl) -> None:
+        if url.scheme() not in {"http", "https"}:
+            return
+        if not QDesktopServices.openUrl(url):
+            logging.getLogger(__name__).warning(
+                "Could not open chat source link: %s", url.toString())
 
     def _on_chat_transcript_clicked(self, position: int) -> None:
         if not self._speech_available:
@@ -2278,7 +2252,14 @@ class TranslatePopup(QDialog):
         )
         self.chat_transcript.setLayoutDirection(default_direction)
         entries = []
-        for message in self._chat_entries:
+        chat_entries = list(self._chat_entries)
+        if self._chat_partial_text:
+            chat_entries.append({
+                "role": "assistant",
+                "content": self._chat_partial_text,
+                "speaker": "Tutor",
+            })
+        for message in chat_entries:
             speaker = message["speaker"]
             content = f"**{speaker}:**\n\n{message['content']}"
             markdown_document = QTextDocument()
@@ -2374,15 +2355,22 @@ class TranslatePopup(QDialog):
         )
 
     def _send_chat(self) -> None:
-        question = self.chat_input.toPlainText().strip()
+        self._send_chat_question(self.chat_input.toPlainText().strip())
+
+    def _send_chat_question(
+        self, question: str, *, clear_input: bool = True,
+    ) -> None:
         if not question or self._chat_worker is not None:
             return
         if not getattr(self, "_translation_text", "").strip():
             return
 
         self._chat_messages.append({"role": "user", "content": question})
+        self._chat_partial_text = ""
+        self._chat_render_timer.stop()
         self._append_chat_line("You", question)
-        self.chat_input.clear()
+        if clear_input:
+            self.chat_input.clear()
         self.chat_send_btn.setEnabled(False)
         self.chat_send_btn.setText("…")
         source = self._source_text or "(Original text unavailable; discuss the translation.)"
@@ -2394,15 +2382,25 @@ class TranslatePopup(QDialog):
         )
         self._chat_worker = worker
         self._chat_workers.append(worker)
+        worker.partial.connect(self._on_chat_partial)
         worker.done.connect(self._on_chat_done)
         worker.failed.connect(self._on_chat_failed)
         worker.finished.connect(self._on_chat_worker_finished)
         worker.start()
 
+    def _on_chat_partial(self, text: str) -> None:
+        if self.sender() is not self._chat_worker:
+            return
+        self._chat_partial_text = text
+        if not self._chat_render_timer.isActive():
+            self._chat_render_timer.start()
+
     def _on_chat_done(self, answer: str) -> None:
         worker = self.sender()
         if worker is not self._chat_worker:
             return
+        self._chat_render_timer.stop()
+        self._chat_partial_text = ""
         self._chat_messages.append({"role": "assistant", "content": answer})
         self._append_chat_line("Tutor", answer)
         if self._speech_active:
@@ -2418,8 +2416,13 @@ class TranslatePopup(QDialog):
         worker = self.sender()
         if worker is not self._chat_worker:
             return
+        self._chat_render_timer.stop()
+        partial = self._chat_partial_text.strip()
+        self._chat_partial_text = ""
         if self._chat_messages and self._chat_messages[-1]["role"] == "user":
             self._chat_messages.pop()
+        if partial:
+            self._append_chat_line("Partial answer", partial)
         self._append_chat_line("Error", error)
 
     def _on_chat_worker_finished(self) -> None:
@@ -2557,15 +2560,18 @@ class TranslatePopup(QDialog):
     def _show_speed_menu(self) -> None:
         self.speed_menu.adjustSize()
         self._position_speed_preset_buttons()
-        button_top_left = self.speed_btn.mapToGlobal(QPoint(0, 0))
-        button_bottom_right = self.speed_btn.mapToGlobal(
-            QPoint(self.speed_btn.width(), self.speed_btn.height())
+        button = self.sender()
+        if not isinstance(button, QToolButton):
+            button = self.speed_btn
+        button_top_left = button.mapToGlobal(QPoint(0, 0))
+        button_bottom_right = button.mapToGlobal(
+            QPoint(button.width(), button.height())
         )
         menu_size = self.speed_menu.sizeHint()
-        button_center_x = button_top_left.x() + self.speed_btn.width() // 2
+        button_center_x = button_top_left.x() + button.width() // 2
         x = button_center_x - menu_size.width() // 2
         y = button_bottom_right.y()
-        screen = self.speed_btn.screen() or QApplication.primaryScreen()
+        screen = button.screen() or QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
             x = max(
@@ -2708,6 +2714,8 @@ class TranslatePopup(QDialog):
         except (OSError, TypeError, ValueError):
             logging.exception("Could not save the reading speed")
         self.speed_btn.setToolTip(f"Reading speed: {self._speech_rate:.2f}x")
+        self.chat_speed_btn.setToolTip(
+            f"Reading speed: {self._speech_rate:.2f}x")
 
     def _load_voices(self) -> None:
         if self._voice_list_worker is not None or self._voice_actions:
@@ -2872,40 +2880,7 @@ class TranslatePopup(QDialog):
                 break
         return next_start if next_start is not None else self._speech_start_offset
 
-    def _next_speech_offset(self) -> int:
-        text = (
-            self._speech_text_override
-            if self._speech_text_override is not None
-            else self._speech_text_from_document(self.result.document())
-        )
-        position_ticks = self._player.position() * 10_000
-        boundaries = self._speech_boundaries.get(self._speech_index, [])
-        for index, (start, duration, source_start, source_end) in enumerate(
-            boundaries
-        ):
-            if start > position_ticks:
-                return source_start
-            if start <= position_ticks < start + duration:
-                if index + 1 < len(boundaries):
-                    return boundaries[index + 1][2]
-                for later_index in sorted(self._speech_boundaries):
-                    if later_index > self._speech_index:
-                        later = self._speech_boundaries[later_index]
-                        if later:
-                            return later[0][2]
-                next_offset = speech_start_offset(text, source_end)
-                return (
-                    len(text) if next_offset < source_end else next_offset
-                )
-        return self._current_speech_offset()
-
-    def _toggle_speech(
-        self,
-        *,
-        advance_to_next_word: bool = False,
-        translation_only: bool = False,
-        preserve_highlight: bool = False,
-    ) -> None:
+    def _toggle_speech(self) -> None:
         if not self._speech_available:
             # Nothing should be able to start a thread that cannot work.
             self.speak_btn.setText("No speech engine")
@@ -2913,44 +2888,18 @@ class TranslatePopup(QDialog):
                 speech_missing_message(self._speech_engine).replace("\n", " "))
             return
         if self._speech_active:
-            preserved_highlight = None
-            if preserve_highlight and not translation_only:
-                selections = self.result.extraSelections()
-                if selections and selections[0].cursor.hasSelection():
-                    source_text = self.result.toPlainText()
-                    highlighted_cursor = selections[0].cursor
-                    preserved_highlight = (
-                        qt_to_python_position(
-                            source_text, highlighted_cursor.selectionStart()),
-                        qt_to_python_position(
-                            source_text, highlighted_cursor.selectionEnd()),
-                    )
-            if translation_only and self._speech_text_override is not None:
-                self._speech_start_offset = 0
-                self._speech_text_override = None
-                self._chat_speech_document_start = None
-            elif advance_to_next_word and self._speech_text_override is None:
-                self._speech_start_offset = self._next_speech_offset()
-            else:
-                self._speech_start_offset = self._current_speech_offset()
+            self._speech_start_offset = self._current_speech_offset()
             self._speech_active = False
             self._pending_speech_offset = None
             self._pending_highlight = None
             self._close_speech_stream_server()
             self._speech_stream_urls.clear()
             self._speech_playing_stream_index = None
-            if preserve_highlight:
-                self._speech_highlight_timer.stop()
-                if translation_only:
-                    self.chat_transcript.setExtraSelections([])
-            else:
-                self._clear_speech_highlight()
+            self._clear_speech_highlight()
             self._player.stop()
             self._pending_player_position_ms = None
             self._pending_player_source = None
             self._player.setSource(QUrl())
-            if preserved_highlight is not None:
-                self._highlight_translation_range(*preserved_highlight)
             if self._speech_worker is not None and self._speech_worker.isRunning():
                 self._speech_worker.requestInterruption()
                 self.speak_btn.setEnabled(
@@ -2967,28 +2916,13 @@ class TranslatePopup(QDialog):
             self.spin.hide()
             return
 
-        if translation_only:
-            self._speech_text_override = None
-        else:
-            self._speech_text_override = (
-                self._markdown_speech_text(self._latest_chat_answer())
-                if not self.chat_panel.isHidden() else None
-            )
-        if self._speech_text_override is None:
-            translation_text = self._speech_text_from_document(
-                self.result.document())
-            if self._speech_start_offset >= len(translation_text):
-                self._speech_start_offset = 0
+        self._speech_text_override = (
+            self._markdown_speech_text(self._latest_chat_answer())
+            if not self.chat_panel.isHidden() else None
+        )
         self._request_speech(
             0 if self._speech_text_override is not None
             else self._speech_start_offset
-        )
-
-    def _on_translation_background_clicked(self) -> None:
-        self._toggle_speech(
-            advance_to_next_word=True,
-            translation_only=True,
-            preserve_highlight=True,
         )
 
     def _on_translation_position_clicked(self, position: int) -> None:
@@ -3038,6 +2972,10 @@ class TranslatePopup(QDialog):
                 self._request_speech(
                     self._speech_start_offset,
                     trigger="translation-word-click")
+
+    def _on_translation_background_clicked(self) -> None:
+        if self._current_speech_text().strip():
+            self._toggle_speech()
 
     def _seek_in_cached_read(self, offset: int) -> bool:
         """Resume from a clicked word using the cached full read, if present.
@@ -3965,8 +3903,6 @@ class TranslatePopup(QDialog):
         self._speech_stream_urls.clear()
         self._speech_playing_stream_index = None
         self._speech_boundaries.clear()
-        if not error:
-            self._speech_start_offset = 0
         self._pending_highlight = None
         self._clear_speech_highlight()
         if error and self._speech_worker is not None and self._speech_worker.isRunning():

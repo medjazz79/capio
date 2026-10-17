@@ -32,6 +32,9 @@ MIN_TRANSLATION_TOP_BOTTOM_MARGIN_PX = 0
 MAX_TRANSLATION_TOP_BOTTOM_MARGIN_PX = 100
 MIN_TRANSLATION_FONT_SIZE = 5.0
 MAX_TRANSLATION_FONT_SIZE = 144.0
+DEFAULT_CHAT_FONT_SIZE = 12.0
+MIN_CHAT_FONT_SIZE = 8.0
+MAX_CHAT_FONT_SIZE = 30.0
 
 # Max settings file size to prevent DoS (1 MB is far beyond normal ~5 KB)
 _MAX_SETTINGS_FILE_BYTES = 1_048_576
@@ -102,14 +105,12 @@ DEFAULTS = {
     "ocr_langs": "auto",
     "source_language": "auto",
     "target_language": "ar",
+    "chat_reply_language": "ar",
+    "chat_reply_language_only": False,
     "float_source_language": "auto",
     "float_target_language": "ar",
     "font_size": 17,
-    "chat_font_size": 12.0,
-    "chat_reply_language": "ar",
-    "chat_reply_language_only": False,
-    "chat_dock_width": 380,
-    "chat_dock_visible": False,
+    "chat_font_size": DEFAULT_CHAT_FONT_SIZE,
     "translation_font": "",
     "translation_font_arabic": "",
     "translation_font_latin": "",
@@ -120,6 +121,7 @@ DEFAULTS = {
     "speech_engine": "edge",
     "gemini_tts_voice": "Kore",
     "speech_rate": 1.0,
+    "chat_speech_rate": 1.0,
     "speech_voice": "fr-FR-VivienneMultilingualNeural",
     "automatic_speech_voice": False,
     "speech_read_latin_words": False,
@@ -127,6 +129,10 @@ DEFAULTS = {
     "window_geometry": "",
     "splitter_sizes": [],
     "thumbs_visible": False,
+    "chat_dock_open": False,
+    "chat_dock_width": 360,
+    "chat_dock_area": "right",
+    "chat_composer_splitter_sizes": [],
     "last_dir": "",
     "last_open_dir": "",
     "last_pdf": "",
@@ -271,8 +277,6 @@ def load() -> dict:
         )
     if merged.get("color_scheme") not in ("system", "dark", "light"):
         merged["color_scheme"] = "system"
-    if merged.get("theme") == "Pure Light":
-        merged["theme"] = "Dark Slate"
 
     providers_path = _custom_providers_path()
     providers_file_exists = False
@@ -400,19 +404,16 @@ def load() -> dict:
         min(MAX_TRANSLATION_FONT_SIZE, font_size),
     )
     try:
-        chat_font_size = float(merged.get("chat_font_size", 12.0))
+        chat_font_size = float(merged.get(
+            "chat_font_size", DEFAULT_CHAT_FONT_SIZE))
     except (TypeError, ValueError):
-        chat_font_size = 12.0
+        chat_font_size = DEFAULT_CHAT_FONT_SIZE
     if not 0.0 < chat_font_size < float("inf"):
-        chat_font_size = 12.0
-    merged["chat_font_size"] = min(30.0, max(8.0, chat_font_size))
-    try:
-        chat_dock_width = int(merged.get("chat_dock_width", 380))
-    except (TypeError, ValueError):
-        chat_dock_width = 380
-    merged["chat_dock_width"] = max(320, min(900, chat_dock_width))
-    if not isinstance(merged.get("chat_dock_visible"), bool):
-        merged["chat_dock_visible"] = False
+        chat_font_size = DEFAULT_CHAT_FONT_SIZE
+    merged["chat_font_size"] = max(
+        MIN_CHAT_FONT_SIZE,
+        min(MAX_CHAT_FONT_SIZE, chat_font_size),
+    )
     # A saved model that cannot answer any more must not stay selected: it
     # would fail on every selection with a badge the user cannot act on.
     #
@@ -493,9 +494,9 @@ def _is_dead_prefixed_model(settings: dict, saved: str) -> bool:
 def _is_retired_cli_model(model: str, settings: dict | None = None) -> bool:
     """True when OpenCode itself refuses this model id for any account.
 
-    A current CLI catalog entry is not retired just because it is newer than
-    this app's built-in no-key bridge catalog. Recorded failures still retire
-    it, and legacy free ids absent from the CLI catalog keep the old migration.
+    Zen ids that left the free tier answer 403 for everyone; the CLI surfaces
+    that as a FreeTierError, and keeping a recorded verdict here is how a
+    model measured dead stays out of the picker on the next launch.
     """
     from translators import registry
     check_settings = settings if isinstance(settings, dict) else {}
@@ -503,9 +504,6 @@ def _is_retired_cli_model(model: str, settings: dict | None = None) -> bool:
     if status:
         return True
     bare = model[len(registry.OPENCODE_CLI_PREFIX):]
-    cli_models = check_settings.get("opencode_cli_models")
-    if isinstance(cli_models, list) and bare in cli_models:
-        return False
     return bare not in registry.ZEN_FREE and bare.endswith("-free")
 
 
@@ -518,16 +516,14 @@ def _working_fallback(settings: dict) -> str:
     actually reported instead of guessing the provider prefix.
     """
     from translators import registry
-    from translators import opencode_cli
     cli_models = settings.get("opencode_cli_models")
     if isinstance(cli_models, list):
-        status = settings.get("model_status")
-        status = status if isinstance(status, dict) else {}
-        for candidate in opencode_cli.free_models(
-                [item for item in cli_models if isinstance(item, str)]):
-            model = registry.OPENCODE_CLI_PREFIX + candidate
-            if not status.get(model):
-                return model
+        for candidate in cli_models:
+            if not isinstance(candidate, str):
+                continue
+            bare = candidate.rsplit("/", 1)[-1]
+            if bare in registry.ZEN_FREE:
+                return registry.OPENCODE_CLI_PREFIX + candidate
     if registry.ZEN_FREE:
         try:
             if registry.availability(registry.ZEN_FREE[0], settings)[0]:

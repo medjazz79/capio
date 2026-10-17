@@ -8,10 +8,21 @@ Everything now flows from here:
     availability(model)  ->  (ok: bool, reason: str)
     model_groups(...)    ->  the grouped list the settings combo renders
 
-The OpenCode CLI model catalog is refreshed from Settings. The picker only
-offers the OpenCode provider's free models; CLI-reported availability is then
-verified separately, so stale or account-blocked models are disabled with
-their recorded error instead of silently being treated as working.
+**The free-tier lists are measured, not believed.** On 2026-10-07 every id
+below was called against the live Zen gateway and against the authenticated
+OpenCode CLI:
+
+  * `space-bunny-free` -> 200 with no key at all, from plain HTTP and from
+    inside the CLI. It is the only one.
+  * Every other `-free` id -> 403 "free tier can only be used from within
+    OpenCode", *including* from inside the authenticated CLI. The block is an
+    account entitlement, not a transport, so a proxy cannot lift it.
+  * The "credits" ids -> provider.quota: the account has no balance.
+
+OpenCode's own log shows that same 403 on every day from 2026-09-24 onward,
+so these ids never worked on this machine. They are therefore not offered:
+listing a model that cannot answer is worse than not offering it, because the
+user pays with a failed translation and a confusing badge.
 """
 from __future__ import annotations
 
@@ -19,7 +30,7 @@ import json
 from pathlib import Path
 
 from . import gemini as gemini_api
-from .opencode_bridge import BRIDGE_FREE
+from .opencode_bridge import BRIDGE_FREE, ordered_models
 
 # --- Gemini -----------------------------------------------------------------
 
@@ -289,7 +300,7 @@ MISTRAL_HDR = "── 🌀 Mistral — needs a Mistral key (free tier) ──"
 FLM_HDR = "── 🔀 FreeLLMAPI — your local router (many free tiers, auto-failover) ──"
 CUSTOM_HDR = "── 🔌 OpenAI-compatible — needs base URL + key ──"
 CUSTOM_PROVIDER_HDR = "── 🔧 Custom Providers — your own API endpoints ──"
-CLI_HDR = "── ⌘ OpenCode CLI — free models ──"
+CLI_HDR = "── ⌘ OpenCode CLI — verified models ──"
 
 # Curated Groq ids, verified live 2026-10-08 (Groq retires ids silently —
 # llama-3.3-70b-versatile and llama-3.1-8b-instant were gone that day).
@@ -594,90 +605,58 @@ def model_groups(
 ) -> list[tuple[str, bool]]:
     """[(label, enabled)] for the combo. Disabled rows still show their reason.
 
-    OpenCode CLI entries are filtered to the provider's free ids from its
-    refreshed catalog. Working-ness comes from `model_status`, which records
+    The picker offers three groups: Gemini, the streaming bridge, and Groq.
+    `live_opencode` / `live_cli` are accepted for call compatibility but
+    deliberately ignored: the Zen catalog still lists ids that answer 403,
+    and CLI/custom engines keep working when already selected but are no
+    longer offered. Working-ness comes from `model_status`, which records
     real replies.
     """
     del live_opencode
+    del live_cli
 
     def flag(m: str) -> bool:
         return availability(m, settings)[0]
 
-    rows: list[tuple[str, bool]] = []
-    if (settings.get("gemini_key") or "").strip():
-        rows.append((GEMINI_HDR, False))
-        rows += [(m, flag(m)) for m in gemini_api.known_models()]
+    rows: list[tuple[str, bool]] = [(GEMINI_HDR, False)]
+    rows += [(m, flag(m)) for m in gemini_api.known_models()]
+
+    rows.append((BRIDGE_HDR, False))
+    rows += [(m, flag(m)) for m in ordered_models(
+        bool(settings.get("fast_mode", True)))]
 
     rows.append((GOOGLE_TRANSLATE_HDR, False))
     rows.append((GOOGLE_TRANSLATE_MODEL, flag(GOOGLE_TRANSLATE_MODEL)))
 
-    from . import opencode_cli
-    cli_models = (
-        live_cli if live_cli is not None
-        else settings.get("opencode_cli_models", [])
-    )
-    free_cli_models = opencode_cli.free_models(
-        [model for model in cli_models if isinstance(model, str)]
-        if isinstance(cli_models, list) else []
-    )
-    if free_cli_models:
-        rows.append((CLI_HDR, False))
-        rows += [
-            (f"{OPENCODE_CLI_PREFIX}{model}", flag(
-                f"{OPENCODE_CLI_PREFIX}{model}"))
-            for model in free_cli_models
-        ]
+    groq_models = list(dict.fromkeys((live_groq or []) + GROQ_MODELS))
+    rows.append((GROQ_HDR, False))
+    rows += [(f"{GROQ_PREFIX}{m}", flag(f"{GROQ_PREFIX}{m}"))
+             for m in groq_models]
 
-    _, groq_key = provider_creds("groq", settings)
-    if groq_key:
-        groq_models = list(dict.fromkeys((live_groq or []) + GROQ_MODELS))
-        rows.append((GROQ_HDR, False))
-        rows += [(f"{GROQ_PREFIX}{m}", flag(f"{GROQ_PREFIX}{m}"))
-                 for m in groq_models]
+    cf_models = list(dict.fromkeys((live_cf or []) + CF_MODELS))
+    rows.append((CF_HDR, False))
+    rows += [(f"{CF_PREFIX}{m}", flag(f"{CF_PREFIX}{m}"))
+             for m in cf_models]
 
-    cf_base, cf_key = provider_creds("cf", settings)
-    if cf_base and cf_key:
-        cf_models = list(dict.fromkeys((live_cf or []) + CF_MODELS))
-        rows.append((CF_HDR, False))
-        rows += [(f"{CF_PREFIX}{m}", flag(f"{CF_PREFIX}{m}"))
-                 for m in cf_models]
-
-    _, mistral_key = provider_creds("mistral", settings)
-    if mistral_key:
-        rows.append((MISTRAL_HDR, False))
-        rows += [(f"{MISTRAL_PREFIX}{m}", flag(f"{MISTRAL_PREFIX}{m}"))
-                 for m in MISTRAL_MODELS]
+    rows.append((MISTRAL_HDR, False))
+    rows += [(f"{MISTRAL_PREFIX}{m}", flag(f"{MISTRAL_PREFIX}{m}"))
+             for m in MISTRAL_MODELS]
 
     # Router pseudo-models first (that is the point of running a gateway),
     # then whatever `?execution_status=ready` reported as callable right now.
-    _, flm_key = provider_creds("freellm", settings)
-    if flm_key:
-        flm_models = list(dict.fromkeys(
-            [*FLM_ROUTER_MODELS, *(live_flm or [])]))
-        rows.append((FLM_HDR, False))
-        rows += [(f"{FLM_PREFIX}{m}", flag(f"{FLM_PREFIX}{m}"))
-                 for m in flm_models]
-
-    openai_base = (settings.get("openai_base") or "").strip()
-    openai_key = (settings.get("openai_key") or "").strip()
-    openai_model = (settings.get("openai_model") or "").strip()
-    if openai_base and openai_key and openai_model:
-        rows.append((CUSTOM_HDR, False))
-        rows.append((openai_model, flag(openai_model)))
+    flm_models = list(dict.fromkeys(
+        [*FLM_ROUTER_MODELS, *(live_flm or [])]))
+    rows.append((FLM_HDR, False))
+    rows += [(f"{FLM_PREFIX}{m}", flag(f"{FLM_PREFIX}{m}"))
+             for m in flm_models]
     # Custom providers — each one is a user-defined OpenAI-compatible endpoint
     # like Kilo Code's custom provider config.
     custom_providers = settings.get("custom_providers") if isinstance(settings.get("custom_providers"), list) else []
-    active_custom_providers = [
-        entry for entry in custom_providers
-        if isinstance(entry, dict)
-        and entry.get("enabled", True)
-        and str(entry.get("base_url", "")).strip()
-        and str(entry.get("api_key", "")).strip()
-        and str(entry.get("model", "")).strip()
-    ]
-    if active_custom_providers:
+    if custom_providers:
         rows.append((CUSTOM_PROVIDER_HDR, False))
-        for entry in active_custom_providers:
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
             cid = str(entry.get("id", "")).strip()
             if not cid:
                 continue

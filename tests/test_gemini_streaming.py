@@ -86,6 +86,85 @@ class TestGeminiStreaming(unittest.TestCase):
         self.assertEqual(events[-1][2], "✦ chosen: gemini-3.5-flash-lite")
         stream.assert_called_once()
 
+    def test_compatible_stream_failure_falls_back_without_retrying_model(self):
+        settings = dict(
+            DEFAULTS,
+            model="test-compatible-model",
+            openai_base="https://example.invalid/v1",
+            openai_key="test-key",
+            source_language="en",
+            target_language="ar",
+        )
+
+        def failed_stream(*_args, **_kwargs):
+            def deltas():
+                raise RuntimeError("stream disconnected")
+                yield ""
+            return deltas()
+
+        with (
+            mock.patch(
+                "config.settings.resolve_model",
+                return_value="test-compatible-model",
+            ),
+            mock.patch.object(chain.registry, "provider_of", return_value="custom"),
+            mock.patch(
+                "translators.opencode_compat.stream_translate",
+                side_effect=failed_stream,
+            ) as stream,
+            mock.patch(
+                "translators.fallback.gtx_translate",
+                return_value="free translation",
+            ) as fallback,
+            mock.patch.object(
+                chain,
+                "_translate_chunk",
+                side_effect=AssertionError("must not repeat the selected model"),
+            ),
+        ):
+            events = list(chain._stream_single_compatible("source", settings))
+
+        self.assertEqual(events[-1][1], "free translation")
+        self.assertIn("stream disconnected", events[-1][2])
+        stream.assert_called_once()
+        fallback.assert_called_once_with("source", "en", "ar")
+
+    def test_bridge_stream_failure_falls_back_without_retrying_model(self):
+        settings = dict(
+            DEFAULTS,
+            model="space-bunny-free",
+            source_language="en",
+            target_language="ar",
+        )
+
+        def failed_stream(*_args, **_kwargs):
+            def deltas():
+                raise RuntimeError("stream disconnected")
+                yield ""
+            return deltas()
+
+        with (
+            mock.patch(
+                "translators.opencode_bridge.stream",
+                side_effect=failed_stream,
+            ) as stream,
+            mock.patch(
+                "translators.fallback.gtx_translate",
+                return_value="free translation",
+            ) as fallback,
+            mock.patch.object(
+                chain,
+                "_translate_chunk",
+                side_effect=AssertionError("must not repeat the selected model"),
+            ),
+        ):
+            events = list(chain._stream_single_bridge("source", settings))
+
+        self.assertEqual(events[-1][1], "free translation")
+        self.assertIn("stream disconnected", events[-1][2])
+        stream.assert_called_once()
+        fallback.assert_called_once_with("source", "en", "ar")
+
     def test_nonstream_translate_reserves_8192_output_tokens(self):
         response = mock.Mock(status_code=200)
         response.json.return_value = {

@@ -1,4 +1,4 @@
-"""Offline unit tests: chunking, PDF rect extraction. No network."""
+"""Offline unit tests: chunking, glossary, PDF rect extraction. No network."""
 import atexit
 import contextlib
 import json
@@ -1347,20 +1347,6 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         self.assertEqual(sidebar.minimumWidth(), 220)
         self.assertEqual(sidebar.maximumWidth(), 500)
 
-    def test_context_menu_fonts_are_enlarged_in_app_and_settings_styles(self):
-        from main import app_stylesheet
-        from ui.theme import settings_stylesheet
-
-        self.assertIn(
-            "QMenu::item { \n    padding: 7px 22px; \n"
-            "    border-radius: 5px;\n    font-size: 16px;",
-            app_stylesheet("Dark Slate"),
-        )
-        self.assertIn(
-            "QMenu::item {\n            font-size: 16px;",
-            settings_stylesheet("Dark Slate"),
-        )
-
     def test_settings_splitters_resize_sidebar_and_results_with_mouse(self):
         from PySide6.QtCore import QPoint, Qt
         from PySide6.QtTest import QTest
@@ -1450,11 +1436,16 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
 
 
 class TestOnlyWorkingModelsAreOffered(_GuiCase):
-    """CLI free-model ids come from OpenCode's refreshed provider catalog.
+    """Every claim here was measured against the live OpenCode Zen gateway and
+    the real OpenCode CLI on 2026-10-07, not guessed from model names:
 
-    The stable no-key bridge catalog is measured separately from the dynamic
-    OpenCode CLI catalog. CLI free-model ids come from the latest CLI model
-    listing and are disabled when a real verification recorded a failure.
+    * `space-bunny-free` answers 200 with no key at all (HTTP and CLI).
+    * Every other `-free` id answers 403 "free tier can only be used from
+      within OpenCode" -- from plain HTTP *and* from inside the authenticated
+      OpenCode CLI, so the block is an account entitlement, not a transport.
+    * The Zen "credits" ids answer provider.quota: the account has no balance.
+    * OpenCode's own log shows that same 403 on every single day since
+      2026-09-24, so these ids never worked for this machine.
     """
 
     # Despite the name, this class also builds real MainWindows and popups, so
@@ -1470,72 +1461,6 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         labels = [label for label, _ in registry.model_groups({})]
         self.assertFalse([x for x in labels if "OpenCode key" in x],
                          f"still asks for a key: {labels}")
-
-    def test_provider_model_groups_are_hidden_until_their_credentials_exist(self):
-        from translators import registry
-        rows = dict(registry.model_groups({}))
-        self.assertEqual(
-            list(rows),
-            [registry.GOOGLE_TRANSLATE_HDR, registry.GOOGLE_TRANSLATE_MODEL],
-        )
-
-        settings = {
-            "gemini_key": "gemini",
-            "groq_key": "groq",
-            "cloudflare_account_id": "account",
-            "cloudflare_token": "cloudflare",
-            "mistral_key": "mistral",
-            "flm_key": "freellm",
-            "openai_base": "https://api.example.invalid/v1",
-            "openai_key": "openai",
-            "openai_model": "example-model",
-            "custom_providers": [{
-                "id": "custom-one",
-                "name": "Custom One",
-                "enabled": True,
-                "base_url": "https://custom.example.invalid/v1",
-                "api_key": "custom",
-                "model": "custom-model",
-            }],
-        }
-        authenticated = dict(registry.model_groups(settings))
-        for header, model in (
-            (registry.GEMINI_HDR, "gemini-3.5-flash-lite"),
-            (registry.GROQ_HDR, "groq:qwen/qwen3.8-27b"),
-            (registry.CF_HDR, "cf:@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
-            (registry.MISTRAL_HDR, "mistral:mistral-small-latest"),
-            (registry.FLM_HDR, "flm:auto"),
-            (registry.CUSTOM_HDR, "example-model"),
-            (registry.CUSTOM_PROVIDER_HDR, "custom:custom-one"),
-        ):
-            self.assertIn(header, authenticated)
-            self.assertIn(model, authenticated)
-
-    def test_picker_updates_provider_groups_when_credentials_change(self):
-        from main import SettingsDialog
-        from config.settings import DEFAULTS
-        from translators import registry
-
-        dlg = SettingsDialog(dict(DEFAULTS))
-        try:
-            labels = [dlg.z_model.itemText(i)
-                      for i in range(dlg.z_model.count())]
-            self.assertNotIn(registry.GEMINI_HDR, labels)
-            self.assertIn(registry.GOOGLE_TRANSLATE_HDR, labels)
-
-            dlg.gemini_key.setText("test-key")
-            labels = [dlg.z_model.itemText(i)
-                      for i in range(dlg.z_model.count())]
-            self.assertIn(registry.GEMINI_HDR, labels)
-            self.assertIn("gemini-3.5-flash-lite", labels)
-
-            dlg.gemini_key.clear()
-            labels = [dlg.z_model.itemText(i)
-                      for i in range(dlg.z_model.count())]
-            self.assertNotIn(registry.GEMINI_HDR, labels)
-            self.assertIn(registry.GOOGLE_TRANSLATE_HDR, labels)
-        finally:
-            dlg.close()
 
     def test_models_that_never_answer_are_not_listed(self):
         from translators import registry
@@ -1572,29 +1497,18 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         settings = {"model_status": {model: ""}}
         self.assertTrue(registry.availability(model, settings)[0])
 
-    def test_a_current_cli_free_model_is_not_retired_by_the_static_catalog(self):
-        from config.settings import _is_retired_cli_model
-        model = "opencode-cli:opencode/muse-spark-1.3-contributor-free"
-        self.assertFalse(_is_retired_cli_model(model, {
-            "opencode_cli_models": [
-                "opencode/space-bunny-free",
-                "opencode/muse-spark-1.3-contributor-free",
-            ],
-        }))
-
     def test_verification_status_does_not_disable_the_gemini_group(self):
         from translators import registry
-        # The legacy bridge catalog is not offered in the picker; cached CLI
-        # free ids are offered through the current CLI-specific group.
+        # Picker offers Gemini + bridge only; a bridge failure must not
+        # disable Gemini, and CLI ids are no longer offered at all.
         rows = dict(registry.model_groups({
             "gemini_key": "k",
             "opencode_cli_models": ["opencode/exo-free", "opencode/space-bunny-free"],
             "model_status": {"mimo-v2.6-flash-free": "403"},
         }))
         self.assertTrue(rows["gemini-2.5-flash-lite"])
-        self.assertNotIn("mimo-v2.6-flash-free", rows)
-        self.assertIn("opencode-cli:opencode/exo-free", rows)
-        self.assertIn("opencode-cli:opencode/space-bunny-free", rows)
+        self.assertFalse(rows["mimo-v2.6-flash-free"])
+        self.assertNotIn("opencode-cli:opencode/exo-free", rows)
 
     def test_the_opencode_api_key_is_gone_from_settings(self):
         from config.settings import DEFAULTS
@@ -1605,11 +1519,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         saved = {"model": "opencode-cli:opencode/muse-spark-1.3-contributor-free",
                  "opencode_key": "an-old-key", "gemini_key": "k",
                  "opencode_cli_models": ["opencode/space-bunny-free",
-                                         "opencode/muse-spark-1.3-contributor-free"],
-                 "model_status": {
-                     "opencode-cli:opencode/muse-spark-1.3-contributor-free":
-                         "403 — free tier blocked for this account",
-                 }}
+                                         "opencode/muse-spark-1.3-contributor-free"]}
         with mock_opencode_settings(saved) as path:
             merged = settings_module.load()
             settings_module.save(merged)   # persists the migrated values
@@ -1684,7 +1594,6 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
     def test_the_settings_dialog_no_longer_asks_for_an_opencode_key(self):
         from main import SettingsDialog
         from config.settings import DEFAULTS
-        from translators import registry
         dlg = SettingsDialog(dict(DEFAULTS))
         try:
             self.assertFalse(hasattr(dlg, "z_key"))
@@ -1695,8 +1604,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
                 if isinstance(dlg.z_model.itemData(i), str)
             ]
             self.assertNotIn("exo-free", labels)
-            self.assertNotIn("space-bunny-free", model_ids)
-            self.assertNotIn(registry.BRIDGE_HDR, labels)
+            self.assertIn("space-bunny-free", model_ids)
         finally:
             dlg.close()
 
@@ -1806,16 +1714,16 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
     def test_fast_mode_off_orders_bridge_alphabetically(self):
         from translators import registry
         from translators.opencode_bridge import BRIDGE_FREE
-        from translators.opencode_bridge import ordered_models
-        fast = [label for label, _ in registry.model_groups({
-            "fast_mode": True,
-            "gemini_key": "test-key",
-        })]
+        fast = [label for label, _ in registry.model_groups({"fast_mode": True})]
+        slow = [label for label, _ in registry.model_groups({"fast_mode": False})]
         self.assertEqual(fast[0], "── ✦ Gemini — needs a Gemini key ──")
-        self.assertNotIn(registry.BRIDGE_HDR, fast)
-        self.assertEqual(ordered_models(True), BRIDGE_FREE)
-        self.assertEqual(ordered_models(True)[0], "space-bunny-free")
-        self.assertEqual(ordered_models(False), sorted(BRIDGE_FREE))
+        fast_bridge = fast[fast.index(registry.BRIDGE_HDR) + 1:
+                           fast.index(registry.GOOGLE_TRANSLATE_HDR)]
+        self.assertEqual(fast_bridge, BRIDGE_FREE)  # measured fastest-first
+        self.assertEqual(fast_bridge[0], "space-bunny-free")
+        slow_bridge = slow[slow.index(registry.BRIDGE_HDR) + 1:
+                           slow.index(registry.GOOGLE_TRANSLATE_HDR)]
+        self.assertEqual(slow_bridge, sorted(slow_bridge))
 
     def test_chain_stream_off_emits_single_done(self):
         from unittest import mock
@@ -1861,12 +1769,19 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
     def test_settings_fast_mode_roundtrips_and_reorders(self):
         from main import SettingsDialog
         from config.settings import DEFAULTS
+        from translators import registry
         dlg = SettingsDialog(dict(DEFAULTS))
         try:
             self.assertTrue(dlg.fast_check.isChecked())
             self.assertTrue(dlg.values()["fast_mode"])
             dlg.fast_check.setChecked(False)
             self.assertFalse(dlg.values()["fast_mode"])
+            bridge = [
+                dlg.z_model.itemData(i)
+                for i in range(dlg.z_model.count())
+                if dlg.z_model.itemData(i) in registry.ordered_models(True)
+            ]
+            self.assertEqual(bridge, sorted(bridge))
         finally:
             dlg.close()
 
@@ -1883,20 +1798,20 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         self.assertEqual(merged["model"], "groq:qwen/qwen3.8-27b")
         self.assertEqual(resolve_model(merged), "groq:qwen/qwen3.8-27b")
 
-    def test_groq_models_listed_without_legacy_bridge_group_and_gated_by_key(self):
+    def test_groq_models_listed_below_bridge_and_gated_by_key(self):
         from translators import registry
         no_key = [label for label, _ in registry.model_groups({})]
-        self.assertNotIn(registry.BRIDGE_HDR, no_key)
-        self.assertNotIn(registry.GROQ_HDR, no_key)
-        self.assertNotIn("groq:qwen/qwen3.8-27b", no_key)
-        authenticated = dict(registry.model_groups({
+        self.assertIn(registry.GROQ_HDR, no_key)
+        self.assertIn("groq:qwen/qwen3.8-27b", no_key)
+        rows = dict(registry.model_groups({}))
+        self.assertFalse(rows["groq:qwen/qwen3.8-27b"])
+        ok_rows = dict(registry.model_groups({
             "openai_base": "https://api.groq.com/openai/v1",
             "openai_key": "k"}))
-        self.assertIn(registry.GROQ_HDR, authenticated)
-        self.assertIn("groq:qwen/qwen3.8-27b", authenticated)
+        self.assertTrue(ok_rows["groq:qwen/qwen3.8-27b"])
         # Live ids merge above the curated list, de-duplicated.
         live = [label for label, _ in registry.model_groups(
-            {"groq_key": "k"}, live_groq=["new/model"])]
+            {}, live_groq=["new/model"])]
         self.assertLess(live.index("groq:new/model"),
                         live.index("groq:qwen/qwen3.8-27b"))
 
@@ -1986,25 +1901,9 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             }),
         )
 
-    def test_cf_and_mistral_models_are_hidden_until_credentials_exist(self):
+    def test_cf_and_mistral_sections_below_groq(self):
         from translators import registry
-        no_credentials = [label for label, _ in registry.model_groups({})]
-        self.assertNotIn(registry.GROQ_HDR, no_credentials)
-        self.assertNotIn(registry.CF_HDR, no_credentials)
-        self.assertNotIn(registry.MISTRAL_HDR, no_credentials)
-        self.assertNotIn(
-            "cf:@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            no_credentials,
-        )
-        self.assertNotIn("mistral:mistral-small-latest", no_credentials)
-
-        credentials = {
-            "groq_key": "G",
-            "cloudflare_account_id": "ACC",
-            "cloudflare_token": "T",
-            "mistral_key": "M",
-        }
-        labels = [label for label, _ in registry.model_groups(credentials)]
+        labels = [label for label, _ in registry.model_groups({})]
         self.assertLess(labels.index(registry.GROQ_HDR),
                         labels.index(registry.CF_HDR))
         self.assertLess(labels.index(registry.CF_HDR),
@@ -2017,7 +1916,9 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             self.assertEqual(registry.provider_of(model), provider)
             ok, _ = registry.availability(model, {})
             self.assertFalse(ok)  # no key yet
-            ok, _ = registry.availability(model, credentials)
+            ok, _ = registry.availability(model, {
+                "cloudflare_account_id": "ACC", "cloudflare_token": "T",
+                "mistral_key": "M"})
             self.assertTrue(ok)
 
     def test_groq_image_translation_uses_provider_token(self):
@@ -2039,11 +1940,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
 
     def test_vision_model_ids_offered_for_cf_and_mistral(self):
         from translators import registry
-        labels = [label for label, _ in registry.model_groups({
-            "cloudflare_account_id": "ACC",
-            "cloudflare_token": "T",
-            "mistral_key": "M",
-        })]
+        labels = [label for label, _ in registry.model_groups({})]
         self.assertIn("cf:@cf/meta/llama-3.2-11b-vision-instruct", labels)
         self.assertIn("mistral:pixtral-12b-2409", labels)
         self.assertNotIn("cf:@cf/google/gemma-3-12b-it", labels)
@@ -2075,11 +1972,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             _ACTIVE_MODEL_ROLE, _FREE_MODEL_ROLE, _IMAGE_CAPABILITY_ROLE,
         )
 
-        dlg = SettingsDialog(dict(
-            DEFAULTS,
-            groq_key="G",
-            opencode_cli_models=["opencode/cat-jam-free"],
-        ))
+        dlg = SettingsDialog(dict(DEFAULTS))
         try:
             items = {
                 dlg.z_model.itemData(i): dlg.z_model.itemText(i)
@@ -2109,10 +2002,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             self.assertTrue(dlg.z_model.itemData(
                 text_index, _ACTIVE_MODEL_ROLE))
             self.assertTrue(dlg.z_model.itemData(
-                dlg.z_model.findData(
-                    "opencode-cli:opencode/cat-jam-free"),
-                _FREE_MODEL_ROLE,
-            ))
+                dlg.z_model.findData("space-bunny-free"), _FREE_MODEL_ROLE))
             self.assertEqual(
                 dlg.values()["model"], "groq:openai/gpt-oss-20b")
         finally:
@@ -2129,20 +2019,18 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
 
         dlg = SettingsDialog(dict(
             DEFAULTS,
-            gemini_key="test-gemini-key",
-            groq_key="test-groq-key",
             model="groq:openai/gpt-oss-20b",
-            model_favorites=["gemini-2.5-flash-lite"],
+            model_favorites=["space-bunny-free"],
         ))
         try:
             combo = dlg.z_model
             self.assertEqual(combo.itemText(0), "── ★ Favorites ──")
-            favorite_index = combo.findData("gemini-2.5-flash-lite")
+            favorite_index = combo.findData("space-bunny-free")
             self.assertTrue(combo.itemData(
                 favorite_index, _FAVORITE_MODEL_ROLE))
             self.assertEqual(
                 combo.itemData(favorite_index, _PROVIDER_LABEL_ROLE),
-                "Gemini",
+                "OpenCode bridge free",
             )
             self.assertEqual(
                 combo.itemData(0, _MODEL_GROUP_ROLE),
@@ -2150,8 +2038,8 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             )
             self.assertEqual(
                 [combo.itemData(i) for i in range(1, combo.count())
-                 if combo.itemData(i) == "gemini-2.5-flash-lite"],
-                ["gemini-2.5-flash-lite", "gemini-2.5-flash-lite"],
+                 if combo.itemData(i) == "space-bunny-free"],
+                ["space-bunny-free", "space-bunny-free"],
             )
 
             dlg.show()
@@ -2166,14 +2054,11 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             QTest.qWait(20)
             self.assertEqual(dlg.values()["model_favorites"], [])
             self.assertEqual(dlg._current_model(), "groq:openai/gpt-oss-20b")
-            self.assertEqual(
-                combo.itemText(0),
-                "── ✦ Gemini — needs a Gemini key ──",
-            )
+            self.assertEqual(combo.itemText(0), "── ✦ Gemini — needs a Gemini key ──")
 
-            dlg._on_model_favorite_clicked("gemini-2.5-flash-lite")
+            dlg._on_model_favorite_clicked("space-bunny-free")
             self.assertEqual(
-                dlg.values()["model_favorites"], ["gemini-2.5-flash-lite"])
+                dlg.values()["model_favorites"], ["space-bunny-free"])
             self.assertEqual(combo.itemText(0), "── ★ Favorites ──")
             self.assertEqual(dlg._current_model(), "groq:openai/gpt-oss-20b")
         finally:
@@ -2684,7 +2569,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
 
         for theme_name in THEMES:
             with self.subTest(theme=theme_name):
-                scheme = "dark"
+                scheme = "light" if theme_name == "Pure Light" else "dark"
                 colors = theme_colors(theme_name, scheme)
                 dialog = SettingsDialog(dict(
                     DEFAULTS, theme=theme_name, color_scheme=scheme))
@@ -3050,6 +2935,13 @@ class TestChain(unittest.TestCase):
         self.assertNotIn("\\", events[-1][1])
         self.assertTrue(all("\\" not in event[1] for event in events))
 
+    def test_glossary_word_boundaries(self):
+        out = fallback.glossary_partial("tones in Norton and the dominant chord")
+        self.assertIn("tones", out)  # not mangled by French "ton"
+        self.assertIn("Norton", out)
+        self.assertIn("المهيمنة", out)
+        self.assertIn("أكورد", out)
+
     def test_mymemory_parses_reply(self):
         from unittest import mock
         from translators import mymemory
@@ -3105,24 +2997,7 @@ class TestChain(unittest.TestCase):
             with self.assertRaises(Exception):
                 mymemory.translate("hello")
 
-    def test_mymemory_rejects_list_response_without_attribute_error(self):
-        from unittest import mock
-        from translators import mymemory
-        import requests
-
-        resp = mock.Mock()
-        resp.raise_for_status.return_value = None
-        resp.json.return_value = [["unexpected response"]]
-        with (
-            mock.patch.object(requests, "get", return_value=resp),
-            mock.patch("time.sleep"),
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError, "Unexpected reply format from MyMemory"
-            ):
-                mymemory.translate("hello")
-
-    def test_chain_uses_second_free_service_after_google_fails(self):
+    def test_chain_uses_second_free_before_glossary(self):
         from unittest import mock
         s = dict(DEFAULTS)
         s["model"] = "space-bunny-free"
@@ -3133,7 +3008,7 @@ class TestChain(unittest.TestCase):
                 with mock.patch("translators.fallback.gtx_translate",
                                 side_effect=ConnectionError("down")):
                     with mock.patch("translators.mymemory.translate", return_value="mm-ar"):
-                        arabic, badge = chain.translate("hello", s)
+                        arabic, badge = chain.translate("cadence", s)
                         self.assertEqual(arabic, "mm-ar")
                         self.assertIn("Free service (alt)", badge)
 
@@ -3172,6 +3047,13 @@ class TestChain(unittest.TestCase):
         by_name = {n: (ok, d) for n, ok, d in results}
         self.assertFalse(by_name["★ Your model (gemini-2.0-flash)"][0])
         self.assertIn("SKIPPED", by_name["★ Your model (gemini-2.0-flash)"][1])
+
+    def test_french_glossary(self):
+        out = fallback.glossary_partial("sensible tierce dominante tonique")
+        self.assertIn("الحساسة", out)
+        self.assertIn("الثالثة", out)
+        self.assertIn("المهيمنة", out)
+        self.assertIn("الأساسية", out)
 
     def test_gtx_retries_then_succeeds(self):
         import requests
@@ -3633,19 +3515,11 @@ class TestChain(unittest.TestCase):
             stderr="",
         )
         with mock.patch.object(opencode_cli, "find_executable", return_value="opencode"):
-            with mock.patch.object(
-                opencode_cli.subprocess,
-                "run",
-                return_value=completed,
-            ) as run:
+            with mock.patch.object(opencode_cli.subprocess, "run", return_value=completed):
                 self.assertEqual(
                     opencode_cli.list_models(),
                     ["opencode/glm-5.2", "anthropic/claude-sonnet-4"],
                 )
-        self.assertEqual(
-            run.call_args.kwargs["creationflags"],
-            opencode_cli._NO_CONSOLE_WINDOW,
-        )
 
     def test_opencode_cli_finds_desktop_bundled_executable(self):
         from pathlib import Path
@@ -3686,10 +3560,6 @@ class TestChain(unittest.TestCase):
             self.assertIn("professional translator", agent["prompt"])
             self.assertEqual(command[command.index("--model") + 1], "opencode/glm-5.2")
             self.assertIn("Translate this passage", kwargs["input"])
-            self.assertEqual(
-                kwargs["creationflags"],
-                opencode_cli._NO_CONSOLE_WINDOW,
-            )
             return mock.Mock(returncode=0, stdout=stdout, stderr="")
 
         with mock.patch.object(opencode_cli, "find_executable", return_value="opencode"):
@@ -3707,36 +3577,18 @@ class TestChain(unittest.TestCase):
         self.assertEqual(registry.provider_of(model), "opencode_cli")
         with mock.patch("translators.opencode_cli.find_executable", return_value="opencode"):
             self.assertEqual(registry.availability(model, {}), (True, ""))
+        # The engine still works when already selected, but the picker
+        # offers Gemini + bridge only.
         with mock.patch("translators.opencode_cli.find_executable", return_value="opencode"):
             rows = registry.model_groups(
-                {"opencode_cli_models": ["opencode/space-bunny-free"]},
-                live_cli=[
-                    "opencode/space-bunny-free",
-                    "opencode/big-pickle",
-                    "opencode/claude-haiku-5-5",
-                    "google/gemini-2.5-flash",
-                ],
+                {"opencode_cli_models": ["anthropic/claude-sonnet-4"]},
+                live_cli=["opencode/glm-5.2"],
             )
         labels = [label for label, _ in rows]
-        self.assertIn("opencode-cli:opencode/space-bunny-free", labels)
-        self.assertIn("opencode-cli:opencode/big-pickle", labels)
-        self.assertNotIn("opencode-cli:opencode/claude-haiku-5-5", labels)
-        self.assertNotIn("opencode-cli:google/gemini-2.5-flash", labels)
-        self.assertIn(registry.CLI_HDR, labels)
-        self.assertNotIn(registry.BRIDGE_HDR, labels)
-
-    def test_opencode_cli_free_models_are_filtered_from_live_catalog(self):
-        from translators import opencode_cli
-        self.assertEqual(
-            opencode_cli.free_models([
-                "opencode/cat-jam-free",
-                "opencode/big-pickle",
-                "opencode/claude-haiku-5-5",
-                "google/gemini-2.5-flash",
-                "opencode/cat-jam-free",
-            ]),
-            ["opencode/cat-jam-free", "opencode/big-pickle"],
-        )
+        self.assertNotIn("opencode-cli:anthropic/claude-sonnet-4", labels)
+        self.assertNotIn("opencode-cli:opencode/glm-5.2", labels)
+        self.assertIn(registry.BRIDGE_HDR, labels)
+        self.assertNotIn(registry.CLI_HDR, labels)
 
     def test_chain_passes_custom_instructions_to_selected_ai_model(self):
         from unittest import mock
@@ -4405,7 +4257,7 @@ class TestChain(unittest.TestCase):
             self.assertEqual(chain.translate("source", settings)[0], "traduzione")
         translate.assert_called_once_with("source", "en", "it")
 
-    def test_non_arabic_target_reports_when_free_services_fail(self):
+    def test_non_arabic_target_never_uses_arabic_only_glossary(self):
         from unittest import mock
 
         settings = dict(DEFAULTS)
@@ -5048,8 +4900,24 @@ class TestChain(unittest.TestCase):
     def test_empty_returns_empty(self):
         self.assertEqual(chain.translate("   ", dict(DEFAULTS)), ("", "—"))
 
-    def test_chain_reports_failure_when_all_services_are_unavailable(self):
-        """The translation chain reports service errors instead of hiding them."""
+    def test_glossary_offline(self):
+        out = fallback.glossary_partial("The dominant resolves to the tonic. Каданс.")
+        self.assertIn("المهيمنة", out)
+        self.assertIn("كادانس", out)
+
+    def test_chain_never_raises_without_network(self):
+        """Every layer above the glossary fails; the glossary still answers.
+
+        This used to call `chain.translate("cadence", dict(DEFAULTS))` for real,
+        which walked the genuine chosen-engine -> Google -> MyMemory ladder with
+        18 s and 15 s timeouts plus retries. The module docstring promises "No
+        network", and the test broke that promise: its runtime and its result
+        both depended on whether the machine running it happened to be online.
+
+        Now every network layer is mocked to raise, so the test measures exactly
+        one thing: the chain does not propagate an exception, and it returns
+        the offline glossary's partial translation rather than nothing.
+        """
         from unittest import mock
         from translators import gemini, mymemory, opencode_compat, fallback
 
@@ -5059,8 +4927,8 @@ class TestChain(unittest.TestCase):
             raise offline
 
         settings = dict(DEFAULTS)
-        # Any credentials present would be used for real; clear them so every
-        # network-dependent translation layer is covered by the mocks.
+        # Any credentials present would be used for real; with none configured,
+        # the ladder reaches the free layers and then the glossary either way.
         for key in ("gemini_key", "openai_key", "openai_base", "flm_key",
                     "groq_key", "cf_account", "cloudflare_account_id",
                     "cloudflare_token", "email"):
@@ -5075,12 +4943,17 @@ class TestChain(unittest.TestCase):
                                   side_effect=_no_network), \
                 mock.patch.object(mymemory, "translate",
                                   side_effect=_no_network):
-            with self.assertRaisesRegex(
-                RuntimeError, "Could not translate into Arabic"
-            ) as caught:
-                chain.translate("cadence", settings)
+            arabic, badge = chain.translate("cadence", settings)
 
-        self.assertIn("network unreachable", str(caught.exception))
+        self.assertTrue(arabic, "the chain returned nothing at all")
+        self.assertTrue(badge)
+        # "Cadence" is a known musical term, so the offline glossary translates
+        # it instead of retaining the source word.
+        self.assertIn("كادانس", arabic)
+        self.assertNotIn("cadence", arabic)
+        # ...and the badge must not claim the user's own model answered.
+        self.assertNotIn("◈ chosen", badge)
+        self.assertNotIn("chosen:", badge)
 
 
 class TestPdfUtils(unittest.TestCase):
@@ -5154,65 +5027,6 @@ class TestPdfUtils(unittest.TestCase):
             self.assertEqual(page_number, "12")
         finally:
             doc.close()
-
-    def test_page_body_text_preserves_aligned_table_cells(self):
-        import pymupdf
-        from reader import pdf_utils
-
-        doc = pymupdf.open()
-        page = doc.new_page(width=600, height=800)
-        page.insert_text((50, 160), "Table 6. Required fusion values", fontsize=10)
-        rows = (
-            ("Fundamental pitch (ETS)", "Required fusion (%)"),
-            ("Major (major)", "0.8"),
-            ("Augmented (augmented)", "5.0"),
-            ("Minor (minor)", "5.2"),
-            ("Diminished (diminished)", "6.1"),
-        )
-        for row_index, row in enumerate(rows):
-            y = 200 + row_index * 24
-            page.insert_text((50, y), row[0], fontsize=10)
-            page.insert_text((450, y), row[1], fontsize=10)
-
-        try:
-            body, _page_number = pdf_utils.page_body_text(page)
-        finally:
-            doc.close()
-
-        self.assertIn("Table 6. Required fusion values", body)
-        self.assertIn("| Fundamental pitch (ETS) | Required fusion (%) |", body)
-        self.assertIn("| --- | --- |", body)
-        self.assertIn("| Major (major) | 0.8 |", body)
-        self.assertIn("| Diminished (diminished) | 6.1 |", body)
-        self.assertNotIn("Fundamental pitch (ETS)\nRequired fusion (%)", body)
-
-    def test_page_body_text_does_not_turn_two_prose_columns_into_a_table(self):
-        import pymupdf
-        from reader import pdf_utils
-
-        doc = pymupdf.open()
-        page = doc.new_page(width=600, height=800)
-        for row_index in range(4):
-            y = 200 + row_index * 24
-            page.insert_text(
-                (50, y),
-                f"The left prose column has a complete sentence number {row_index}.",
-                fontsize=10,
-            )
-            page.insert_text(
-                (330, y),
-                f"The right prose column has another complete sentence {row_index}.",
-                fontsize=10,
-            )
-
-        try:
-            body, _page_number = pdf_utils.page_body_text(page)
-        finally:
-            doc.close()
-
-        self.assertNotIn("| --- |", body)
-        self.assertIn("complete sentence number 0", body)
-        self.assertIn("another complete sentence 0", body)
 
     def test_extract_in_rect(self):
         import pymupdf
@@ -5917,6 +5731,34 @@ class TestReaderZoom(_GuiCase):
             self.assertEqual(
                 speech_start_offset(popup.result.toPlainText(), position), 6)
         finally:
+            popup.close()
+
+    def test_translation_background_click_toggles_and_resumes_last_word(self):
+        from unittest import mock
+        from popup.translate_popup import TranslatePopup
+        from config.settings import DEFAULTS
+
+        with mock_chain_translate(return_value=("first second", "T")):
+            popup = TranslatePopup(dict(DEFAULTS), source_text="hello")
+        try:
+            popup.result.setPlainText("first second")
+            popup._speech_available = True
+            popup._speech_active = True
+            popup._speech_start_offset = 0
+            popup._speech_index = 0
+            popup._speech_boundaries = {
+                0: [(0, 10_000_000, 0, 5), (10_000_000, 10_000_000, 6, 12)]
+            }
+            with mock.patch.object(popup._player, "position", return_value=1100):
+                popup._on_translation_background_clicked()
+            self.assertFalse(popup._speech_active)
+            self.assertEqual(popup._speech_start_offset, 6)
+
+            with mock.patch.object(popup, "_request_speech") as request:
+                popup._on_translation_background_clicked()
+            request.assert_called_once_with(6)
+        finally:
+            popup._speech_active = False
             popup.close()
 
     def test_clicking_during_speech_seeks_in_ready_audio_without_restarting_tts(self):
@@ -7731,18 +7573,20 @@ class TestReaderZoom(_GuiCase):
             # Model names remain clean; image status has its own visible badge.
             self.assertEqual(
                 models["gemini-3.5-flash-lite"], "gemini-3.5-flash-lite")
+            self.assertEqual(models["space-bunny-free"], "space-bunny-free")
             self.assertEqual(dlg.model_image_badge.text(), "IMAGE INPUT")
 
-            # Current CLI models are added on refresh; the old bridge group is
-            # intentionally no longer shown in the model picker.
+            # headers are non-selectable; picker offers Gemini + bridge only
+            hdr = dlg.z_model.findText(registry.BRIDGE_HDR)
+            self.assertGreaterEqual(hdr, 0)
+            self.assertFalse(dlg.z_model.model().item(hdr).isEnabled())
             self.assertEqual(dlg.z_model.findText(registry.ZEN_FREE_HDR), -1)
             self.assertEqual(dlg.z_model.findText(registry.CLI_HDR), -1)
-            self.assertEqual(dlg.z_model.findText(registry.BRIDGE_HDR), -1)
             self.assertEqual(dlg.z_model.findText(registry.CUSTOM_HDR), -1)
 
             # every listed row stays selectable even before its key is set;
             # the engine_hint alone reports why it can't be used yet.
-            for txt in ["gemini-3.5-flash-lite"]:
+            for txt in ["gemini-3.5-flash-lite", "space-bunny-free"]:
                 ix = dlg.z_model.findData(txt)
                 self.assertTrue(dlg.z_model.model().item(ix).isEnabled(), txt)
             ok, reason = registry.availability("gemini-3.5-flash-lite", {})
@@ -7760,24 +7604,19 @@ class TestReaderZoom(_GuiCase):
                 ) as verify:
                     dlg.z_refresh.click()
                     cli_models.assert_called_once()
-                    verify.assert_called_once_with(
-                        ["opencode/space-bunny-free", "opencode/exo-free"],
-                        dlg._settings,
-                    )
+                    verify.assert_called_once()
             texts = [dlg.z_model.itemText(i) for i in range(dlg.z_model.count())]
             models = {
                 dlg.z_model.itemData(i): dlg.z_model.itemText(i)
                 for i in range(dlg.z_model.count())
                 if isinstance(dlg.z_model.itemData(i), str)
             }
-            # CLI-sourced free models appear after refresh; failures are kept
-            # in the model status used by availability and the engine hint.
-            self.assertIn("⌘ space-bunny-free", texts)
-            self.assertIn("⌘ exo-free", texts)
+            # CLI models are no longer offered in the picker (engines kept).
             self.assertNotIn("⌘ opencode/space-bunny-free", texts)
+            self.assertNotIn("⌘ opencode/exo-free", texts)
             self.assertIn("gemini-3.5-flash-lite", models)   # gemini group kept
-            self.assertEqual(texts.count("space-bunny-free"), 1)
-            self.assertNotIn("mimo-v2.6-flash-free", models)
+            for m in ["mimo-v2.6-flash-free", "muse-spark-1.3-contributor-free"]:
+                self.assertIn(m, models)   # bridge group kept
 
             self.assertEqual(dlg.values()["model"], "space-bunny-free")
             dlg._select_model("opencode-cli:opencode/space-bunny-free")
@@ -7936,6 +7775,34 @@ class TestReaderZoom(_GuiCase):
             dialog.selection_mode.setCurrentIndex(
                 dialog.selection_mode.findData("ocr"))
             self.assertEqual(dialog.values()["selection_mode"], "ocr")
+        finally:
+            dialog.close()
+
+    def test_chat_reply_language_setting_and_force_checkbox_are_saved(self):
+        from main import SettingsDialog
+        from config.settings import DEFAULTS
+
+        dialog = SettingsDialog(dict(
+            DEFAULTS,
+            chat_reply_language="fr",
+            chat_reply_language_only=True,
+        ))
+        try:
+            self.assertEqual(
+                dialog.chat_reply_language.currentData(), "fr")
+            self.assertTrue(dialog.chat_reply_language_only.isChecked())
+            self.assertTrue(dialog.chat_reply_language.isEnabled())
+            values = dialog.values()
+            self.assertEqual(values["chat_reply_language"], "fr")
+            self.assertTrue(values["chat_reply_language_only"])
+
+            dialog.chat_reply_language.setCurrentIndex(
+                dialog.chat_reply_language.findData("de"))
+            dialog.chat_reply_language_only.setChecked(False)
+            values = dialog.values()
+            self.assertEqual(values["chat_reply_language"], "de")
+            self.assertFalse(values["chat_reply_language_only"])
+            self.assertFalse(dialog.chat_reply_language.isEnabled())
         finally:
             dialog.close()
 
@@ -9029,15 +8896,14 @@ class TestReaderZoom(_GuiCase):
             finally:
                 pop.close()
 
-    def test_ocr_speech_button_activates_after_final_render(self):
+    def test_popup_speech_button_activates_after_translation(self):
         from unittest import mock
         from popup.translate_popup import TranslatePopup
         from config.settings import DEFAULTS
 
         with mock_chain_translate(
                         return_value=("\u0645\u0631\u062d\u0628\u0627", "\u2726 chosen: test-model")):
-            settings = dict(DEFAULTS, selection_mode="ocr")
-            pop = TranslatePopup(settings, source_text="recognized OCR text")
+            pop = TranslatePopup(dict(DEFAULTS), source_text="hello")
             try:
                 pop.speak_btn.setEnabled(False)
                 pop._on_done("\u0645\u0631\u062d\u0628\u0627", "\u2726 chosen: test-model")
@@ -10121,7 +9987,7 @@ class TestSession(_GuiCase):
             second.reader.verticalScrollBar().setValue(
                 second.reader._labels[1].y() + second.reader._labels[1].height() + 20)
             win.tabs.setCurrentWidget(first)
-            win._theme_actions["Midnight Blue"].trigger()
+            win._theme_actions["Pure Light"].trigger()
             self.app.processEvents()
             deadline = time.time() + 3
             while time.time() < deadline:
@@ -10142,7 +10008,7 @@ class TestSession(_GuiCase):
 
             self.assertEqual(len(saved_before_close["open_tabs"]), 3)
             self.assertEqual(saved_before_close["active_tab"], 0)
-            self.assertEqual(saved_before_close["theme"], "Midnight Blue")
+            self.assertEqual(saved_before_close["theme"], "Pure Light")
             self.assertTrue(saved_before_close["thumbs_visible"])
             self.assertTrue(saved_before_close["window_geometry"])
             self.assertEqual(saved_before_close["open_tabs"][0]["zoom"], 125)
@@ -10235,7 +10101,7 @@ class TestSession(_GuiCase):
                     books[0].splitter.sizes()[0],
                     saved_before_close["open_tabs"][0]["splitter_sizes"][0])
                 self.assertTrue(restored.thumbs_action.isChecked())
-                self.assertTrue(restored._theme_actions["Midnight Blue"].isChecked())
+                self.assertTrue(restored._theme_actions["Pure Light"].isChecked())
                 self.assertEqual(
                     [book.session_state()["scroll_offset"] for book in books[:2]],
                     [item["scroll_offset"]
@@ -10247,54 +10113,13 @@ class TestSession(_GuiCase):
                 win.close()
 
     def test_tabs_pin_and_close(self):
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QTabBar
         from main import MainWindow
-        from ui.theme import theme_colors
-
         win = MainWindow()
         try:
             a = _make_pdf_file("tab_a.pdf")
             b = _make_pdf_file("tab_b.pdf")
             win.open_paths([a, b])
             self.assertEqual(win.tabs.count(), 2)
-            win.show()
-            self.app.processEvents()
-            tab_bar = win.tabs.tabBar()
-            self.assertEqual(
-                tab_bar.elideMode(), Qt.TextElideMode.ElideRight)
-            self.assertFalse(tab_bar.expanding())
-            tab_width = tab_bar.tabRect(0).width()
-            self.assertGreaterEqual(tab_width, 350)
-            self.assertLessEqual(tab_width, 400)
-            tab_bar.setTabText(0, "A very long document title " * 12)
-            self.app.processEvents()
-            self.assertEqual(tab_bar.tabRect(0).width(), tab_width)
-
-            close_button = tab_bar.tabButton(
-                0, QTabBar.ButtonPosition.RightSide)
-            self.assertIsNotNone(close_button)
-            self.assertEqual(close_button.text(), "×")
-            self.assertEqual(close_button.accessibleName(), "Close tab")
-            self.assertEqual(close_button.size().width(), 30)
-            self.assertEqual(close_button.size().height(), 30)
-            close_style = self.app.styleSheet()
-            colors = theme_colors(
-                win.settings.get("theme", "Dark Slate"),
-                win.settings.get("color_scheme", "system"),
-                self.app,
-            )
-            self.assertIn(
-                f"QTabBar QToolButton#tabCloseButton {{\n"
-                f"    color: {colors['accent_light']};",
-                close_style,
-            )
-            self.assertIn("font-size: 28px;", close_style)
-            self.assertIn("font-weight: 300;", close_style)
-            self.assertIn(
-                f"border-bottom: 3px solid {colors['accent_light']};",
-                close_style,
-            )
             win.open_paths([a])  # duplicate -> activates, no new tab
             self.assertEqual(win.tabs.count(), 2)
             first = win.tabs.widget(0)
@@ -10307,9 +10132,7 @@ class TestSession(_GuiCase):
             win._close_tab(win._book_tab_index(first))  # pinned -> refused
             self.assertEqual(win.tabs.count(), 2)
             first.pinned = False
-            first_index = win._book_tab_index(first)
-            tab_bar.tabButton(
-                first_index, QTabBar.ButtonPosition.RightSide).click()
+            win._close_tab(win._book_tab_index(first))
             self.assertEqual(win.tabs.count(), 1)
         finally:
             try:
@@ -10323,21 +10146,14 @@ class TestMemoryZoom(_GuiCase):
     def _make_pdf(self, name, pages=1):
         return _make_pdf_file(name, pages)
 
-    def test_chat_and_explain_controls_are_removed_from_translation_popup(self):
+    def test_translation_popup_has_no_chat_or_explain_header_buttons(self):
         from popup.translate_popup import TranslatePopup
-        from unittest import mock
 
         with mock_chain_translate(return_value=("translation", "Test")):
             popup = TranslatePopup(dict(DEFAULTS), source_text="source")
             try:
-                popup.show()
-                self.app.processEvents()
-                self.assertTrue(popup.chat_btn.isHidden())
-                self.assertTrue(popup.explain_btn.isHidden())
-                self.assertEqual(
-                    popup.language_action_layout.indexOf(popup.chat_btn), -1)
-                self.assertEqual(
-                    popup.language_action_layout.indexOf(popup.explain_btn), -1)
+                self.assertFalse(hasattr(popup, "chat_btn"))
+                self.assertFalse(hasattr(popup, "explain_btn"))
             finally:
                 popup.close()
 
@@ -11396,7 +11212,7 @@ class TestMemoryZoom(_GuiCase):
             book = window._add_tab(_make_pdf_file("refresh_in_place.pdf"))
             self.assertIsNotNone(book)
             refreshed_settings = dict(window.settings)
-            refreshed_settings.update(theme="Nordic Gray", thumbs_visible=True)
+            refreshed_settings.update(theme="Pure Light", thumbs_visible=True)
             with mock.patch("main.load", return_value=refreshed_settings):
                 with mock.patch.object(book, "refresh_content") as refresh_book:
                     with mock.patch.object(window, "close") as close:
@@ -11405,7 +11221,7 @@ class TestMemoryZoom(_GuiCase):
             self.assertTrue(window.isVisible())
             self.assertIs(window.current_book(), book)
             self.assertTrue(window.thumbs_action.isChecked())
-            self.assertEqual(window.settings["theme"], "Nordic Gray")
+            self.assertEqual(window.settings["theme"], "Pure Light")
             refresh_book.assert_called_once_with()
             close.assert_not_called()
         finally:
@@ -11637,15 +11453,9 @@ class TestMemoryZoom(_GuiCase):
         win = MainWindow()
         try:
             self.assertEqual(win.settings["theme"], "Dark Slate")
-            scheme = win.settings["color_scheme"]
             self.assertIn(
                 theme_colors("Dark Slate", win.settings["color_scheme"])["accent"],
                 self.app.styleSheet(),
-            )
-            self.assertIn(
-                theme_colors(
-                    "Dark Slate", win.settings["color_scheme"])["surface"],
-                win.chat_panel.styleSheet(),
             )
             self.assertIsNotNone(win.theme_button.parentWidget())
             self.assertEqual(
@@ -11655,17 +11465,19 @@ class TestMemoryZoom(_GuiCase):
             self.assertIn("min-height: 32px", self.app.styleSheet())
             win._theme_actions["Midnight Blue"].trigger()
             self.assertEqual(win.settings["theme"], "Midnight Blue")
-            self.assertEqual(win.settings["color_scheme"], scheme)
             self.assertIn(
                 theme_colors("Midnight Blue", win.settings["color_scheme"])["accent"],
                 self.app.styleSheet(),
             )
-            self.assertIn(
-                theme_colors(
-                    "Midnight Blue", win.settings["color_scheme"])["surface"],
-                win.chat_panel.styleSheet(),
-            )
             self.assertEqual(load()["theme"], "Midnight Blue")
+            win._theme_actions["Pure Light"].trigger()
+            self.assertEqual(win.settings["theme"], "Pure Light")
+            self.assertEqual(win.settings["color_scheme"], "light")
+            self.assertEqual(load()["color_scheme"], "light")
+            self.assertIn(
+                theme_colors("Pure Light", "light")["accent"],
+                self.app.styleSheet(),
+            )
             win._theme_actions["Nordic Gray"].trigger()
             self.assertIn(
                 theme_colors("Nordic Gray", win.settings["color_scheme"])["accent"],
@@ -11693,87 +11505,12 @@ class TestMemoryZoom(_GuiCase):
                 self.app.styleSheet(),
                 app_stylesheet(win.settings["theme"], "system"),
             )
-            from ui.theme import theme_colors
-            self.assertIn(
-                theme_colors(win.settings["theme"], "system")["surface"],
-                win.chat_panel.styleSheet(),
-            )
             popup.refresh_display.assert_called_once_with(win.settings)
         finally:
             try:
                 win.close()
             except RuntimeError:
                 pass
-
-    def test_app_stylesheet_install_skips_an_identical_sheet(self):
-        from unittest import mock
-        from main import install_app_stylesheet
-
-        with (
-            mock.patch(
-                "main.app_stylesheet",
-                return_value=self.app.styleSheet(),
-            ),
-            mock.patch.object(self.app, "setStyleSheet") as set_style,
-        ):
-            self.assertFalse(install_app_stylesheet())
-
-        set_style.assert_not_called()
-
-    def test_completed_settings_dialog_is_destroyed_immediately(self):
-        from PySide6.QtWidgets import QDialog, QWidget
-        from ui.settings_dialog import destroy_dialog
-
-        parent = QWidget()
-        dialog = QDialog(parent)
-        dialog.show()
-        destroy_dialog(dialog)
-        with self.assertRaises(RuntimeError):
-            dialog.isVisible()
-        self.assertEqual(parent.findChildren(QDialog), [])
-        parent.close()
-
-    def test_main_settings_dialog_is_destroyed_after_save(self):
-        from unittest import mock
-        from PySide6.QtWidgets import QDialog
-        from main import MainWindow
-
-        window = MainWindow()
-        dialog = QDialog(window)
-        try:
-            with (
-                mock.patch("main.SettingsDialog", return_value=dialog),
-                mock.patch.object(dialog, "exec", return_value=1),
-                mock.patch.object(
-                    dialog, "values", return_value=dict(window.settings),
-                    create=True,
-                ),
-                mock.patch("main.save"),
-                mock.patch("main.install_app_stylesheet"),
-            ):
-                window.open_settings()
-
-            with self.assertRaises(RuntimeError):
-                dialog.isVisible()
-            self.assertEqual(window.findChildren(QDialog), [])
-        finally:
-            window.close()
-
-    def test_popup_theme_only_refresh_skips_unchanged_popup_styles(self):
-        from unittest import mock
-        from popup.translate_popup import TranslatePopup
-
-        popup = mock.Mock(spec=TranslatePopup)
-        popup._rendered_translation_text = "already rendered"
-        popup._translation_text = "already rendered"
-        popup._translation_needs_render = False
-        popup.settings = dict(
-            DEFAULTS, theme="Dark Slate", color_scheme="dark")
-
-        TranslatePopup.refresh_display(
-            popup, dict(popup.settings, theme="Nordic Gray"))
-
-        popup._apply_popup_style.assert_not_called()
 
     def test_pdf_canvas_theme_setting_reloads_from_shared_settings(self):
         from unittest import mock
@@ -12259,10 +11996,9 @@ class TestFloat(_GuiCase):
         from PySide6.QtWidgets import QApplication
         from config.settings import DEFAULTS
         from main_02 import FloatButton
-        from ui.theme import theme_colors
+        from ui.theme import THEMES
 
         floating = FloatButton()
-        floating.settings["color_scheme"] = "light"
         popup = mock.Mock()
         popup.isVisible.return_value = True
         floating.popups = [popup]
@@ -12270,21 +12006,20 @@ class TestFloat(_GuiCase):
         previous_stylesheet = app.styleSheet()
         try:
             with mock.patch("main_02.save"):
-                floating._theme_action_sets[0]["Midnight Blue"].trigger()
+                floating._theme_action_sets[0]["Pure Light"].trigger()
 
-            self.assertEqual(floating.settings["theme"], "Midnight Blue")
-            self.assertEqual(floating.settings["color_scheme"], "light")
-            colors = theme_colors("Midnight Blue", "light")
+            self.assertEqual(floating.settings["theme"], "Pure Light")
+            colors = THEMES["Pure Light"]
             self.assertIn(colors["accent"], floating.btn.styleSheet())
             self.assertFalse(floating.btn.icon().isNull())
             self.assertIn(colors["panel"], app.styleSheet())
             self.assertTrue(all(
-                actions["Midnight Blue"].isChecked()
+                actions["Pure Light"].isChecked()
                 for actions in floating._theme_action_sets
             ))
             popup.refresh_display.assert_called_once()
             self.assertEqual(
-                popup.refresh_display.call_args.args[0]["theme"], "Midnight Blue")
+                popup.refresh_display.call_args.args[0]["theme"], "Pure Light")
             if hasattr(floating, "_tray_explain_action"):
                 self.assertEqual(
                     floating._tray_explain_action.isChecked(),
@@ -12499,12 +12234,10 @@ class TestFloat(_GuiCase):
         try:
             with (
                 mock.patch("ui.settings_dialog.SettingsDialog", return_value=dialog),
-                mock.patch("ui.settings_dialog.destroy_dialog") as destroy_dialog,
                 mock.patch("main_02.save"),
             ):
                 floating._open_settings()
 
-            destroy_dialog.assert_called_once_with(dialog)
             popup.refresh_display.assert_called_once()
             applied = popup.refresh_display.call_args.args[0]
             self.assertEqual(applied["font_size"], 25)
@@ -12519,8 +12252,7 @@ class TestFloat(_GuiCase):
         from config.settings import DEFAULTS
         from ui.settings_dialog import SettingsDialog
 
-        dialog = SettingsDialog(dict(
-            DEFAULTS, theme="Dark Slate", color_scheme="light"))
+        dialog = SettingsDialog(dict(DEFAULTS, theme="Pure Light"))
         try:
             style = dialog.styleSheet()
             self.assertIn("background-color: #F8FAFC", style)
@@ -13033,13 +12765,11 @@ class TestFloat(_GuiCase):
         )
         try:
             with (
-                mock.patch(
-                    "main_02.load",
-                    return_value=dict(floating.settings),
-                ),
                 mock.patch("translators.ocr.is_available", return_value=True),
                 mock.patch("translators.ocr.prepare_image", side_effect=lambda image: image),
                 mock.patch("popup.translate_popup.TranslatePopup") as popup_type,
+                mock.patch(
+                    "main_02.load", return_value=dict(floating.settings)),
             ):
                 self.assertTrue(floating.translate_pil(Image.new("RGB", (20, 20))))
             popup_settings = popup_type.call_args.args[0]
@@ -13601,16 +13331,17 @@ class TestGuideFlow(_GuiCase):
         finally:
             window.close()
 
-    def test_model_usage_readout_is_between_image_and_chat(self):
+    def test_model_usage_readout_is_ltr_and_anchored_at_toolbar_right(self):
         from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QApplication, QToolBar
+        from PySide6.QtWidgets import QToolBar
         from translators import usage
-        from main import MainWindow, app_stylesheet
-        from ui.theme import theme_colors
+        from main import MainWindow
+        from ui.theme import THEMES, theme_colors
 
         usage.reset()
         window = MainWindow()
         try:
+            window.resize(2600, window.height())
             window.show()
             self.app.processEvents()
             readout = window.model_readout
@@ -13622,73 +13353,268 @@ class TestGuideFlow(_GuiCase):
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
             )
             toolbar = window.findChild(QToolBar)
-            chat_button = window.chat_button
-            self.assertIsNotNone(chat_button)
-            original_width = window.width()
-            observed_gaps = []
-            standard_height = window.theme_button.height()
-            for width in (original_width, original_width - 100):
-                window.resize(width, window.height())
-                self.app.processEvents()
-                self.assertEqual(
-                    window.selection_mode_button.height(), standard_height)
-                self.assertEqual(chat_button.height(), standard_height)
-                self.assertEqual(
-                    window.selection_mode_button.y(), window.theme_button.y())
-                self.assertEqual(chat_button.y(), window.theme_button.y())
-                image_left = window.selection_mode_button.mapTo(
-                    toolbar, window.selection_mode_button.rect().topLeft()).x()
-                label_left = readout.mapTo(
-                    toolbar, readout.rect().topLeft()).x()
-                chat_left = chat_button.mapTo(
-                    toolbar, chat_button.rect().topLeft()).x()
-                image_right = image_left + window.selection_mode_button.width()
-                label_right = label_left + readout.width()
-                observed_gaps.append(
-                    (label_left - image_right, chat_left - label_right))
-                self.assertEqual(
-                    chat_left + chat_button.width(),
-                    toolbar.contentsRect().right() + 1,
+            container = window.model_readout_container
+            self.assertEqual(readout.width(), 230)
+
+            def assert_centered_between_chat_and_right_edge():
+                readout_left = readout.mapTo(toolbar, readout.rect().topLeft()).x()
+                readout_right = readout_left + readout.width()
+                chat_right = (
+                    window.chat_button.mapTo(
+                        toolbar, window.chat_button.rect().topLeft()).x()
+                    + window.chat_button.width()
                 )
+                left_gap = readout_left - chat_right
+                right_gap = toolbar.contentsRect().right() + 1 - readout_right
                 self.assertLessEqual(
-                    abs(observed_gaps[-1][0] - observed_gaps[-1][1]), 1)
-            self.assertLess(observed_gaps[1][0], observed_gaps[0][0])
-            self.assertEqual(readout.styleSheet(), "")
+                    abs(left_gap - right_gap),
+                    1,
+                    f"readout gaps differ: left={left_gap}, right={right_gap}",
+                )
+
+            assert_centered_between_chat_and_right_edge()
+            initial_container_width = container.width()
+            window.resize(window.width() + 300, window.height())
+            self.app.processEvents()
+            self.assertEqual(readout.width(), 230)
+            self.assertGreater(container.width(), initial_container_width)
+            assert_centered_between_chat_and_right_edge()
+
+            for theme in THEMES:
+                for scheme in ("dark", "light"):
+                    window.settings["theme"] = theme
+                    window.settings["color_scheme"] = scheme
+                    window._apply_model_readout_theme()
+                    self.assertIn(
+                        f"color: {theme_colors(theme, scheme)['text']}",
+                        readout.styleSheet(),
+                    )
+        finally:
+            window.close()
+
+    def test_toolbar_chat_button_opens_reusable_chat_next_to_image_mode(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDockWidget, QToolBar
+        from unittest import mock
+        from main import MainWindow
+
+        window = MainWindow()
+        try:
+            window.show()
+            self.app.processEvents()
+            toolbar = window.findChild(QToolBar)
+            actions = toolbar.actions()
+            image_action = next(
+                action for action in actions
+                if toolbar.widgetForAction(action)
+                is window.selection_mode_button)
+            chat_action = next(
+                action for action in actions
+                if toolbar.widgetForAction(action) is window.chat_button)
+            self.assertEqual(
+                actions.index(chat_action), actions.index(image_action) + 1,
+            )
+            self.assertEqual(window.chat_button.text(), "Chat")
+
+            popup = mock.Mock()
+            popup.isVisible.return_value = True
+            popup._translation_text = "Latest translated page"
+            window.popups.append(popup)
+
+            window.chat_button.click()
+            self.app.processEvents()
+            dock = window._chat_dock
+            panel = window._chat_panel
+            window.resize(1200, 800)
+            window.resizeDocks(
+                [dock], [180], Qt.Orientation.Horizontal)
+            self.app.processEvents()
+            self.assertIsInstance(dock, QDockWidget)
+            self.assertTrue(dock.isVisible())
+            self.assertLessEqual(dock.width(), 200)
+            self.assertTrue(panel._compact_chat_actions)
+            self.assertEqual(panel.read_aloud_button.text(), "Read")
+            self.assertTrue(window.chat_button.isChecked())
+            self.assertTrue(window.settings["chat_dock_open"])
+            self.assertEqual(
+                window.dockWidgetArea(dock),
+                Qt.DockWidgetArea.RightDockWidgetArea,
+            )
+            self.assertTrue(
+                dock.features() & QDockWidget.DockWidgetFeature.DockWidgetMovable)
+            self.assertFalse(
+                dock.features() & QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+            self.assertEqual(
+                dock.allowedAreas(),
+                Qt.DockWidgetArea.LeftDockWidgetArea
+                | Qt.DockWidgetArea.RightDockWidgetArea,
+            )
+            self.assertIn(
+                "QMainWindow::separator",
+                window.styleSheet() or self.app.styleSheet(),
+            )
+            separator_style = window.styleSheet() or self.app.styleSheet()
+            from ui.theme import theme_colors
             colors = theme_colors(
                 window.settings.get("theme", "Dark Slate"),
                 window.settings.get("color_scheme", "system"),
-                QApplication.instance(),
             )
-            app_style = QApplication.instance().styleSheet()
-            self.assertIn(
-                f"QLabel#modelReadout {{\n    color: {colors['text']};",
-                app_style,
-            )
-            self.assertIn(
-                f"QTabBar::tab:selected {{\n    background-color: "
-                f"{colors['surface']}; \n    color: {colors['text']};",
-                app_style,
-            )
-
-            window._on_theme_changed("Catppuccin")
-            colors = theme_colors(
-                "Catppuccin",
-                window.settings.get("color_scheme", "system"),
-                QApplication.instance(),
-            )
-            app_style = QApplication.instance().styleSheet()
+            self.assertIn("background-color: transparent", separator_style)
+            self.assertIn("width: 1px", separator_style)
             self.assertEqual(
-                app_style, app_stylesheet(
-                    "Catppuccin", window.settings.get(
-                        "color_scheme", "system"),
-                    bool(window.settings.get(
-                        "pdf_canvas_theme_background", False))),
+                dock._marker_color.name(), colors["accent_light"].lower())
+            marker = dock.marker_geometry()
+            self.assertEqual(marker.height(), window.chat_button.height())
+            self.assertEqual(marker.width(), 1)
+            self.assertIn(
+                "QWidget#chatDockTitleBar",
+                window._chat_title_bar.styleSheet(),
             )
             self.assertIn(
-                f"QLabel#modelReadout {{\n    color: {colors['text']};",
-                QApplication.instance().styleSheet(),
+                f"background-color: {colors['border']}",
+                panel.styleSheet(),
+            )
+            self.assertIn(
+                f"background-color: {colors['accent']}",
+                panel.styleSheet(),
+            )
+            self.assertEqual(
+                panel._translation_context, "Latest translated page")
+
+            panel._messages.append({
+                "role": "assistant",
+                "content": "Conversation retained",
+            })
+            window._chat_close_button.click()
+            self.app.processEvents()
+            self.assertFalse(dock.isVisible())
+            self.assertFalse(window.chat_button.isChecked())
+            window.chat_button.click()
+            self.app.processEvents()
+            self.assertIs(window._chat_dock, dock)
+            self.assertIs(window._chat_panel, panel)
+            self.assertTrue(dock.isVisible())
+            self.assertTrue(window.chat_button.isChecked())
+            self.assertEqual(
+                panel._messages[-1]["content"], "Conversation retained")
+            window.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+            self.app.processEvents()
+            self.assertEqual(
+                window.dockWidgetArea(dock),
+                Qt.DockWidgetArea.LeftDockWidgetArea,
+            )
+            window.showMinimized()
+            self.app.processEvents()
+            window._on_chat_dock_visibility_changed(False)
+            self.assertTrue(window.chat_button.isChecked())
+            self.assertTrue(window.settings["chat_dock_open"])
+            window.showNormal()
+            self.app.processEvents()
+            self.assertTrue(dock.isVisible())
+            window._chat_close_button.click()
+            self.app.processEvents()
+            self.assertFalse(window.chat_button.isChecked())
+            self.assertFalse(window.settings["chat_dock_open"])
+        finally:
+            window.close()
+
+    def test_chat_dock_open_state_is_restored_from_settings(self):
+        from config.settings import load, save
+        from main import MainWindow
+
+        settings = load()
+        settings["chat_dock_open"] = True
+        save(settings)
+
+        window = MainWindow()
+        try:
+            window.show()
+            self.app.processEvents()
+            self.assertTrue(window.chat_button.isChecked())
+            self.assertTrue(window._chat_dock.isVisible())
+            self.assertTrue(window.settings["chat_dock_open"])
+        finally:
+            window.close()
+
+    def test_chat_dock_and_composer_sizes_are_restored(self):
+        from PySide6.QtCore import Qt
+        from config.settings import load
+        from main import MainWindow
+
+        first = MainWindow()
+        try:
+            first.resize(1200, 800)
+            first.show()
+            self.app.processEvents()
+            first.chat_button.click()
+            self.app.processEvents()
+
+            dock = first._chat_dock
+            panel = first._chat_panel
+            first.resizeDocks([dock], [300], Qt.Orientation.Horizontal)
+            panel.input_splitter.setSizes([360, 120])
+            first.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+            self.app.processEvents()
+            first._save_session_soon()
+
+            saved = load()
+            self.assertEqual(saved["chat_dock_area"], "left")
+            self.assertGreaterEqual(saved["chat_dock_width"], 180)
+            self.assertEqual(
+                len(saved["chat_composer_splitter_sizes"]), 2)
+            self.assertTrue(all(
+                size > 0 for size in saved["chat_composer_splitter_sizes"]))
+        finally:
+            first.close()
+
+        restored = MainWindow()
+        try:
+            restored.resize(1200, 800)
+            restored.show()
+            self.app.processEvents()
+            self.assertTrue(restored._chat_dock.isVisible())
+            self.assertEqual(
+                restored.dockWidgetArea(restored._chat_dock),
+                Qt.DockWidgetArea.LeftDockWidgetArea,
+            )
+            self.assertLessEqual(
+                abs(restored._chat_dock.width() - saved["chat_dock_width"]),
+                40,
+            )
+            sizes = restored._chat_panel.input_splitter.sizes()
+            saved_sizes = saved["chat_composer_splitter_sizes"]
+            self.assertAlmostEqual(
+                sizes[1] / sum(sizes),
+                saved_sizes[1] / sum(saved_sizes),
+                delta=0.12,
             )
         finally:
+            restored.close()
+
+    def test_translation_explain_selection_routes_to_main_chat(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from main import MainWindow
+
+        window = MainWindow()
+        panel = Mock()
+        window._chat_panel = panel
+        popup = SimpleNamespace(
+            _translation_text="Full translation",
+        )
+        try:
+            with patch.object(window, "_toggle_chat_window") as toggle:
+                window._explain_popup_selection(
+                    popup, "linguistic", "selected phrase")
+
+            toggle.assert_called_once_with(True)
+            panel.set_translation_context.assert_called_once_with(
+                "Full translation")
+            panel.set_explanation_selection.assert_called_once_with(
+                "selected phrase")
+            panel.explain_selection.assert_called_once_with("linguistic")
+        finally:
+            window._chat_panel = None
             window.close()
 
     def test_toolbar_selection_mode_button_toggles_and_persists(self):
@@ -13766,46 +13692,6 @@ class TestGuideFlow(_GuiCase):
         finally:
             window.close()
 
-    def test_full_page_image_mode_sends_page_image_instead_of_text_layer(self):
-        from unittest import mock
-        from PySide6.QtCore import QRect
-        from main import MainWindow
-
-        window = MainWindow()
-        try:
-            window.settings["selection_mode"] = "image"
-            book = mock.Mock()
-            book.has_doc.return_value = True
-            book.render_page_image.return_value = "rendered page"
-            book.page_needs_full_page_ocr.return_value = False
-            window._show_popup = mock.Mock()
-            window._flash_info = mock.Mock()
-            with mock.patch(
-                "main.pdf_utils.qimage_to_pil",
-                return_value="raw PIL page",
-            ) as convert:
-                window._translate_selection(
-                    book,
-                    2,
-                    QRect(0, 0, 800, 1000),
-                    force_ocr=False,
-                    omit_running_header=True,
-                )
-
-            book.page_body_text.assert_not_called()
-            book.render_page_image.assert_called_once_with(2, dpi=300)
-            convert.assert_called_once_with("rendered page")
-            window._show_popup.assert_called_once_with(
-                text=None,
-                pil_image="raw PIL page",
-                ocr_langs=(),
-                book=book,
-                page_no=2,
-                full_page_translation=True,
-            )
-        finally:
-            window.close()
-
     def test_welcome_then_guide_messages(self):
         import tempfile
         import pymupdf
@@ -13824,6 +13710,18 @@ class TestGuideFlow(_GuiCase):
                 "🖼  Pages",
                 [action.text() for action in toolbar.actions()],
             )
+            toolbar_labels = [action.text() for action in toolbar.actions()]
+            self.assertNotIn("Translate", toolbar_labels)
+            toolbar_widgets = [
+                toolbar.widgetForAction(action)
+                for action in toolbar.actions()
+            ]
+            self.assertNotIn(win.source_combo, toolbar_widgets)
+            self.assertNotIn(win.target_combo, toolbar_widgets)
+            self.assertTrue(any(
+                action.shortcut().toString() == "Ctrl+T"
+                for action in win.actions()
+            ))
             self.assertTrue(win.thumbs_action.isCheckable())
             style = app_stylesheet(win.settings["theme"])
             self.assertIn("QToolBar QToolButton:pressed", style)

@@ -281,6 +281,7 @@ def _iter_chat(
     level: str = DEFAULT_EFFORT,
     image_url: str | None = None,
     chat_messages: list[dict[str, str]] | None = None,
+    require_completion: bool = False,
 ):
     session = _session_id()
     cap, req_effort = EFFORT_LEVELS.get(level, EFFORT_LEVELS[DEFAULT_EFFORT])
@@ -288,6 +289,8 @@ def _iter_chat(
         max_tokens = effort_budget(text, level)
     else:
         max_tokens = max(max_tokens, effort_budget(text, level))
+    if chat_messages is not None:
+        max_tokens = max(max_tokens, 8192)
     messages = chat_messages if chat_messages is not None else (
         openai_image_messages(
             image_url, instructions, source_language, target_language)
@@ -311,6 +314,7 @@ def _iter_chat(
     r = _open_stream(f"{BASE}/chat/completions", payload, session, model,
                      timeout)
     truncated = False
+    finish_reason = None
     try:
         for line in r.iter_lines():
             if not line:
@@ -335,6 +339,8 @@ def _iter_chat(
                 continue
             if choice.get("finish_reason") == "length":
                 truncated = True
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
             delta = choice.get("delta") or {}
             chunk = delta.get("content") or ""
             if isinstance(chunk, list):
@@ -356,6 +362,8 @@ def _iter_chat(
         # `chain` only falls back to the free ladder when we raise.
         raise RuntimeError(
             f"Bridge {model} reply was cut off — try a shorter selection")
+    if require_completion and finish_reason != "stop":
+        raise RuntimeError(f"Bridge {model} chat stream ended before completion")
 
 
 def _translate_responses(
@@ -394,6 +402,7 @@ def _iter_responses(
     level: str = DEFAULT_EFFORT,
     image_url: str | None = None,
     chat_messages: list[dict[str, str]] | None = None,
+    require_completion: bool = False,
 ):
     session = _session_id()
     if chat_messages is not None:
@@ -425,11 +434,15 @@ def _iter_responses(
         "stream": True,
         "tools": _response_tools(),
         "max_output_tokens": max(
-            4096 if image_url else 0, effort_budget(text, level)),
+            8192 if chat_messages is not None else 4096 if image_url else 0,
+            effort_budget(text, level),
+        ),
     }
     r = _open_stream(f"{BASE}/responses", payload, session, model, timeout)
     completed: list[str] = []
     saw_delta = False
+    saw_completion = False
+    incomplete_reason = None
     try:
         for line in r.iter_lines():
             if not line:
@@ -453,18 +466,33 @@ def _iter_responses(
                     saw_delta = True
                     yield chunk
             elif etype == "response.completed":
+                saw_completion = True
+                response = evt.get("response") or {}
+                incomplete = response.get("incomplete_details") or {}
+                if response.get("status") == "incomplete":
+                    incomplete_reason = incomplete.get("reason") or "unknown"
                 try:
-                    for blk in evt["response"]["output"]:
+                    for blk in response["output"]:
                         for c in blk.get("content", []):
                             if c.get("text"):
                                 completed.append(c["text"])
                 except (KeyError, TypeError, AttributeError):
                     continue
+            elif etype == "response.incomplete":
+                saw_completion = True
+                response = evt.get("response") or {}
+                incomplete = response.get("incomplete_details") or {}
+                incomplete_reason = incomplete.get("reason") or "unknown"
     finally:
         try:
             r.close()
         except Exception:
             pass
+    if incomplete_reason is not None:
+        raise RuntimeError(
+            f"Bridge {model} reply was cut off ({incomplete_reason})")
+    if require_completion and not saw_completion:
+        raise RuntimeError(f"Bridge {model} chat stream ended before completion")
     if not saw_delta and completed:
         # No deltas arrived (older gateway shape): emit the finished text.
         yield "".join(completed)
@@ -503,31 +531,42 @@ def chat(
     return output
 
 
-def chat_stream(
+def stream_chat(
     messages: list[dict[str, str]],
     model: str,
     system_prompt: str,
     settings: dict,
 ):
-    """Yield conversational text deltas through the selected bridge."""
+    """Yield chat deltas from the selected bridge protocol."""
+    if not messages or messages[-1].get("role") != "user":
+        raise ValueError("A user message is required to ask the model.")
     level = effort_for(model, settings)
-    user_text = messages[-1]["content"] if messages else ""
+    user_text = messages[-1]["content"]
     if model in RESPONSES_MODELS:
-        yield from _iter_responses(
+        chunks = _iter_responses(
             user_text,
             model,
             instructions=system_prompt,
             level=level,
             chat_messages=messages,
+            require_completion=True,
         )
-        return
-    yield from _iter_chat(
-        user_text,
-        model,
-        instructions=system_prompt,
-        level=level,
-        chat_messages=[
-            {"role": "system", "content": system_prompt},
-            *messages,
-        ],
-    )
+    else:
+        chunks = _iter_chat(
+            user_text,
+            model,
+            instructions=system_prompt,
+            level=level,
+            chat_messages=[
+                {"role": "system", "content": system_prompt},
+                *messages,
+            ],
+            require_completion=True,
+        )
+    received_text = False
+    for chunk in chunks:
+        if chunk:
+            received_text = True
+            yield chunk
+    if not received_text:
+        raise RuntimeError(f"Bridge returned an empty chat reply for {model}")

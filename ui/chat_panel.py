@@ -23,10 +23,15 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QSlider,
     QTextBrowser,
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from popup.chat_worker import ChatWorker
@@ -69,10 +74,14 @@ _EXPLANATION_INSTRUCTIONS = {
         "Explain what the selected text means in the context of the current "
         "translation and original passage. You may supplement the passage with "
         "relevant general knowledge or web research. For factual details not "
-        "clearly stated in the passage, use the available Google Search tool "
-        "and cite its sources; do not limit your answer to the passage."
+        "clearly stated in the passage, use Google Search when available and "
+        "cite its sources."
     ),
 }
+
+
+def explanation_instruction(style: str) -> str:
+    return _EXPLANATION_INSTRUCTIONS[style]
 
 
 class ChatTranscriptBrowser(QTextBrowser):
@@ -136,11 +145,14 @@ class ChatTranscriptBrowser(QTextBrowser):
         QApplication.clipboard().setText(
             text.replace("\u2029", "\n").replace("\u2028", "\n"))
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        super().mouseReleaseEvent(event)
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and not self.textCursor().hasSelection()
+        ):
             cursor = self.cursorForPosition(event.position().toPoint())
             self.textPositionClicked.emit(cursor.position())
-        super().mousePressEvent(event)
 
 
 class ChatInputEdit(QPlainTextEdit):
@@ -184,37 +196,52 @@ class ChatPanel(QWidget):
         self._speech_document_start: int | None = None
         self._speech_text = ""
         self._speech_active = False
+        self._speech_rate = normalize_speed(
+            self._settings_provider().get("chat_speech_rate"))
         self._speech_highlight_background = QColor("#26354A")
         self._speech_highlight_foreground = QColor("#FFFFFF")
 
         self.setObjectName("standaloneChatPanel")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setSpacing(6)
 
-        chat_actions = QHBoxLayout()
-        chat_actions.addStretch(1)
         self.clear_button = QPushButton("New chat")
         self.clear_button.setObjectName("newChatButton")
+        self.clear_button.setFixedHeight(44)
         self.clear_button.clicked.connect(self.clear_chat)
         self.explain_button = QPushButton("Explain")
         self.explain_button.setObjectName("explainSelectionButton")
+        self.explain_button.setFixedHeight(44)
         self.explain_button.setToolTip(
-            "Explain the selected text from the translation")
+            "Explain the selected text, or the current translation")
         self.explain_button.setEnabled(False)
         self.explain_button.clicked.connect(
             lambda: self.explain_selection())
         self.read_aloud_button = QPushButton("Read aloud")
         self.read_aloud_button.setObjectName("chatReadAloud")
+        self.read_aloud_button.setFixedHeight(44)
+        self.read_aloud_button.setToolTip(
+            "Read the latest chat response aloud")
         self.read_aloud_button.clicked.connect(self._read_latest_chat_aloud)
         self.stop_speech_button = QPushButton("Stop")
         self.stop_speech_button.setObjectName("chatStopSpeech")
+        self.stop_speech_button.setFixedHeight(44)
         self.stop_speech_button.clicked.connect(self._stop_speech)
         self.stop_speech_button.setEnabled(False)
-        chat_actions.addWidget(self.read_aloud_button)
-        chat_actions.addWidget(self.stop_speech_button)
-        chat_actions.addWidget(self.explain_button)
-        chat_actions.addWidget(self.clear_button)
+        self.speed_button = QPushButton(self)
+        self.speed_button.setObjectName("chatReadingSpeed")
+        self.speed_button.setFixedHeight(44)
+        self.speed_menu = QMenu(self)
+        self.speed_button.clicked.connect(self._show_speed_menu)
+        self._build_speed_menu()
+        self._chat_action_buttons = (
+            self.speed_button,
+            self.read_aloud_button,
+            self.stop_speech_button,
+            self.explain_button,
+            self.clear_button,
+        )
 
         self.context_notice = QLabel()
         self.context_notice.setObjectName("chatContextNotice")
@@ -222,29 +249,71 @@ class ChatPanel(QWidget):
         self.context_notice.hide()
         layout.addWidget(self.context_notice)
 
+        self.input_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self.input_splitter.setObjectName("standaloneChatSplitter")
+        self.input_splitter.setChildrenCollapsible(False)
+        self.input_splitter.setHandleWidth(6)
+
+        chat_content = QWidget(self.input_splitter)
+        chat_content_layout = QVBoxLayout(chat_content)
+        chat_content_layout.setContentsMargins(0, 0, 0, 0)
+        chat_content_layout.setSpacing(6)
+        self.chat_actions_scroll = QScrollArea(chat_content)
+        self.chat_actions_scroll.setObjectName("chatActionsScroll")
+        self.chat_actions_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.chat_actions_scroll.setFixedHeight(64)
+        self.chat_actions_scroll.setWidgetResizable(True)
+        self.chat_actions_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.chat_actions_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.chat_actions_scroll.setStyleSheet("""
+            QScrollArea#chatActionsScroll {
+                background-color: transparent;
+                border: none;
+            }
+        """)
+        self.chat_actions_widget = QWidget()
+        self.chat_actions_widget.setObjectName("chatActionsContainer")
+        self.chat_actions_layout = QHBoxLayout(self.chat_actions_widget)
+        self.chat_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self.chat_actions_layout.setSpacing(2)
+        for button in self._chat_action_buttons:
+            button.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self.chat_actions_layout.addWidget(button, 1)
+        self.chat_actions_scroll.setWidget(self.chat_actions_widget)
         self.transcript = ChatTranscriptBrowser(self)
         self.transcript.setObjectName("standaloneChatTranscript")
         self.transcript.setOpenExternalLinks(True)
         self.transcript.textPositionClicked.connect(
             self._on_transcript_position_clicked)
-        layout.addWidget(self.transcript, 1)
-        layout.addLayout(chat_actions)
+        chat_content_layout.addWidget(self.transcript, 1)
+        chat_content_layout.addWidget(self.chat_actions_scroll)
+        self.input_splitter.addWidget(chat_content)
 
-        composer = QHBoxLayout()
+        self.composer_widget = QWidget(self.input_splitter)
+        composer = QHBoxLayout(self.composer_widget)
+        composer.setContentsMargins(0, 0, 0, 0)
         composer.setSpacing(8)
         self.input = ChatInputEdit(self)
         self.input.setObjectName("standaloneChatInput")
         self.input.setPlaceholderText(
             "Ask a question… (Enter to send; Shift+Enter for a new line)")
-        self.input.setFixedHeight(84)
+        self.input.setMinimumHeight(64)
         self.input.sendRequested.connect(self.send_message)
         composer.addWidget(self.input, 1)
         self.send_button = QPushButton("Send")
         self.send_button.setObjectName("standaloneChatSend")
-        self.send_button.setFixedHeight(44)
+        self.send_button.setFixedHeight(40)
         self.send_button.clicked.connect(self.send_message)
         composer.addWidget(self.send_button)
-        layout.addLayout(composer)
+        self.input_splitter.addWidget(self.composer_widget)
+        self.input_splitter.setStretchFactor(0, 1)
+        self.input_splitter.setStretchFactor(1, 0)
+        self.input_splitter.setSizes([300, 96])
+        layout.addWidget(self.input_splitter, 1)
+        self._compact_chat_actions: bool | None = None
         for widget in (
             self, self.transcript, self.transcript.viewport(),
             self.input, self.input.viewport(),
@@ -253,8 +322,7 @@ class ChatPanel(QWidget):
         self._audio_output = QAudioOutput(self)
         self._player = QMediaPlayer(self)
         self._player.setAudioOutput(self._audio_output)
-        self._player.setPlaybackRate(
-            normalize_speed(self._settings_provider().get("speech_rate")))
+        self._player.setPlaybackRate(self._speech_rate)
         self._player.positionChanged.connect(self._update_speech_highlight)
         self._player.mediaStatusChanged.connect(
             self._on_speech_media_status_changed)
@@ -264,18 +332,78 @@ class ChatPanel(QWidget):
         self._font_size_save_timer.setInterval(500)
         self._font_size_save_timer.timeout.connect(
             self._save_chat_font_size)
+        self._speech_rate_save_timer = QTimer(self)
+        self._speech_rate_save_timer.setSingleShot(True)
+        self._speech_rate_save_timer.setInterval(400)
+        self._speech_rate_save_timer.timeout.connect(
+            self._save_speech_rate)
         self._streaming_response = ""
+        self._rendered_streaming_response = ""
+        self._streaming_active = False
+        self._streaming_final_answer: str | None = None
+        self._streaming_timer = QTimer(self)
+        self._streaming_timer.setInterval(30)
+        self._streaming_timer.timeout.connect(
+            self._render_next_stream_piece)
         self._update_context_notice()
         self._apply_chat_font_size()
+        self._update_chat_action_layout()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_chat_action_layout()
+
+    def hideEvent(self, event) -> None:
+        if self._font_size_save_timer.isActive():
+            self._font_size_save_timer.stop()
+            self._save_chat_font_size()
+        super().hideEvent(event)
+
+    def _update_chat_action_layout(self) -> None:
+        compact = self.width() < 380
+        if compact == self._compact_chat_actions:
+            return
+        self._compact_chat_actions = compact
+
+        if compact:
+            self.speed_button.setText(
+                f"{self._speech_rate:.1f}x")
+            self.read_aloud_button.setText("Read")
+            self.stop_speech_button.setText("Stop")
+            self.explain_button.setText("Explain")
+            self.clear_button.setText("New chat")
+            self.chat_actions_layout.setSpacing(2)
+        else:
+            self.read_aloud_button.setText("Read aloud")
+            self.stop_speech_button.setText("Stop")
+            self.explain_button.setText("Explain")
+            self.clear_button.setText("New chat")
+            self.chat_actions_layout.setSpacing(2)
+        self._fit_chat_action_buttons()
+
+    def _fit_chat_action_buttons(self) -> None:
+        for button in self._chat_action_buttons:
+            button.setMinimumWidth(0)
+            button.setMaximumWidth(16777215)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.chat_actions_widget.updateGeometry()
 
     def set_translation_context(self, translated_text: str) -> None:
         self._translation_context = translated_text.strip()
         self._update_context_notice()
+        self._update_explain_button_state()
 
     def set_explanation_selection(self, selected_text: str) -> None:
         self._explanation_selection = selected_text.strip()
+        self._update_explain_button_state()
+
+    def _update_explain_button_state(self) -> None:
         self.explain_button.setEnabled(
-            bool(self._explanation_selection) and self._worker is None)
+            bool(self._explanation_selection or self._translation_context)
+            and self._worker is None
+            and not self._streaming_active
+        )
 
     def _update_context_notice(self) -> None:
         self.context_notice.clear()
@@ -283,7 +411,84 @@ class ChatPanel(QWidget):
 
     def apply_theme(self, colors: dict[str, str]) -> None:
         self._speech_highlight_background = QColor(colors["selection"])
-        self._speech_highlight_foreground = QColor(colors["text"])
+        selection_text = (
+            "#222831" if QColor(colors["selection"]).lightness() >= 128
+            else colors["text"]
+        )
+        self._speech_highlight_foreground = QColor(selection_text)
+        style_colors = dict(
+            colors,
+            selection_text=selection_text,
+        )
+        self.chat_actions_scroll.setStyleSheet("""
+            QScrollArea#chatActionsScroll {
+                background-color: transparent;
+                border: none;
+            }
+            QWidget#chatActionsContainer {
+                background-color: %(surface)s;
+                border: none;
+            }
+            QScrollBar:horizontal {
+                height: 4px;
+                background: transparent;
+                margin: 0;
+            }
+            QScrollBar::handle:horizontal {
+                background: %(border)s;
+                border-radius: 2px;
+                min-width: 18px;
+            }
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {
+                width: 0;
+            }
+        """ % colors)
+        button_style = """
+            QPushButton#chatReadAloud,
+            QPushButton#chatStopSpeech,
+            QPushButton#explainSelectionButton,
+            QPushButton#newChatButton,
+            QPushButton#chatReadingSpeed,
+            QPushButton#standaloneChatSend {
+                background-color: %(surface)s;
+                color: %(text)s;
+                border: 1px solid %(border)s;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+                border-bottom-left-radius: 7px;
+                border-bottom-right-radius: 7px;
+                padding: 6px 4px;
+                font-size: 15px;
+            }
+            QPushButton#chatReadAloud:hover,
+            QPushButton#chatStopSpeech:hover,
+            QPushButton#explainSelectionButton:hover,
+            QPushButton#newChatButton:hover,
+            QPushButton#chatReadingSpeed:hover,
+            QPushButton#standaloneChatSend:hover {
+                background-color: %(border)s;
+            }
+            QPushButton#chatReadAloud:pressed,
+            QPushButton#chatStopSpeech:pressed,
+            QPushButton#explainSelectionButton:pressed,
+            QPushButton#newChatButton:pressed,
+            QPushButton#chatReadingSpeed:pressed,
+            QPushButton#standaloneChatSend:pressed {
+                background-color: %(accent)s;
+                color: %(selection_text)s;
+            }
+            QPushButton#chatReadAloud:disabled,
+            QPushButton#chatStopSpeech:disabled,
+            QPushButton#explainSelectionButton:disabled,
+            QPushButton#newChatButton:disabled,
+            QPushButton#chatReadingSpeed:disabled,
+            QPushButton#standaloneChatSend:disabled {
+                color: %(text)s;
+                background-color: %(surface)s;
+                border: 1px solid %(border)s;
+            }
+        """ % style_colors
         self.setStyleSheet("""
             QWidget#standaloneChatPanel {
                 background-color: %(window)s;
@@ -299,8 +504,15 @@ class ChatPanel(QWidget):
                 border-radius: 8px;
                 padding: 10px;
                 background-color: %(surface)s;
-                selection-background-color: %(accent)s;
-                selection-color: %(text)s;
+                selection-background-color: %(selection)s;
+                selection-color: %(selection_text)s;
+            }
+            QSplitter#standaloneChatSplitter::handle:vertical {
+                background-color: %(border)s;
+                margin: 2px 0;
+            }
+            QSplitter#standaloneChatSplitter::handle:vertical:hover {
+                background-color: %(accent)s;
             }
             QPlainTextEdit#standaloneChatInput {
                 color: %(text)s;
@@ -308,10 +520,14 @@ class ChatPanel(QWidget):
                 border-radius: 8px;
                 padding: 8px;
                 background-color: %(surface)s;
-                selection-background-color: %(accent)s;
-                selection-color: %(text)s;
+                selection-background-color: %(selection)s;
+                selection-color: %(selection_text)s;
             }
-        """ % colors)
+        """ % style_colors)
+        for button in self._chat_action_buttons + (self.send_button,):
+            button.setFlat(True)
+            button.setStyleSheet(button_style)
+        self._fit_chat_action_buttons()
         self._apply_chat_font_size()
 
     def eventFilter(self, watched, event) -> bool:
@@ -332,12 +548,69 @@ class ChatPanel(QWidget):
         self._font_size_save_timer.start()
 
     def _save_chat_font_size(self) -> None:
-        from config.settings import save
+        from config.settings import load, save
 
         try:
-            save(self._settings_provider())
+            persisted = load()
+            persisted["chat_font_size"] = self._chat_font_size
+            save(persisted)
         except (OSError, TypeError, ValueError):
             log.exception("Could not save chat font size")
+
+    def _build_speed_menu(self) -> None:
+        panel = QWidget(self.speed_menu)
+        panel.setObjectName("chatReadingSpeedPanel")
+        panel.setFixedWidth(240)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+
+        self._speed_display = QLabel(panel)
+        self._speed_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._speed_display)
+
+        self._speed_slider = QSlider(Qt.Orientation.Horizontal, panel)
+        self._speed_slider.setRange(25, 200)
+        self._speed_slider.setSingleStep(1)
+        self._speed_slider.setPageStep(25)
+        self._speed_slider.setAccessibleName("Reading speed slider")
+        self._speed_slider.setValue(round(self._speech_rate * 100))
+        self._speed_slider.valueChanged.connect(self._set_speech_rate)
+        layout.addWidget(self._speed_slider)
+
+        action = QWidgetAction(self.speed_menu)
+        action.setDefaultWidget(panel)
+        self.speed_menu.addAction(action)
+        self._update_speed_controls(self._speech_rate)
+
+    def _show_speed_menu(self) -> None:
+        self.speed_menu.adjustSize()
+        self.speed_menu.popup(
+            self.speed_button.mapToGlobal(
+                self.speed_button.rect().bottomLeft()))
+
+    def _update_speed_controls(self, speed: float) -> None:
+        self._speed_display.setText(f"Reading speed: {speed:.2f}x")
+        self.speed_button.setText(f"{speed:.1f}x")
+        self.speed_button.setToolTip(f"Reading speed: {speed:.2f}x")
+
+    def _set_speech_rate(self, value: int) -> None:
+        self._speech_rate = normalize_speed(value / 100)
+        self._player.setPlaybackRate(self._speech_rate)
+        self._update_speed_controls(self._speech_rate)
+        self._fit_chat_action_buttons()
+        self._settings_provider()["chat_speech_rate"] = self._speech_rate
+        self._speech_rate_save_timer.start()
+
+    def _save_speech_rate(self) -> None:
+        from config.settings import load, save
+
+        try:
+            persisted = load()
+            persisted["chat_speech_rate"] = self._speech_rate
+            save(persisted)
+        except (OSError, TypeError, ValueError):
+            log.exception("Could not save Chat reading speed")
 
     def _apply_chat_font_size(self) -> None:
         font = self.transcript.font()
@@ -353,17 +626,28 @@ class ChatPanel(QWidget):
         self._send_question(question)
 
     def explain_selection(self, style: str = "context") -> None:
-        selected_text = self._explanation_selection.strip()
+        selected_text = (
+            self._explanation_selection or self._translation_context
+        ).strip()
         if not selected_text:
             return
-        instruction = _EXPLANATION_INSTRUCTIONS[style]
+        instruction = explanation_instruction(style)
         self._send_question(
             f"{instruction}\n\nSelected text:\n{selected_text}",
             clear_input=False,
         )
 
-    def _send_question(self, question: str, *, clear_input: bool = True) -> None:
-        if not question or self._worker is not None:
+    def _send_question(
+        self,
+        question: str,
+        *,
+        clear_input: bool = True,
+    ) -> None:
+        if (
+            not question
+            or self._worker is not None
+            or self._streaming_active
+        ):
             return
         self._stop_speech()
         self._messages.append({"role": "user", "content": question})
@@ -373,6 +657,10 @@ class ChatPanel(QWidget):
         self.send_button.setEnabled(False)
         self.send_button.setText("…")
         self.explain_button.setEnabled(False)
+        self._streaming_response = ""
+        self._rendered_streaming_response = ""
+        self._streaming_active = True
+        self._streaming_final_answer = None
         settings = dict(self._settings_provider())
         worker = ChatWorker(
             self._messages, settings, "", self._translation_context)
@@ -389,15 +677,22 @@ class ChatPanel(QWidget):
         if self.sender() is not self._worker:
             return
         self._stop_speech()
-        self._streaming_response = ""
-        self._messages.append({"role": "assistant", "content": answer})
-        self._entries.append(("assistant", answer))
-        self._render()
+        self._streaming_response = answer
+        self._streaming_final_answer = answer
+        if not self._streaming_timer.isActive():
+            self._streaming_timer.start()
 
     def _on_error(self, error: str) -> None:
         if self.sender() is not self._worker:
             return
+        self._streaming_timer.stop()
+        partial_answer = self._streaming_response.strip()
+        if partial_answer:
+            self._entries.append(("incomplete", partial_answer))
         self._streaming_response = ""
+        self._rendered_streaming_response = ""
+        self._streaming_active = False
+        self._streaming_final_answer = None
         if self._messages and self._messages[-1]["role"] == "user":
             self._messages.pop()
         self._entries.append(("error", error))
@@ -408,19 +703,22 @@ class ChatPanel(QWidget):
         if worker is self._worker:
             self._worker = None
         self.send_button.setText("Send")
-        self.send_button.setEnabled(True)
-        self.explain_button.setEnabled(bool(self._explanation_selection))
+        self.send_button.setEnabled(not self._streaming_active)
+        self._update_explain_button_state()
         if isinstance(worker, ChatWorker):
             worker.deleteLater()
 
     def clear_chat(self) -> None:
-        if self._worker is not None:
+        if self._worker is not None or self._streaming_active:
             return
         self._stop_speech()
         self._messages.clear()
         self._entries.clear()
         self.transcript.clear()
         self.input.clear()
+        self._streaming_response = ""
+        self._rendered_streaming_response = ""
+        self._streaming_final_answer = None
 
     def _render(self) -> None:
         settings = self._settings_provider()
@@ -453,7 +751,7 @@ class ChatPanel(QWidget):
 
         blocks = []
         entries = list(self._entries)
-        if self._streaming_response:
+        if self._streaming_active:
             entries.append(("assistant", self._streaming_response))
         for role, text in entries:
             if role == "user":
@@ -464,9 +762,13 @@ class ChatPanel(QWidget):
                 blocks.append(f"**You**\n\n{content}")
             elif role == "assistant":
                 blocks.append(f"**Chat**\n\n{text}")
+            elif role == "incomplete":
+                blocks.append(f"**Chat (incomplete)**\n\n{text}")
             else:
                 blocks.append(f"**Error**\n\n{text}")
         self.transcript.setMarkdown("\n\n---\n\n".join(blocks))
+        self._rendered_streaming_response = (
+            self._streaming_response if self._worker is not None else "")
         self.transcript.verticalScrollBar().setValue(
             self.transcript.verticalScrollBar().maximum())
         self._sync_speech_controls()
@@ -474,8 +776,64 @@ class ChatPanel(QWidget):
     def _on_partial_reply(self, text: str) -> None:
         if self.sender() is not self._worker:
             return
-        self._streaming_response = text
+        previous = self._streaming_response
+        if not text.startswith(previous):
+            self._streaming_response = text
+            self._rendered_streaming_response = ""
+            self._render()
+        else:
+            self._streaming_response = text
+        if not self._streaming_timer.isActive():
+            self._streaming_timer.start()
+
+    def _render_next_stream_piece(self) -> None:
+        remaining = self._streaming_response[
+            len(self._rendered_streaming_response):]
+        if not remaining:
+            if self._streaming_final_answer is not None:
+                self._finish_streamed_reply()
+            else:
+                self._streaming_timer.stop()
+            return
+
+        match = re.match(r"\s*\S+\s*", remaining)
+        if match is None:
+            self._streaming_timer.stop()
+            return
+        piece = match.group()
+        is_final = self._streaming_final_answer is not None
+        if not piece[-1:].isspace() and not is_final:
+            self._streaming_timer.stop()
+            return
+
+        cursor = QTextCursor(self.transcript.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(piece)
+        self.transcript.setTextCursor(cursor)
+        self.transcript.ensureCursorVisible()
+        self._rendered_streaming_response += piece
+
+        if self._rendered_streaming_response == self._streaming_response:
+            if is_final:
+                self._finish_streamed_reply()
+            else:
+                self._streaming_timer.stop()
+
+    def _finish_streamed_reply(self) -> None:
+        answer = self._streaming_final_answer
+        if answer is None:
+            return
+        self._streaming_timer.stop()
+        self._streaming_active = False
+        self._streaming_final_answer = None
+        self._streaming_response = ""
+        self._rendered_streaming_response = ""
+        self._messages.append({"role": "assistant", "content": answer})
+        self._entries.append(("assistant", answer))
         self._render()
+        self.send_button.setText("Send")
+        self.send_button.setEnabled(self._worker is None)
+        self._update_explain_button_state()
 
     def _on_transcript_position_clicked(self, position: int) -> None:
         self._start_speech_from_position(position)
@@ -541,8 +899,7 @@ class ChatPanel(QWidget):
         self._speech_active = True
         self._highlight_speech_range(word_start - start, word_end - start)
         self._sync_speech_controls()
-        self._player.setPlaybackRate(
-            normalize_speed(settings.get("speech_rate")))
+        self._player.setPlaybackRate(self._speech_rate)
 
         configured_voice = settings.get("speech_voice")
         voice = (

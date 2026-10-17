@@ -11,20 +11,274 @@ class TestTranslationChat(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_popup_menu_highlight_keeps_readable_text(self):
-        from config.settings import DEFAULTS
-        from popup.translate_popup import TranslatePopup
+    def test_standalone_chat_speed_button_and_resizable_composer(self):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QPushButton
+        from ui.chat_panel import ChatPanel
 
-        with mock.patch.object(TranslatePopup, "_start_translation_worker"):
-            popup = TranslatePopup(
-                dict(DEFAULTS), floating_language_controls=True)
+        panel = ChatPanel(lambda: {"speech_rate": 1.0})
         try:
+            panel.resize(420, 520)
+            panel.show()
+            QTest.qWait(50)
+
+            self.assertIsInstance(panel.speed_button, QPushButton)
+            self.assertEqual(panel.speed_button.text(), "1.0x")
+            panel.apply_theme({
+                "selection": "#345678",
+                "text": "#ffffff",
+                "window": "#202020",
+                "border": "#555555",
+                "surface": "#303030",
+                "accent": "#ff8800",
+                "muted": "#aaaaaa",
+            })
+            self.assertIn("font-size: 15px", panel.speed_button.styleSheet())
             self.assertIn(
-                "background-color: #fff2a8; color: #222831",
-                popup.styleSheet(),
+                "background-color: transparent",
+                panel.chat_actions_scroll.styleSheet(),
+            )
+            self.assertNotIn(
+                "#ffffff",
+                panel.chat_actions_scroll.styleSheet().lower(),
+            )
+            self.assertIn(
+                "QWidget#chatActionsContainer",
+                panel.chat_actions_scroll.styleSheet(),
+            )
+            self.assertIn(
+                "background-color: #303030",
+                panel.chat_actions_scroll.styleSheet(),
+            )
+            for button in panel._chat_action_buttons + (panel.send_button,):
+                self.assertTrue(button.isFlat())
+                for corner in (
+                    "top-left", "top-right", "bottom-left", "bottom-right",
+                ):
+                    self.assertIn(
+                        f"border-{corner}-radius: 7px",
+                        button.styleSheet(),
+                    )
+                self.assertIn("padding: 6px 4px", button.styleSheet())
+            self.assertFalse(panel.stop_speech_button.isEnabled())
+            self.assertFalse(panel.explain_button.isEnabled())
+            self.assertIn(
+                "QPushButton#chatStopSpeech:disabled",
+                panel.stop_speech_button.styleSheet(),
+            )
+            self.assertIn(
+                "QPushButton#explainSelectionButton:disabled",
+                panel.explain_button.styleSheet(),
+            )
+            for button in (panel.stop_speech_button, panel.explain_button):
+                self.assertIn("background-color: #303030", button.styleSheet())
+                self.assertIn("color: #ffffff", button.styleSheet())
+            for button in (
+                panel.speed_button,
+                panel.read_aloud_button,
+                panel.stop_speech_button,
+                panel.explain_button,
+                panel.clear_button,
+            ):
+                self.assertEqual(button.height(), 44)
+            self.assertGreaterEqual(
+                panel.speed_button.width(),
+                panel.speed_button.sizeHint().width(),
+            )
+
+            panel._set_speech_rate(130)
+            self.assertEqual(panel.speed_button.text(), "1.3x")
+            self.assertGreaterEqual(
+                panel.speed_button.width(),
+                panel.speed_button.sizeHint().width(),
+            )
+            panel.setFixedWidth(180)
+            panel._compact_chat_actions = None
+            panel._update_chat_action_layout()
+            self.app.processEvents()
+            button_top_positions = {
+                button.mapTo(panel.chat_actions_widget, button.rect().topLeft()).y()
+                for button in panel._chat_action_buttons
+            }
+            self.assertEqual(len(button_top_positions), 1)
+            for left, right in zip(
+                panel._chat_action_buttons,
+                panel._chat_action_buttons[1:],
+            ):
+                self.assertEqual(left.geometry().right() + 3,
+                                 right.geometry().left())
+            self.assertGreater(
+                panel.chat_actions_scroll.horizontalScrollBar().maximum(),
+                0,
+            )
+            panel.setFixedWidth(620)
+            panel._compact_chat_actions = None
+            panel._update_chat_action_layout()
+            self.app.processEvents()
+            self.assertEqual(
+                panel.chat_actions_widget.width(),
+                panel.chat_actions_scroll.viewport().width(),
+            )
+            self.assertEqual(
+                panel._chat_action_buttons[-1].geometry().right() + 1,
+                panel.chat_actions_widget.width(),
+            )
+            for button in panel._chat_action_buttons:
+                self.assertEqual(button.height(), 44)
+                for corner in (
+                    "top-left", "top-right", "bottom-left", "bottom-right",
+                ):
+                    self.assertIn(
+                        f"border-{corner}-radius: 7px",
+                        button.styleSheet(),
+                    )
+            self.assertTrue(any(
+                button.width() > button.sizeHint().width()
+                for button in panel._chat_action_buttons
+            ))
+
+            panel.input_splitter.setSizes([300, 150])
+            self.app.processEvents()
+            initial_input_height = panel.input.height()
+            handle = panel.input_splitter.handle(1)
+            drag_start = handle.rect().center()
+            drag_end = QPoint(drag_start.x(), drag_start.y() - 55)
+            QTest.mousePress(
+                handle, Qt.MouseButton.LeftButton, pos=drag_start)
+            QTest.mouseMove(handle, drag_end, 100)
+            QTest.mouseRelease(
+                handle, Qt.MouseButton.LeftButton, pos=drag_end)
+            self.app.processEvents()
+            self.assertGreater(
+                panel.input.height(),
+                initial_input_height,
+                "dragging the horizontal splitter should enlarge the composer",
             )
         finally:
-            popup.close()
+            panel.close()
+
+    def test_chat_font_size_and_reading_speed_are_restored_after_save(self):
+        import tempfile
+        from pathlib import Path
+        from config import settings as settings_module
+        from ui.chat_panel import ChatPanel
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            with mock.patch.object(
+                settings_module, "SETTINGS_PATH", settings_path
+            ):
+                settings = settings_module.load()
+                panel = ChatPanel(lambda: settings)
+                try:
+                    panel.show()
+                    self.app.processEvents()
+                    panel._set_chat_font_size(18)
+                    panel.hide()
+                finally:
+                    panel.close()
+
+                restored_settings = settings_module.load()
+                restored_panel = ChatPanel(lambda: restored_settings)
+                try:
+                    self.assertEqual(
+                        restored_panel._chat_font_size, 18.0)
+                finally:
+                    restored_panel.close()
+
+    def test_chat_and_translation_reading_speeds_are_independent(self):
+        import tempfile
+        from pathlib import Path
+        from config import settings as settings_module
+        from ui.chat_panel import ChatPanel
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            with mock.patch.object(
+                settings_module, "SETTINGS_PATH", settings_path
+            ):
+                settings = settings_module.load()
+                settings["speech_rate"] = 0.8
+                settings_module.save(settings)
+                settings = settings_module.load()
+                panel = ChatPanel(lambda: settings)
+                try:
+                    self.assertEqual(panel._speech_rate, 1.0)
+                    panel._set_speech_rate(145)
+                    panel._speech_rate_save_timer.stop()
+                    panel._save_speech_rate()
+                finally:
+                    panel.close()
+
+                persisted = settings_module.load()
+                self.assertEqual(persisted["speech_rate"], 0.8)
+                self.assertEqual(persisted["chat_speech_rate"], 1.45)
+
+                persisted["speech_rate"] = 1.2
+                settings_module.save(persisted)
+                reopened = ChatPanel(lambda: settings_module.load())
+                try:
+                    self.assertEqual(reopened._speech_rate, 1.45)
+                finally:
+                    reopened.close()
+
+    def test_explain_button_uses_selection_or_translation_context(self):
+        from ui.chat_panel import ChatPanel
+
+        panel = ChatPanel(lambda: {"speech_rate": 1.0})
+        try:
+            self.assertFalse(panel.explain_button.isEnabled())
+            panel.set_translation_context("Full translated passage")
+            self.assertTrue(panel.explain_button.isEnabled())
+
+            with mock.patch.object(panel, "_send_question") as send_question:
+                panel.explain_button.click()
+                question = send_question.call_args.args[0]
+                self.assertIn("Full translated passage", question)
+                self.assertNotIn(
+                    "use_google_search", send_question.call_args.kwargs)
+
+                panel.set_explanation_selection("Selected phrase")
+                panel.explain_button.click()
+                question = send_question.call_args.args[0]
+                self.assertIn("Selected phrase", question)
+                self.assertNotIn("Full translated passage", question)
+                self.assertNotIn(
+                    "use_google_search", send_question.call_args.kwargs)
+        finally:
+            panel.close()
+
+    def test_all_explain_styles_allow_web_search(self):
+        from ui.chat_panel import ChatPanel, explanation_instruction
+
+        panel = ChatPanel(lambda: {"speech_rate": 1.0})
+        try:
+            for style in (
+                "linguistic", "etymological", "simple",
+                "translate_and_explain", "context",
+            ):
+                panel._worker = None
+                panel._streaming_active = False
+                panel.set_explanation_selection("Selected phrase")
+                with mock.patch("ui.chat_panel.ChatWorker") as chat_worker:
+                    panel.explain_selection(style)
+                    explain_settings = chat_worker.call_args.args[1]
+                self.assertNotIn("_chat_google_search", explain_settings)
+                if style == "context":
+                    self.assertIn(
+                        "Google Search", explanation_instruction(style))
+            panel._worker = None
+            panel._streaming_active = False
+            panel.set_explanation_selection("Selected phrase")
+            with mock.patch("ui.chat_panel.ChatWorker") as chat_worker:
+                panel._send_question("Please answer in Arabic.")
+                regular_chat_settings = chat_worker.call_args.args[1]
+
+            self.assertNotIn("_chat_google_search", regular_chat_settings)
+        finally:
+            panel._worker = None
+            panel.close()
 
     def test_fenced_code_blocks_use_compact_colored_monospace_style(self):
         from PySide6.QtGui import QTextDocument
@@ -185,47 +439,6 @@ class TestTranslationChat(unittest.TestCase):
         self.assertNotIn("<table", speech)
         self.assertNotIn("| Harmonic |", speech)
 
-    def test_translation_rendering_preserves_latex_table_alignment_in_arabic(self):
-        from PySide6.QtCore import Qt
-        from PySide6.QtGui import QTextTable
-        from config.settings import DEFAULTS
-        from popup.translate_popup import TranslatePopup
-        from translators.chain import normalize_latex_output
-
-        markdown = (
-            r"\begin{tabular}{|l|c|r|}\hline" "\n"
-            r"يسار & وسط & يمين \\" "\n"
-            r"\hline" "\n"
-            r"أ & ب & ج \\" "\n"
-            r"\hline\end{tabular}"
-        )
-        markdown = normalize_latex_output(markdown)
-        with mock.patch.object(TranslatePopup, "_start_translation_worker"):
-            popup = TranslatePopup(dict(DEFAULTS, target_language="ar"))
-        try:
-            popup._render_markdown(markdown)
-            tables = [
-                frame
-                for frame in popup.result.document().rootFrame().childFrames()
-                if isinstance(frame, QTextTable)
-            ]
-            self.assertEqual(len(tables), 1)
-            table = tables[0]
-            self.assertEqual((table.rows(), table.columns()), (2, 3))
-            expected = (
-                Qt.AlignmentFlag.AlignLeft,
-                Qt.AlignmentFlag.AlignHCenter,
-                Qt.AlignmentFlag.AlignRight,
-            )
-            for column, alignment in enumerate(expected):
-                cell_block = table.cellAt(0, column).firstCursorPosition().block()
-                self.assertEqual(
-                    int(cell_block.blockFormat().alignment()) & 0x7,
-                    int(alignment),
-                )
-        finally:
-            popup.close()
-
     def test_pipe_text_inside_fenced_code_is_not_converted_to_a_table(self):
         from PySide6.QtGui import QTextDocument, QTextTable
         from popup.translate_popup import TranslatePopup
@@ -270,331 +483,6 @@ class TestTranslationChat(unittest.TestCase):
             f"Bearer {api_key}",
         )
 
-    def test_openai_compatible_chat_stream_yields_response_deltas(self):
-        from translators import opencode_compat
-
-        response = mock.Mock()
-        response.status_code = 200
-        response.iter_lines.return_value = [
-            b'data: {"choices":[{"delta":{"content":"first "}}]}',
-            b'data: {"choices":[{"delta":{"content":"second"}}]}',
-            b"data: [DONE]",
-        ]
-        with mock.patch.object(
-            opencode_compat, "_post_stream", return_value=response,
-        ) as post_stream:
-            chunks = list(opencode_compat.stream_chat(
-                [{"role": "user", "content": "Question"}],
-                "https://api.example/v1",
-                "key",
-                "test-model",
-                "System",
-            ))
-
-        self.assertEqual(chunks, ["first ", "second"])
-        self.assertTrue(post_stream.call_args.args[0]["stream"])
-        response.close.assert_called_once_with()
-
-    def test_openai_compatible_chat_stream_closes_on_http_error(self):
-        import requests
-        from translators import opencode_compat
-
-        response = mock.Mock()
-        response.status_code = 401
-        response.raise_for_status.side_effect = requests.HTTPError("unauthorized")
-        with mock.patch.object(
-            opencode_compat, "_post_stream", return_value=response,
-        ):
-            with self.assertRaisesRegex(requests.HTTPError, "unauthorized"):
-                list(opencode_compat.stream_chat(
-                    [{"role": "user", "content": "Question"}],
-                    "https://api.example/v1",
-                    "key",
-                    "test-model",
-                    "System",
-                ))
-
-        response.close.assert_called_once_with()
-
-    def test_gemini_chat_stream_yields_response_deltas(self):
-        from translators import gemini
-
-        response = mock.Mock()
-        response.status_code = 200
-        response.iter_lines.return_value = [
-            b'data: {"candidates":[{"content":{"parts":[{"text":"William "}]}}]}',
-            b'data: {"candidates":[{"content":{"parts":[{"text":"Taylor."}]},'
-            b'"finishReason":"STOP","groundingMetadata":{"groundingChunks":['
-            b'{"web":{"uri":"https://example.com/taylor",'
-            b'"title":"Biography"}}]}}]}',
-        ]
-        with mock.patch(
-            "translators.gemini.requests.post", return_value=response,
-        ) as post:
-            chunks = list(gemini.chat_stream(
-                [{"role": "user", "content": "Question"}],
-                "key",
-                "gemini-test",
-                "System",
-            ))
-
-        self.assertEqual(
-            chunks,
-            [
-                "William ",
-                "Taylor.",
-                "\n\nSources:\n- [Biography](https://example.com/taylor)",
-            ],
-        )
-        self.assertTrue(post.call_args.kwargs["stream"])
-        self.assertEqual(
-            post.call_args.kwargs["json"]["tools"],
-            [gemini.GOOGLE_SEARCH_TOOL],
-        )
-        response.close.assert_called_once_with()
-
-    def test_gemini_chat_request_enables_google_search_and_cites_sources(self):
-        from translators import gemini
-
-        response = mock.Mock()
-        response.json.return_value = {
-            "candidates": [{
-                "content": {"parts": [{"text": "Born in 1872; died in 1922."}]},
-                "finishReason": "STOP",
-                "groundingMetadata": {
-                    "groundingChunks": [{
-                        "web": {
-                            "uri": "https://example.com/taylor",
-                            "title": "Biography",
-                        },
-                    }],
-                },
-            }],
-        }
-        with mock.patch(
-            "translators.gemini.requests.post", return_value=response,
-        ) as post:
-            answer = gemini.chat(
-                [{"role": "user", "content": "When was he born and when did he die?"}],
-                "key",
-                "gemini-test",
-                "Use Google Search for missing facts.",
-            )
-
-        self.assertEqual(
-            answer,
-            "Born in 1872; died in 1922.\n\n"
-            "Sources:\n- [Biography](https://example.com/taylor)",
-        )
-        self.assertEqual(
-            post.call_args.kwargs["json"]["tools"],
-            [gemini.GOOGLE_SEARCH_TOOL],
-        )
-
-    def test_gemini_chat_stream_retries_transient_service_unavailable(self):
-        from translators import gemini
-
-        unavailable = mock.Mock()
-        unavailable.status_code = 503
-        response = mock.Mock()
-        response.status_code = 200
-        response.iter_lines.return_value = [
-            b'data: {"candidates":[{"content":{"parts":[{"text":"Reply"}]},'
-            b'"finishReason":"STOP"}]}',
-        ]
-        with mock.patch(
-            "translators.gemini.requests.post",
-            side_effect=[unavailable, response],
-        ) as post, mock.patch("translators.gemini.time.sleep") as sleep:
-            chunks = list(gemini.chat_stream(
-                [{"role": "user", "content": "Question"}],
-                "key",
-                "gemini-test",
-                "System",
-            ))
-
-        self.assertEqual(chunks, ["Reply"])
-        self.assertEqual(post.call_count, 2)
-        sleep.assert_called_once_with(gemini.RETRY_BACKOFF[0])
-        unavailable.close.assert_called_once_with()
-        response.close.assert_called_once_with()
-
-    def test_gemini_chat_stream_retries_timeout_before_receiving_text(self):
-        import requests
-        from translators import gemini
-
-        response = mock.Mock()
-        response.status_code = 200
-        response.iter_lines.return_value = [
-            b'data: {"candidates":[{"content":{"parts":[{"text":"Reply"}]},'
-            b'"finishReason":"STOP"}]}',
-        ]
-        with mock.patch(
-            "translators.gemini.requests.post",
-            side_effect=[requests.ReadTimeout("read timed out"), response],
-        ) as post, mock.patch("translators.gemini.time.sleep") as sleep:
-            chunks = list(gemini.chat_stream(
-                [{"role": "user", "content": "Question"}],
-                "key",
-                "gemini-test",
-                "System",
-            ))
-
-        self.assertEqual(chunks, ["Reply"])
-        self.assertEqual(post.call_count, 2)
-        self.assertEqual(
-            post.call_args.kwargs["timeout"], gemini.CHAT_TIMEOUT)
-        sleep.assert_called_once_with(gemini.RETRY_BACKOFF[0])
-        response.close.assert_called_once_with()
-
-    def test_gemini_chat_stream_retries_read_timeout_before_first_chunk(self):
-        import requests
-        from translators import gemini
-
-        timed_out = mock.Mock()
-        timed_out.status_code = 200
-        timed_out.iter_lines.side_effect = requests.ReadTimeout(
-            "read timed out")
-        response = mock.Mock()
-        response.status_code = 200
-        response.iter_lines.return_value = [
-            b'data: {"candidates":[{"content":{"parts":[{"text":"Reply"}]},'
-            b'"finishReason":"STOP"}]}',
-        ]
-        with mock.patch(
-            "translators.gemini.requests.post",
-            side_effect=[timed_out, response],
-        ) as post, mock.patch("translators.gemini.time.sleep"):
-            chunks = list(gemini.chat_stream(
-                [{"role": "user", "content": "Question"}],
-                "key",
-                "gemini-test",
-                "System",
-            ))
-
-        self.assertEqual(chunks, ["Reply"])
-        self.assertEqual(post.call_count, 2)
-        timed_out.close.assert_called_once_with()
-        response.close.assert_called_once_with()
-
-    def test_gemini_chat_stream_does_not_retry_timeout_after_partial_reply(self):
-        import requests
-        from translators import gemini
-
-        response = mock.Mock()
-        response.status_code = 200
-
-        def partial_then_timeout():
-            yield (
-                b'data: {"candidates":[{"content":{"parts":[{"text":"First"}]}}]}'
-            )
-            raise requests.ReadTimeout("read timed out")
-
-        response.iter_lines.side_effect = partial_then_timeout
-        with mock.patch(
-            "translators.gemini.requests.post", return_value=response,
-        ) as post:
-            with self.assertRaises(requests.ReadTimeout):
-                list(gemini.chat_stream(
-                    [{"role": "user", "content": "Question"}],
-                    "key",
-                    "gemini-test",
-                    "System",
-                ))
-
-        post.assert_called_once()
-        response.close.assert_called_once_with()
-
-    def test_gemini_chat_stream_closes_on_http_error(self):
-        import requests
-        from translators import gemini
-
-        response = mock.Mock()
-        response.status_code = 401
-        response.raise_for_status.side_effect = requests.HTTPError("unauthorized")
-        with mock.patch(
-            "translators.gemini.requests.post", return_value=response,
-        ):
-            with self.assertRaisesRegex(requests.HTTPError, "unauthorized"):
-                list(gemini.chat_stream(
-                    [{"role": "user", "content": "Question"}],
-                    "key",
-                    "gemini-test",
-                    "System",
-                ))
-
-        response.close.assert_called_once_with()
-
-    def test_opencode_cli_chat_stream_yields_json_text_events(self):
-        import io
-        from translators import opencode_cli
-
-        class FakeProcess:
-            def __init__(self):
-                self.stdin = mock.Mock()
-                self.stdout = io.StringIO(
-                    '{"type":"text","part":{"text":"first "}}\n'
-                    '{"type":"step-finish","part":{}}\n'
-                    '{"type":"text","part":{"text":"second"}}\n'
-                )
-
-            def wait(self):
-                return 0
-
-            def poll(self):
-                return 0
-
-            def kill(self):
-                pass
-
-        process = FakeProcess()
-        timer = mock.Mock()
-        with mock.patch.object(
-            opencode_cli, "_executable", return_value="opencode",
-        ), mock.patch.object(
-            opencode_cli.subprocess, "Popen", return_value=process,
-        ) as popen, mock.patch.object(
-            opencode_cli.threading, "Timer", return_value=timer,
-        ):
-            chunks = list(opencode_cli.chat_stream(
-                [
-                    {"role": "user", "content": "Question"},
-                    {"role": "assistant", "content": "Earlier answer"},
-                    {"role": "user", "content": "Follow-up"},
-                ],
-                "openai/test-model",
-                "System prompt",
-            ))
-
-        self.assertEqual(chunks, ["first ", "second"])
-        self.assertEqual(
-            process.stdin.write.call_args.args[0],
-            "Student:\nQuestion\n\nTutor:\nEarlier answer\n\nStudent:\nFollow-up",
-        )
-        process.stdin.close.assert_called_once_with()
-        self.assertIn("--format", popen.call_args.args[0])
-        timer.start.assert_called_once_with()
-        timer.cancel.assert_called_once_with()
-
-    def test_reply_stream_uses_opencode_cli_stream(self):
-        from translators import chat
-
-        messages = [{"role": "user", "content": "Question"}]
-        settings = {
-            "model": "opencode-cli:openai/test-model",
-            "source_language": "en",
-            "target_language": "ar",
-        }
-        with mock.patch(
-            "translators.chat.opencode_cli.chat_stream",
-            return_value=iter(["First ", "second."]),
-        ) as cli_stream:
-            chunks = list(chat.reply_stream(messages, settings, "", ""))
-
-        self.assertEqual(chunks, ["First ", "second."])
-        self.assertEqual(cli_stream.call_args.args[0], messages)
-        self.assertEqual(cli_stream.call_args.args[1], "openai/test-model")
-
     def test_reply_uses_selected_bridge_and_translation_context(self):
         from translators import chat
 
@@ -617,44 +505,6 @@ class TestTranslationChat(unittest.TestCase):
         self.assertIn("Original passage", system_prompt)
         self.assertIn("Current translation", system_prompt)
         self.assertIn("Reply in Arabic", system_prompt)
-
-    def test_reply_stream_uses_selected_bridge_and_yields_deltas(self):
-        from translators import chat
-
-        messages = [{"role": "user", "content": "Why is this chord here?"}]
-        settings = {
-            "model": "space-bunny-free",
-            "source_language": "en",
-            "target_language": "ar",
-        }
-        with mock.patch(
-            "translators.chat.opencode_bridge.chat_stream",
-            return_value=iter(["شرح ", "متدرج"]),
-        ) as bridge_stream:
-            chunks = list(chat.reply_stream(
-                messages, settings, "", "النص المترجم"))
-
-        self.assertEqual(chunks, ["شرح ", "متدرج"])
-        self.assertEqual(bridge_stream.call_args.args[0], messages)
-
-    def test_chat_worker_emits_partial_reply_before_completion(self):
-        from PySide6.QtTest import QSignalSpy
-        from popup.chat_worker import ChatWorker
-
-        worker = ChatWorker(
-            [{"role": "user", "content": "Question"}], {}, "", "")
-        partial_spy = QSignalSpy(worker.partial)
-        done_spy = QSignalSpy(worker.done)
-        with mock.patch(
-            "translators.chat.reply_stream",
-            return_value=iter(["First ", "second."]),
-        ):
-            worker.run()
-
-        self.assertEqual(partial_spy.count(), 2)
-        self.assertEqual(partial_spy.at(0), ["First "])
-        self.assertEqual(partial_spy.at(1), ["First second."])
-        self.assertEqual(done_spy.at(0), ["First second."])
 
     def test_popup_instructions_are_included_in_chat_system_prompt(self):
         from translators import chat
@@ -691,7 +541,7 @@ class TestTranslationChat(unittest.TestCase):
             "source_language": "en",
             "target_language": "fr",
         }
-        messages = [{"role": "user", "content": "Explain this phrase."}]
+        messages = [{"role": "user", "content": "Please answer in French."}]
         with mock.patch(
             "translators.chat.gemini.chat", return_value="Réponse"
         ) as gemini_chat:
@@ -703,6 +553,428 @@ class TestTranslationChat(unittest.TestCase):
             messages, "configured-key", "gemini-2.5-flash"))
         self.assertIn("Reply in French", gemini_chat.call_args.args[3])
 
+    def test_streaming_chat_uses_selected_target_language(self):
+        from translators import chat
+
+        settings = {
+            "model": "gemini-2.5-flash",
+            "gemini_key": "configured-key",
+            "source_language": "en",
+            "target_language": "fr",
+        }
+        messages = [{"role": "user", "content": "Explain this phrase."}]
+        with mock.patch(
+            "translators.chat.gemini.stream_chat",
+            return_value=iter(("Réponse ", "complète.")),
+        ) as gemini_stream:
+            answer = "".join(chat.reply_stream(
+                messages, settings, "source", "translation",
+            ))
+
+        self.assertEqual(answer, "Réponse complète.")
+        self.assertIn("Reply in French", gemini_stream.call_args.args[3])
+        self.assertIn("Google Search", gemini_stream.call_args.args[3])
+        self.assertTrue(gemini_stream.call_args.kwargs["use_google_search"])
+        self.assertIn(
+            "MUST use the selected target language",
+            gemini_stream.call_args.args[3],
+        )
+
+    def test_chat_can_force_reply_language_without_changing_translation_target(self):
+        from translators import chat
+
+        settings = {
+            "model": "gemini-2.5-flash",
+            "gemini_key": "configured-key",
+            "source_language": "en",
+            "target_language": "fr",
+            "chat_reply_language": "de",
+            "chat_reply_language_only": True,
+        }
+        with mock.patch(
+            "translators.chat.gemini.stream_chat",
+            return_value=iter(("Guten Tag.",)),
+        ) as gemini_stream:
+            answer = "".join(chat.reply_stream(
+                [{"role": "user", "content": "Hello"}],
+                settings,
+                "source",
+                "translation",
+            ))
+
+        self.assertEqual(answer, "Guten Tag.")
+        self.assertIn("Reply in German", gemini_stream.call_args.args[3])
+        self.assertIn(
+            "selected target language",
+            gemini_stream.call_args.args[3],
+        )
+
+    def test_streaming_chat_always_enables_google_search(self):
+        from translators import chat
+
+        settings = {
+            "model": "gemini-2.5-flash",
+            "gemini_key": "configured-key",
+            "source_language": "en",
+            "target_language": "ar",
+        }
+        messages = [{"role": "user", "content": "Please answer in French."}]
+        with mock.patch(
+            "translators.chat.gemini.stream_chat",
+            return_value=iter(("1872",)),
+        ) as gemini_stream:
+            answer = "".join(chat.reply_stream(
+                messages, settings, "source", "translation"))
+
+        self.assertEqual(answer, "1872")
+        self.assertTrue(gemini_stream.call_args.kwargs["use_google_search"])
+        self.assertIn("Google Search", gemini_stream.call_args.args[3])
+
+    def test_chat_falls_back_without_search_warning_when_search_is_rejected(self):
+        from translators import chat
+
+        settings = {
+            "model": "gemini-3.8-flash",
+            "gemini_key": "configured-key",
+            "source_language": "en",
+            "target_language": "ar",
+        }
+        quota_error = RuntimeError(
+            "Google Search request was rejected with HTTP 429. "
+            "RESOURCE_EXHAUSTED. You exceeded your current quota.")
+        with mock.patch(
+            "translators.chat.gemini.stream_chat",
+            side_effect=[quota_error, iter(("الجواب من معرفة النموذج.",))],
+        ) as gemini_stream:
+            answer = "".join(chat.reply_stream(
+                [{"role": "user", "content": "في أي سنة ولد؟"}],
+                settings,
+                "source",
+                "translation",
+            ))
+
+        self.assertIn("الجواب من معرفة النموذج.", answer)
+        self.assertNotIn("تعذّر بحث Google", answer)
+        self.assertTrue(
+            gemini_stream.call_args_list[0].kwargs["use_google_search"])
+        self.assertFalse(
+            gemini_stream.call_args_list[1].kwargs["use_google_search"])
+        self.assertIn(
+            "Google Search is unavailable",
+            gemini_stream.call_args_list[1].args[3],
+        )
+
+    def test_chat_does_not_fallback_on_non_search_errors(self):
+        from translators import chat
+
+        settings = {
+            "model": "gemini-3.8-flash",
+            "gemini_key": "configured-key",
+            "target_language": "ar",
+        }
+        with mock.patch(
+            "translators.chat.gemini.stream_chat",
+            side_effect=RuntimeError("model unavailable"),
+        ) as gemini_stream:
+            with self.assertRaisesRegex(RuntimeError, "model unavailable"):
+                list(chat.reply_stream(
+                    [{"role": "user", "content": "أهلا"}],
+                    settings,
+                    "source",
+                    "translation",
+                ))
+
+        gemini_stream.assert_called_once()
+
+    def test_non_streaming_chat_falls_back_without_search_warning(self):
+        from translators import chat
+
+        settings = {
+            "model": "gemini-3.8-flash",
+            "gemini_key": "configured-key",
+            "target_language": "ar",
+        }
+        quota_error = RuntimeError(
+            "Google Search request was rejected with HTTP 429. "
+            "RESOURCE_EXHAUSTED.")
+        with mock.patch(
+            "translators.chat.gemini.chat",
+            side_effect=[quota_error, "جواب غير موثق."],
+        ) as gemini_chat:
+            answer = chat.reply(
+                [{"role": "user", "content": "أهلا"}],
+                settings,
+                "source",
+                "translation",
+            )
+
+        self.assertIn("جواب غير موثق.", answer)
+        self.assertNotIn("تعذّر بحث Google", answer)
+        self.assertTrue(gemini_chat.call_args_list[0].kwargs["use_google_search"])
+        self.assertFalse(gemini_chat.call_args_list[1].kwargs["use_google_search"])
+
+    def test_regular_greeting_also_enables_google_search(self):
+        from translators import chat
+
+        settings = {
+            "model": "gemini-2.5-flash",
+            "gemini_key": "configured-key",
+            "source_language": "en",
+            "target_language": "ar",
+        }
+        with mock.patch(
+            "translators.chat.gemini.stream_chat",
+            return_value=iter(("وعليكم السلام",)),
+        ) as gemini_stream:
+            answer = "".join(chat.reply_stream(
+                [{"role": "user", "content": "جاوب بالعربية"}],
+                settings,
+                "source",
+                "translation",
+            ))
+
+        self.assertEqual(answer, "وعليكم السلام")
+        self.assertTrue(gemini_stream.call_args.kwargs["use_google_search"])
+        self.assertIn("Google Search", gemini_stream.call_args.args[3])
+
+    def test_openai_compatible_chat_stream_requires_a_complete_reply(self):
+        from translators import opencode_compat
+
+        response = mock.Mock()
+        response.status_code = 200
+        response.iter_lines.return_value = [
+            b'data: {"choices":[{"delta":{"content":"English "},"finish_reason":null}]}',
+            b'data: {"choices":[{"delta":{"content":"answer."},"finish_reason":"stop"}]}',
+            b"data: [DONE]",
+        ]
+        with mock.patch.object(
+            opencode_compat, "_post_stream", return_value=response
+        ) as post_stream:
+            chunks = list(opencode_compat.stream_chat(
+                [{"role": "user", "content": "Question"}],
+                "https://example.test/v1",
+                "configured-key",
+                "test-model",
+                "Reply in English.",
+            ))
+
+        self.assertEqual("".join(chunks), "English answer.")
+        self.assertEqual(
+            post_stream.call_args.args[0]["max_tokens"],
+            8192,
+        )
+        response.close.assert_called_once()
+
+    def test_opencode_zen_chat_stream_rejects_eof_without_finish_reason(self):
+        from translators import opencode_compat, opencode_zen
+
+        response = mock.Mock()
+        response.status_code = 200
+        response.iter_lines.return_value = [
+            b'data: {"choices":[{"delta":{"content":"Complete "},"finish_reason":null}]}',
+            b'data: {"choices":[{"delta":{"content":"reply."},"finish_reason":"stop"}]}',
+            b"data: [DONE]",
+        ]
+        with mock.patch.object(
+            opencode_zen.requests, "post", return_value=response
+        ):
+            chunks = list(opencode_zen.stream_chat(
+                [{"role": "user", "content": "Question"}],
+                "test-model",
+                "Reply in English.",
+            ))
+        self.assertEqual("".join(chunks), "Complete reply.")
+
+        response.close.reset_mock()
+        response.iter_lines.return_value = [
+            b'data: {"choices":[{"delta":{"content":"Incomplete"}}]}',
+            b"data: [DONE]",
+        ]
+        with mock.patch.object(
+            opencode_zen.requests, "post", return_value=response
+        ):
+            stream = opencode_zen.stream_chat(
+                [{"role": "user", "content": "Question"}],
+                "test-model",
+                "Reply in English.",
+            )
+            self.assertEqual(next(stream), "Incomplete")
+            with self.assertRaisesRegex(RuntimeError, "ended before"):
+                next(stream)
+        response.close.assert_called_once()
+
+        response.close.reset_mock()
+        response.iter_lines.return_value = [
+            b'data: {"choices":[{"delta":{"content":"Incomplete"}}]}',
+            b"data: [DONE]",
+        ]
+        with mock.patch.object(
+            opencode_compat, "_post_stream", return_value=response
+        ):
+            stream = opencode_compat.stream_chat(
+                [{"role": "user", "content": "Question"}],
+                "https://example.test/v1",
+                "configured-key",
+                "test-model",
+                "Reply in English.",
+            )
+            self.assertEqual(next(stream), "Incomplete")
+            with self.assertRaisesRegex(RuntimeError, "ended before"):
+                next(stream)
+        response.close.assert_called_once()
+
+    def test_gemini_stream_preserves_all_deltas_and_rejects_truncation(self):
+        import requests
+        from translators import gemini
+
+        response = mock.Mock()
+        response.status_code = 200
+        response.iter_lines.return_value = [
+            b'data: {"candidates":[{"content":{"parts":[{"text":"An English "}]}}]}',
+            b'data: {"candidates":[{"content":{"parts":[{"text":"reply."}]},"finishReason":"STOP"}]}',
+        ]
+        with mock.patch.object(requests, "post", return_value=response) as post:
+            chunks = list(gemini.stream_chat(
+                [{"role": "user", "content": "Question"}],
+                "configured-key",
+                "gemini-2.5-flash",
+                "Reply in English.",
+            ))
+        self.assertEqual("".join(chunks), "An English reply.")
+        self.assertEqual(
+            post.call_args.kwargs["json"]["generationConfig"]["maxOutputTokens"],
+            8192,
+        )
+        self.assertEqual(
+            post.call_args.kwargs["json"]["tools"],
+            [{"google_search": {}}],
+        )
+        response.close.assert_called_once()
+
+        response.close.reset_mock()
+        response.iter_lines.return_value = [
+            b'data: {"candidates":[{"content":{"parts":[{"text":"Incomplete"}]}}]}',
+            b'data: {"candidates":[{"finishReason":"MAX_TOKENS"}]}',
+        ]
+        with mock.patch.object(requests, "post", return_value=response):
+            stream = gemini.stream_chat(
+                [{"role": "user", "content": "Question"}],
+                "configured-key",
+                "gemini-2.5-flash",
+                "Reply in English.",
+            )
+            self.assertEqual(next(stream), "Incomplete")
+            with self.assertRaisesRegex(RuntimeError, "cut off"):
+                next(stream)
+        response.close.assert_called_once()
+
+    def test_gemini_chat_stream_returns_google_search_sources(self):
+        import requests
+        from translators import gemini
+
+        response = mock.Mock()
+        response.status_code = 200
+        response.iter_lines.return_value = [
+            b'data: {"candidates":[{"content":{"parts":[{"text":"This person wrote the book."}]},"groundingMetadata":{"groundingChunks":[{"web":{"uri":"https://example.com/author","title":"Author biography"}}]},"finishReason":"STOP"}]}',
+        ]
+        with mock.patch.object(requests, "post", return_value=response) as post:
+            answer = "".join(gemini.stream_chat(
+                [{"role": "user", "content": "Who is this author?"}],
+                "configured-key",
+                "gemini-3.5-flash-lite",
+                "Use Google Search.",
+            ))
+
+        self.assertEqual(
+            answer,
+            "This person wrote the book.\n\nSources:\n"
+            "- [Author biography](https://example.com/author)",
+        )
+        self.assertEqual(
+            post.call_args.kwargs["json"]["tools"],
+            [{"google_search": {}}],
+        )
+        response.close.assert_called_once()
+
+    def test_gemini_chat_stream_can_skip_google_search(self):
+        import requests
+        from translators import gemini
+
+        response = mock.Mock(status_code=200)
+        response.iter_lines.return_value = [
+            b'data: {"candidates":[{"content":{"parts":[{"text":"A clear explanation."}]},"finishReason":"STOP"}]}',
+        ]
+        with mock.patch.object(requests, "post", return_value=response) as post:
+            answer = "".join(gemini.stream_chat(
+                [{"role": "user", "content": "Explain this word."}],
+                "configured-key",
+                "gemini-3.5-flash-lite",
+                "Explain the selected word from the passage.",
+                use_google_search=False,
+            ))
+
+        self.assertEqual(answer, "A clear explanation.")
+        self.assertNotIn("tools", post.call_args.kwargs["json"])
+        response.close.assert_called_once()
+
+    def test_gemini_chat_reports_search_quota_429_without_fallback(self):
+        import requests
+        from translators import gemini
+
+        rejected = mock.Mock(status_code=429)
+        rejected.json.return_value = {
+            "error": {
+                "status": "RESOURCE_EXHAUSTED",
+                "message": "You exceeded your current quota.",
+            },
+        }
+        with mock.patch.object(
+            requests, "post", return_value=rejected,
+        ) as post:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "HTTP 429.*RESOURCE_EXHAUSTED.*exceeded your current quota",
+            ):
+                list(gemini.stream_chat(
+                    [{"role": "user", "content": "When was he born?"}],
+                    "configured-key",
+                    "gemini-3.5-flash-lite",
+                    "Answer the question.",
+                    use_google_search=True,
+                ))
+
+        self.assertEqual(post.call_count, 1)
+        self.assertTrue(post.call_args.kwargs["json"].get("tools"))
+        rejected.close.assert_called_once()
+
+    def test_chat_worker_emits_the_accumulated_reply_without_dropping_tail(self):
+        from popup.chat_worker import ChatWorker
+
+        worker = ChatWorker(
+            [{"role": "user", "content": "Question"}],
+            {"model": "gemini-2.5-flash", "gemini_key": "configured-key"},
+            "Original passage",
+            "Translation",
+        )
+        partial = []
+        done = []
+        failed = []
+        worker.partial.connect(partial.append)
+        worker.done.connect(done.append)
+        worker.failed.connect(failed.append)
+        with mock.patch(
+            "translators.chat.reply_stream",
+            return_value=iter(("The English response ", "arrived in full.")),
+        ):
+            worker.run()
+
+        self.assertEqual(
+            partial,
+            ["The English response ", "The English response arrived in full."],
+        )
+        self.assertEqual(done, ["The English response arrived in full."])
+        self.assertEqual(failed, [])
+
     def test_reply_rejects_history_without_a_final_user_question(self):
         from translators.chat import reply
 
@@ -713,932 +985,6 @@ class TestTranslationChat(unittest.TestCase):
                 "original",
                 "translation",
             )
-
-    def test_general_chat_does_not_inject_book_context(self):
-        from translators.chat import _model_messages
-
-        system, messages = _model_messages(
-            [{"role": "user", "content": "What is a cadence?"}],
-            "",
-            "",
-            "auto",
-            "ar",
-        )
-
-        self.assertEqual(
-            messages, [{"role": "user", "content": "What is a cadence?"}])
-        self.assertIn("general-purpose conversational AI assistant", system)
-        self.assertIn("do not assume a music-related context", system)
-        self.assertIn(
-            "when the user asks you to look something up, search the web "
-            "with Google Search before answering",
-            system,
-        )
-        self.assertNotIn(
-            "Do not assume access to a book, document, image", system)
-        self.assertIn("Reply in Arabic", system)
-        self.assertNotIn("Original passage:", system)
-        self.assertNotIn("Translation:", system)
-
-    def test_chat_prompt_uses_selected_reply_language_only(self):
-        from translators import chat
-
-        with mock.patch(
-            "translators.chat.opencode_bridge.chat_stream",
-            return_value=iter(["Réponse"]),
-        ) as bridge_stream:
-            self.assertEqual(list(chat.reply_stream(
-                [{"role": "user", "content": "Explain this phrase."}],
-                {
-                    "model": "space-bunny-free",
-                    "source_language": "en",
-                    "target_language": "ar",
-                    "chat_reply_language": "fr",
-                    "chat_reply_language_only": True,
-                },
-                "source passage",
-                "translated passage",
-            )), ["Réponse"])
-        system = bridge_stream.call_args.args[2]
-
-        self.assertIn("Strict response-language requirement", system)
-        self.assertIn("respond only in French", system)
-        self.assertIn("do not assume the passage or question is about music",
-                      system)
-        self.assertIn(
-            "If a requested fact is not in the passage or you are unsure of it",
-            system,
-        )
-        self.assertIn(
-            "Always search when the user asks you to look something up",
-            system,
-        )
-
-    def test_settings_can_enable_a_fixed_chat_response_language(self):
-        from config.settings import DEFAULTS
-        from ui.settings_dialog import SettingsDialog
-        from PySide6.QtCore import Qt
-        from ui.chat_panel import ChatPanel
-
-        dialog = SettingsDialog(dict(DEFAULTS))
-        self.addCleanup(dialog.close)
-        self.assertFalse(dialog.chat_reply_language_only.isChecked())
-        self.assertFalse(dialog.chat_reply_language.isEnabled())
-
-        dialog.chat_reply_language.setCurrentIndex(
-            dialog.chat_reply_language.findData("fr"))
-        dialog.chat_reply_language_only.setChecked(True)
-        values = dialog.values()
-        self.assertTrue(dialog.chat_reply_language.isEnabled())
-        self.assertEqual(values["chat_reply_language"], "fr")
-        self.assertTrue(values["chat_reply_language_only"])
-
-        panel = ChatPanel(lambda: dict(
-            DEFAULTS,
-            target_language="ar",
-            chat_reply_language="fr",
-            chat_reply_language_only=True,
-        ))
-        self.addCleanup(panel.close)
-        panel._render()
-        self.assertEqual(
-            panel.transcript.layoutDirection(),
-            Qt.LayoutDirection.LeftToRight,
-        )
-        self.assertEqual(
-            panel.input.layoutDirection(),
-            Qt.LayoutDirection.RightToLeft,
-        )
-
-    def test_standalone_chat_sends_latest_translation_as_context(self):
-        from PySide6.QtCore import QObject, Signal
-        from config.settings import DEFAULTS
-        from ui.chat_panel import ChatPanel
-
-        class StubChatWorker(QObject):
-            partial = Signal(str)
-            done = Signal(str)
-            failed = Signal(str)
-            finished = Signal()
-
-            def __init__(self, messages, settings, source, translated):
-                super().__init__()
-                self.messages = messages
-                self.settings = settings
-                self.source = source
-                self.translated = translated
-
-            def start(self):
-                pass
-
-        panel = ChatPanel(lambda: dict(DEFAULTS, target_language="ar"))
-        self.addCleanup(panel.close)
-        panel.set_translation_context("الترجمة الحالية")
-        with mock.patch("ui.chat_panel.ChatWorker", StubChatWorker):
-            panel.input.setPlainText("شنوة معنى cadence؟")
-            panel.send_message()
-
-        worker = panel._worker
-        self.assertEqual(worker.source, "")
-        self.assertEqual(worker.translated, "الترجمة الحالية")
-        self.assertEqual(
-            worker.messages,
-            [{"role": "user", "content": "شنوة معنى cadence؟"}],
-        )
-        worker.done.emit("هي نهاية جملة موسيقية.")
-        worker.finished.emit()
-        self.assertEqual(
-            [message["role"] for message in panel._messages],
-            ["user", "assistant"],
-        )
-
-    def test_explain_button_sends_selected_text_with_translation_context(self):
-        from PySide6.QtCore import QObject, Signal
-        from config.settings import DEFAULTS
-        from ui.chat_panel import ChatPanel
-
-        class StubChatWorker(QObject):
-            partial = Signal(str)
-            done = Signal(str)
-            failed = Signal(str)
-            finished = Signal()
-
-            def __init__(self, messages, settings, source, translated):
-                super().__init__()
-                self.messages = messages
-                self.settings = settings
-                self.source = source
-                self.translated = translated
-
-            def start(self):
-                pass
-
-        panel = ChatPanel(lambda: dict(DEFAULTS, target_language="ar"))
-        self.addCleanup(panel.close)
-        self.assertFalse(panel.explain_button.isEnabled())
-        panel.set_translation_context("الترجمة الحالية")
-        panel.set_explanation_selection("motif")
-        self.assertTrue(panel.explain_button.isEnabled())
-        panel.input.setPlainText("Keep this draft")
-
-        with mock.patch("ui.chat_panel.ChatWorker", StubChatWorker):
-            panel.explain_button.click()
-
-        worker = panel._worker
-        self.assertEqual(worker.source, "")
-        self.assertEqual(worker.translated, "الترجمة الحالية")
-        self.assertEqual(
-            worker.messages,
-            [{
-                "role": "user",
-                "content": (
-                    "Explain what the selected text means in the context of "
-                    "the current translation and original passage. You may "
-                    "supplement the passage with relevant general knowledge "
-                    "or web research. For factual details not clearly stated "
-                    "in the passage, use the available Google Search tool and "
-                    "cite its sources; do not limit your answer to the "
-                    "passage.\n\n"
-                    "Selected text:\nmotif"
-                ),
-            }],
-        )
-        self.assertEqual(panel.input.toPlainText(), "Keep this draft")
-        self.assertFalse(panel.explain_button.isEnabled())
-        worker.finished.emit()
-        self.assertTrue(panel.explain_button.isEnabled())
-
-    def test_standalone_chat_renders_partial_model_response(self):
-        from PySide6.QtCore import QObject, Signal
-        from ui.chat_panel import ChatPanel
-
-        class StubWorker(QObject):
-            partial = Signal(str)
-            done = Signal(str)
-            failed = Signal(str)
-            finished = Signal()
-
-            def __init__(self, *args):
-                super().__init__()
-
-            def start(self):
-                pass
-
-        panel = ChatPanel(lambda: {})
-        self.addCleanup(panel.close)
-        with mock.patch("ui.chat_panel.ChatWorker", StubWorker):
-            panel.input.setPlainText("question")
-            panel.send_message()
-            worker = panel._worker
-            worker.partial.emit("The model is still")
-            self.assertIn("The model is still", panel.transcript.toPlainText())
-            worker.partial.emit("The model is still responding.")
-            self.assertIn(
-                "The model is still responding.",
-                panel.transcript.toPlainText(),
-            )
-            worker.done.emit("The model is still responding.")
-            self.assertEqual(
-                panel.transcript.toPlainText().count(
-                    "The model is still responding."),
-                1,
-            )
-
-    def test_general_chat_context_contains_translation_only(self):
-        from translators.chat import _model_messages
-
-        system, _ = _model_messages(
-            [{"role": "user", "content": "Explain this."}],
-            "",
-            "النص المترجم",
-            "auto",
-            "ar",
-        )
-        self.assertIn("Translation:\nالنص المترجم", system)
-        self.assertIn("Original passage:\n\n", system)
-
-    def test_openai_compatible_non_object_choice_has_clear_error(self):
-        from translators.opencode_compat import _reply_text
-
-        response = mock.Mock()
-        response.json.return_value = {"choices": [["unexpected"]]}
-        with self.assertRaisesRegex(
-            RuntimeError, "Unexpected reply from the OpenAI-compatible endpoint"
-        ):
-            _reply_text(response)
-
-    def test_openai_compatible_translation_rejects_non_object_choice(self):
-        from translators import opencode_compat
-
-        response = mock.Mock()
-        response.json.return_value = {"choices": [["unexpected"]]}
-        with mock.patch.object(
-            opencode_compat, "_post_with_rate_limit_retry",
-            return_value=response,
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "Unexpected reply from the OpenAI-compatible endpoint",
-            ):
-                opencode_compat.translate(
-                    "Translate this", "https://api.example/v1", "key",
-                    "example-model",
-                )
-
-    def test_openai_compatible_image_translation_rejects_non_object_choice(self):
-        from PIL import Image
-        from translators import opencode_compat
-
-        response = mock.Mock()
-        response.headers = {}
-        response.json.return_value = {"choices": [["unexpected"]]}
-        with mock.patch.object(
-            opencode_compat, "_post_with_rate_limit_retry",
-            return_value=response,
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "Unexpected reply from the OpenAI-compatible endpoint",
-            ):
-                opencode_compat.translate_image(
-                    Image.new("RGB", (2, 2), "white"),
-                    "https://api.example/v1", "key", "example-model",
-                )
-
-    def test_openai_compatible_chat_rejects_non_object_choice(self):
-        from translators import opencode_compat
-
-        response = mock.Mock()
-        response.json.return_value = {"choices": [["unexpected"]]}
-        with mock.patch.object(
-            opencode_compat.requests, "post", return_value=response,
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "Unexpected reply from the OpenAI-compatible endpoint",
-            ):
-                opencode_compat.chat(
-                    [{"role": "user", "content": "Question"}],
-                    "https://api.example/v1", "key", "example-model",
-                    "System prompt",
-                )
-
-    def test_openai_compatible_stream_rejects_non_object_choice(self):
-        from translators.opencode_compat import stream_translate
-
-        response = mock.Mock()
-        response.status_code = 200
-        response.headers = {}
-        response.iter_lines.return_value = [
-            b'data: {"choices":[["unexpected"]]}',
-        ]
-        with mock.patch(
-            "translators.opencode_compat._post_stream",
-            return_value=response,
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError, "choice is not an object"
-            ):
-                list(stream_translate(
-                    "source", "https://api.example/v1", "key", "model"))
-        response.close.assert_called_once()
-
-    def test_openai_compatible_image_stream_rejects_non_object_choice(self):
-        from PIL import Image
-        from translators.opencode_compat import stream_translate_image
-
-        response = mock.Mock()
-        response.iter_lines.return_value = [
-            b'data: {"choices":[["unexpected"]]}',
-        ]
-        with mock.patch(
-            "translators.opencode_compat._post_stream",
-            return_value=response,
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError, "choice is not an object"
-            ):
-                list(stream_translate_image(
-                    Image.new("RGB", (2, 2), "white"),
-                    "https://api.example/v1", "key", "model"))
-        response.close.assert_called_once()
-
-    def test_translation_ready_updates_standalone_chat_context(self):
-        from main import MainWindow
-
-        window = MainWindow()
-        self.addCleanup(window.close)
-        with mock.patch("popup.worker.TranslateWorker.start"):
-            popup = window._show_popup(text="source")
-        self.addCleanup(popup.close)
-        popup._translation_text = "ترجمة الاختبار"
-        popup.translationReady.emit()
-        self.assertEqual(
-            window.chat_panel._translation_context, "ترجمة الاختبار")
-
-    def test_standalone_chat_uses_every_theme_palette(self):
-        from ui.chat_panel import ChatPanel
-        from ui.theme import THEME_VARIANTS, theme_colors
-        from main import app_stylesheet
-
-        panel = ChatPanel(lambda: {})
-        self.addCleanup(panel.close)
-        for theme in THEME_VARIANTS:
-            for scheme in ("dark", "light"):
-                with self.subTest(theme=theme, scheme=scheme):
-                    colors = theme_colors(theme, scheme)
-                    panel.apply_theme(colors)
-                    stylesheet = panel.styleSheet()
-                    self.assertIn(
-                        f"background-color: {colors['surface']};",
-                        stylesheet,
-                    )
-                    self.assertIn(f"color: {colors['text']};", stylesheet)
-                    self.assertIn(
-                        f"border: 1px solid {colors['border']};",
-                        stylesheet,
-                    )
-                    app_stylesheet_text = app_stylesheet(theme, scheme)
-                    self.assertIn(
-                        f"border-left: 1px solid {colors['accent_light']};",
-                        app_stylesheet_text,
-                    )
-                    self.assertIn(
-                        f"background-color: {colors['toolbar']};",
-                        app_stylesheet_text,
-                    )
-
-    def test_chat_enter_sends_and_shift_enter_inserts_newline(self):
-        from PySide6.QtCore import Qt
-        from PySide6.QtTest import QSignalSpy, QTest
-        from ui.chat_panel import ChatPanel
-
-        panel = ChatPanel(lambda: {})
-        self.addCleanup(panel.close)
-        spy = QSignalSpy(panel.input.sendRequested)
-
-        QTest.keyClick(panel.input, Qt.Key.Key_Return)
-        self.assertEqual(spy.count(), 1)
-
-        QTest.keyClick(
-            panel.input, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
-        self.assertEqual(panel.input.toPlainText(), "\n")
-        self.assertEqual(spy.count(), 1)
-
-        QTest.keyClick(
-            panel.input, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
-        self.assertEqual(spy.count(), 2)
-
-    def test_ctrl_wheel_changes_chat_font_and_is_consumed(self):
-        from PySide6.QtCore import QPoint, QPointF, Qt
-        from PySide6.QtGui import QWheelEvent
-        from PySide6.QtWidgets import QApplication
-        from ui.chat_panel import ChatPanel
-
-        panel = ChatPanel(lambda: {})
-        self.addCleanup(panel.close)
-        initial_size = panel.input.font().pointSizeF()
-        event = QWheelEvent(
-            QPointF(10, 10),
-            QPointF(10, 10),
-            QPoint(0, 0),
-            QPoint(0, 120),
-            Qt.MouseButton.NoButton,
-            Qt.KeyboardModifier.ControlModifier,
-            Qt.ScrollPhase.NoScrollPhase,
-            False,
-        )
-
-        consumed = QApplication.sendEvent(panel.input.viewport(), event)
-
-        self.assertTrue(consumed)
-        self.assertEqual(panel.input.font().pointSizeF(), initial_size + 1)
-        self.assertEqual(panel.transcript.font().pointSizeF(), initial_size + 1)
-
-    def test_chat_font_size_is_restored_and_saved(self):
-        from ui.chat_panel import ChatPanel
-
-        settings = {"chat_font_size": 18.5}
-        panel = ChatPanel(lambda: settings)
-        self.addCleanup(panel.close)
-        self.assertEqual(panel.input.font().pointSizeF(), 18.5)
-
-        with mock.patch("config.settings.save") as save_settings:
-            panel._set_chat_font_size(19.5)
-            panel._save_chat_font_size()
-
-        self.assertEqual(settings["chat_font_size"], 19.5)
-        save_settings.assert_called_once_with(settings)
-        panel._font_size_save_timer.stop()
-
-    def test_clicking_chat_word_starts_speech_from_that_word(self):
-        from PySide6.QtCore import Qt
-        from PySide6.QtGui import QColor
-        from PySide6.QtTest import QTest
-        from ui.chat_panel import ChatPanel
-
-        settings = {
-            "speech_engine": "edge",
-            "speech_rate": 1.25,
-            "speech_voice": "en-US-AriaNeural",
-            "target_language": "en",
-            "fast_mode": True,
-        }
-        panel = ChatPanel(lambda: settings)
-        self.addCleanup(panel.close)
-        from ui.theme import theme_colors
-        colors = theme_colors("Midnight Blue", "dark")
-        panel.apply_theme(colors)
-        panel.resize(520, 640)
-        panel._entries = [(
-            "assistant",
-            "First second third.\n\nA second paragraph must also be read.",
-        )]
-        fake_worker = mock.Mock()
-
-        with (
-            mock.patch("ui.chat_panel.speech_available", return_value=True),
-            mock.patch(
-                "ui.chat_panel.SpeechWorker", return_value=fake_worker,
-            ) as worker_factory,
-        ):
-            panel._render()
-            panel.show()
-            self.app.processEvents()
-            second_word = panel.transcript.document().find("second")
-            second_word.movePosition(
-                second_word.MoveOperation.StartOfWord)
-            click_position = panel.transcript.cursorRect(second_word).center()
-            QTest.mouseClick(
-                panel.transcript.viewport(),
-                Qt.MouseButton.LeftButton,
-                pos=click_position,
-            )
-
-        spoken_text = worker_factory.call_args.args[0]
-        self.assertTrue(spoken_text.startswith("second third."))
-        self.assertIn("A second paragraph must also be read.", spoken_text)
-        self.assertNotIn("First", spoken_text)
-        self.assertEqual(worker_factory.call_args.args[1], panel)
-        self.assertEqual(worker_factory.call_args.kwargs["engine"], "edge")
-        self.assertEqual(
-            worker_factory.call_args.kwargs["target_language"], "en")
-        self.assertEqual(
-            worker_factory.call_args.kwargs["voice"],
-            settings["speech_voice"],
-        )
-        fake_worker.start.assert_called_once_with()
-        selections = panel.transcript.extraSelections()
-        self.assertEqual(
-            selections[0].cursor.selectedText(),
-            "second",
-        )
-        self.assertEqual(
-            selections[0].format.background().color().name(),
-            QColor(colors["selection"]).name(),
-        )
-        self.assertEqual(
-            selections[0].format.foreground().color().name(),
-            QColor(colors["text"]).name(),
-        )
-
-    def test_chat_read_aloud_and_stop_buttons_control_playback(self):
-        from PySide6.QtCore import Qt
-        from PySide6.QtTest import QTest
-        from ui.chat_panel import ChatPanel
-
-        panel = ChatPanel(lambda: {"speech_engine": "edge"})
-        self.addCleanup(panel.close)
-        layout = panel.layout()
-        action_row_index = next(
-            index for index in range(layout.count())
-            if layout.itemAt(index).layout() is not None
-            and layout.itemAt(index).layout().indexOf(
-                panel.read_aloud_button) >= 0
-        )
-        self.assertEqual(
-            layout.itemAt(action_row_index - 1).widget(),
-            panel.transcript,
-        )
-        self.assertEqual(
-            layout.itemAt(action_row_index + 1).layout().indexOf(panel.input),
-            0,
-        )
-        panel._entries = [("assistant", "Read the entire response.")]
-        fake_worker = mock.Mock()
-
-        with (
-            mock.patch("ui.chat_panel.speech_available", return_value=True),
-            mock.patch(
-                "ui.chat_panel.SpeechWorker", return_value=fake_worker,
-            ) as worker_factory,
-        ):
-            panel._render()
-            self.assertTrue(panel.read_aloud_button.isEnabled())
-            self.assertFalse(panel.stop_speech_button.isEnabled())
-            QTest.mouseClick(
-                panel.read_aloud_button, Qt.MouseButton.LeftButton)
-
-            self.assertEqual(
-                worker_factory.call_args.args[0],
-                "Read the entire response.",
-            )
-            self.assertFalse(panel.read_aloud_button.isEnabled())
-            self.assertTrue(panel.stop_speech_button.isEnabled())
-            QTest.mouseClick(
-                panel.stop_speech_button, Qt.MouseButton.LeftButton)
-
-        fake_worker.requestInterruption.assert_called_once_with()
-        self.assertFalse(panel.stop_speech_button.isEnabled())
-
-    def test_chat_speech_highlight_does_not_scroll_visible_word_up(self):
-        from PySide6.QtGui import QTextCursor
-        from ui.chat_panel import ChatPanel
-
-        panel = ChatPanel(lambda: {})
-        self.addCleanup(panel.close)
-        panel.resize(400, 300)
-        panel._entries = [
-            ("assistant", "\n\n".join(
-                f"Earlier answer paragraph {index} with enough words to "
-                "fill the transcript view."
-                for index in range(16)
-            )),
-            ("user", "Third question."),
-            ("assistant", "Final answer contains the target word nearby."),
-        ]
-        panel.show()
-        panel._render()
-        self.app.processEvents()
-
-        target = panel.transcript.document().find("target")
-        self.assertFalse(target.isNull())
-        previous_cursor = QTextCursor(panel.transcript.document())
-        previous_cursor.setPosition(0)
-        panel.transcript.setTextCursor(previous_cursor)
-        scroll_bar = panel.transcript.verticalScrollBar()
-        scroll_bar.setValue(scroll_bar.maximum())
-        self.app.processEvents()
-        initial_scroll = scroll_bar.value()
-        self.assertTrue(
-            panel.transcript.viewport().rect().contains(
-                panel.transcript.cursorRect(target).center()))
-
-        panel._speech_document_start = target.selectionStart()
-        panel._speech_text = "target word"
-        panel._speech_active = True
-
-        panel._highlight_speech_range(0, len("target"))
-        self.app.processEvents()
-        self.assertEqual(scroll_bar.value(), initial_scroll)
-        self.assertEqual(len(panel.transcript.extraSelections()), 1)
-
-    def test_chat_transcript_context_menu_can_select_and_copy_all_text(self):
-        from PySide6.QtCore import Qt
-        from PySide6.QtGui import QKeySequence, QTextCursor
-        from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QMenu
-        from ui.chat_panel import ChatPanel
-
-        panel = ChatPanel(lambda: {})
-        self.addCleanup(panel.close)
-        panel._entries = [
-            ("user", "User message."),
-            ("assistant", "Model answer."),
-        ]
-        panel.resize(360, 320)
-        panel._render()
-        panel.show()
-        self.app.processEvents()
-        transcript = panel.transcript
-        transcript.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        self.assertEqual(
-            transcript.contextMenuPolicy(),
-            Qt.ContextMenuPolicy.NoContextMenu,
-        )
-        self.assertEqual(
-            transcript.viewport().contextMenuPolicy(),
-            Qt.ContextMenuPolicy.NoContextMenu,
-        )
-        for sample in ("User message.", "Model answer."):
-            cursor = transcript.document().find(sample)
-            self.assertFalse(cursor.isNull())
-            position = transcript.cursorRect(cursor).center()
-            QTest.mouseClick(
-                transcript.viewport(),
-                Qt.MouseButton.RightButton,
-                pos=position,
-            )
-            self.app.processEvents()
-            menus = [
-                widget for widget in self.app.allWidgets()
-                if isinstance(widget, QMenu) and widget.isVisible()
-            ]
-            self.assertEqual(
-                len(menus),
-                1,
-                f"right-click on {sample!r} should show exactly one menu",
-            )
-            menu = menus[0]
-            self.assertIs(menu, transcript._context_menu)
-            self.assertEqual(
-                menu.layoutDirection(), Qt.LayoutDirection.LeftToRight)
-            menu.hide()
-            self.app.processEvents()
-
-        QTest.mouseClick(
-            transcript.viewport(),
-            Qt.MouseButton.RightButton,
-            pos=transcript.cursorRect(
-                transcript.document().find("Model answer.")).center(),
-        )
-        self.app.processEvents()
-        menu = transcript._context_menu
-        self.assertTrue(menu.isVisible())
-        actions = menu.actions()
-        self.assertEqual(
-            [action.text() for action in actions],
-            ["Copy", "Select All", "", "⟳ Refresh", "↻ ReOpen"],
-        )
-        self.assertEqual(
-            [actions[index].shortcut().toString() for index in (0, 1)],
-            [
-                QKeySequence(QKeySequence.StandardKey.Copy).toString(),
-                QKeySequence(QKeySequence.StandardKey.SelectAll).toString(),
-            ],
-        )
-        refreshes = []
-        reopens = []
-        transcript.refreshRequested.connect(lambda: refreshes.append(True))
-        transcript.reopenRequested.connect(lambda: reopens.append(True))
-        actions[1].trigger()
-        self.assertEqual(
-            transcript.textCursor().selectedText(),
-            "You\u2029User message.\u2029\u2029Chat\u2029Model answer.",
-        )
-        actions[3].trigger()
-        actions[4].trigger()
-        self.assertEqual(refreshes, [True])
-        self.assertEqual(reopens, [True])
-        menu.hide()
-        self.app.processEvents()
-
-        cursor = transcript.textCursor()
-        cursor.clearSelection()
-        transcript.setTextCursor(cursor)
-        QTest.mouseClick(
-            transcript.viewport(),
-            Qt.MouseButton.RightButton,
-            pos=transcript.cursorRect(
-                transcript.document().find("User message.")).center(),
-        )
-        self.app.processEvents()
-        menu = transcript._context_menu
-        self.assertTrue(menu.isVisible())
-        menu.actions()[0].trigger()
-        self.assertEqual(
-            self.app.clipboard().text(),
-            "You\nUser message.\n\nChat\nModel answer.",
-        )
-        self.assertFalse(
-            transcript.textCursor().hasSelection(),
-            "copying the chat must not select its transcript",
-        )
-        menu.hide()
-
-        cursor = transcript.textCursor()
-        cursor.setPosition(
-            transcript.document().find("Model answer.").selectionStart())
-        cursor.setPosition(
-            cursor.position() + len("Model answer."),
-            QTextCursor.MoveMode.KeepAnchor,
-        )
-        transcript.setTextCursor(cursor)
-        QTest.mouseClick(
-            transcript.viewport(),
-            Qt.MouseButton.RightButton,
-            pos=transcript.cursorRect(
-                transcript.document().find("Model answer.")).center(),
-        )
-        self.app.processEvents()
-        self.assertTrue(transcript._context_menu.isVisible())
-        transcript._context_menu.actions()[0].trigger()
-        self.assertEqual(self.app.clipboard().text(), "Model answer.")
-        self.assertEqual(
-            transcript.textCursor().selectedText(), "Model answer.")
-        transcript._context_menu.hide()
-
-    def test_chat_hides_intro_text_and_styles_dock_resize_handle(self):
-        from main import app_stylesheet
-        from ui.chat_panel import ChatPanel
-        from ui.theme import theme_colors
-
-        panel = ChatPanel(lambda: {})
-        self.addCleanup(panel.close)
-        panel.set_translation_context("A translated passage.")
-        self.assertTrue(panel.context_notice.isHidden())
-        self.assertEqual(panel.transcript.placeholderText(), "")
-
-        stylesheet = app_stylesheet("Dark Slate", "dark")
-        border = theme_colors("Dark Slate", "dark")["border"]
-        self.assertIn("QMainWindow::separator", stylesheet)
-        self.assertIn(
-            f"border-left: 1px solid {border};",
-            stylesheet,
-        )
-        self.assertIn("width: 5px;", stylesheet)
-
-    def test_main_window_chat_dock_is_between_pages_and_settings(self):
-        from PySide6.QtCore import QPoint
-        from PySide6.QtGui import QContextMenuEvent
-        from main import MainWindow
-
-        window = MainWindow()
-        window.chat_action.setChecked(False)
-        window.chat_dock.hide()
-        try:
-            self.assertTrue(window.source_combo.isHidden())
-            self.assertTrue(window.target_combo.isHidden())
-            self.assertIsNot(
-                window.source_combo.parentWidget(), window._toolbar)
-            self.assertIsNot(
-                window.target_combo.parentWidget(), window._toolbar)
-            actions = [
-                action for action in window._toolbar.actions()
-                if not action.isSeparator()
-            ]
-            settings_index = next(
-                index for index, action in enumerate(actions)
-                if action.text() == "⚙  Settings")
-            pages_index = next(
-                index for index, action in enumerate(actions)
-                if action.text() == "🖼  Pages")
-            self.assertLess(pages_index, settings_index)
-            self.assertIs(window.chat_button.defaultAction(),
-                          window.chat_action)
-            self.assertIs(
-                window.chat_button.parentWidget(),
-                window.toolbar_right_controls,
-            )
-
-            window.show()
-            self.app.processEvents()
-            self.assertFalse(window.chat_dock.isVisible())
-            window.chat_action.setChecked(True)
-            self.app.processEvents()
-            self.assertTrue(window.chat_dock.isVisible())
-            viewport = window.chat_panel.transcript.viewport()
-            viewport_position = QPoint(8, 8)
-            global_position = viewport.mapToGlobal(viewport_position)
-            misdirected_event = QContextMenuEvent(
-                QContextMenuEvent.Reason.Mouse,
-                viewport_position,
-                global_position,
-            )
-            with mock.patch.object(
-                window, "_show_app_context_menu",
-            ) as app_menu:
-                handled = window._thumbs_wheel_filter.eventFilter(
-                    window.centralWidget(), misdirected_event)
-            self.assertFalse(handled)
-            app_menu.assert_not_called()
-
-            position = QPoint(4, 5)
-            event = QContextMenuEvent(
-                QContextMenuEvent.Reason.Mouse,
-                position,
-                viewport.mapToGlobal(position),
-            )
-            with mock.patch.object(window, "_show_app_context_menu") as app_menu:
-                handled = window._thumbs_wheel_filter.eventFilter(
-                    viewport, event)
-            self.assertFalse(handled)
-            app_menu.assert_not_called()
-            window.chat_action.setChecked(False)
-            self.app.processEvents()
-            self.assertFalse(window.chat_dock.isVisible())
-        finally:
-            window.close()
-
-    def test_main_window_saves_user_resized_chat_dock_width(self):
-        from PySide6.QtCore import Qt
-        from main import MainWindow
-
-        window = MainWindow()
-        try:
-            window.show()
-            window.chat_dock.show()
-            self.app.processEvents()
-            window.resizeDocks(
-                [window.chat_dock], [460], Qt.Orientation.Horizontal)
-            self.app.processEvents()
-            actual_width = window.chat_dock.width()
-            with mock.patch("main.save") as save_settings:
-                window._save_session_soon()
-
-            self.assertEqual(
-                window.settings["chat_dock_width"], actual_width)
-            self.assertGreaterEqual(actual_width, 320)
-            save_settings.assert_called_once_with(window.settings)
-        finally:
-            window.close()
-
-    def test_chat_visibility_and_window_geometry_survive_restart(self):
-        from PySide6.QtCore import Qt
-        from config.settings import DEFAULTS
-        import main
-
-        persisted = dict(DEFAULTS)
-        persisted["open_tabs"] = []
-        with mock.patch.object(
-            main, "load", side_effect=lambda: dict(persisted)
-        ), mock.patch.object(
-            main, "save", side_effect=lambda settings: persisted.update(settings)
-        ):
-            first = main.MainWindow()
-            try:
-                first.resize(1100, 700)
-                first.show()
-                first.chat_action.setChecked(True)
-                first.resizeDocks(
-                    [first.chat_dock], [460], Qt.Orientation.Horizontal)
-                self.app.processEvents()
-                first._save_session_soon()
-                geometry_before_minimize = first.settings.get(
-                    "window_geometry")
-                first.showMinimized()
-                self.app.processEvents()
-                first._save_session_soon()
-                self.assertTrue(first.chat_action.isChecked())
-                self.assertTrue(persisted["chat_dock_visible"])
-                self.assertEqual(
-                    persisted["window_geometry"], geometry_before_minimize)
-                first.showNormal()
-                self.app.processEvents()
-                self.assertTrue(first.chat_dock.isVisible())
-                first._save_session_soon()
-                expected_size = first.size()
-                expected_dock_width = persisted["chat_dock_width"]
-
-                self.assertTrue(persisted["chat_dock_visible"])
-                self.assertEqual(persisted["window_geometry"],
-                                 first.settings["window_geometry"])
-            finally:
-                first.close()
-                self.app.processEvents()
-
-            reopened = main.MainWindow()
-            try:
-                reopened.show()
-                self.app.processEvents()
-
-                self.assertTrue(reopened.chat_dock.isVisible())
-                self.assertEqual(reopened.size(), expected_size)
-                self.assertEqual(reopened.chat_dock.width(),
-                                 expected_dock_width)
-            finally:
-                reopened.close()
-                self.app.processEvents()
 
     def test_popup_tools_and_chat_keep_translation_unchanged(self):
         from PySide6.QtCore import QObject, Qt, Signal
@@ -1667,6 +1013,7 @@ class TestTranslationChat(unittest.TestCase):
         class StubChatWorker(QObject):
             done = Signal(str)
             failed = Signal(str)
+            partial = Signal(str)
             finished = Signal()
 
             def __init__(self, messages, settings, source, translated):
@@ -1703,8 +1050,8 @@ class TestTranslationChat(unittest.TestCase):
                 floating_language_controls=True,
             )
         try:
-            self.assertTrue(popup.chat_btn.isHidden())
-            self.assertTrue(popup.explain_btn.isHidden())
+            self.assertFalse(hasattr(popup, "chat_btn"))
+            self.assertFalse(hasattr(popup, "explain_btn"))
             self.assertFalse(hasattr(popup, "instructions_btn"))
             header_layout = popup.language_action_layout
             self.assertEqual(
@@ -1715,27 +1062,38 @@ class TestTranslationChat(unittest.TestCase):
                 header_layout.indexOf(popup.target_language_btn),
                 header_layout.indexOf(popup.source_language_btn),
             )
-            self.assertEqual(header_layout.indexOf(popup.chat_btn), -1)
-            self.assertEqual(header_layout.indexOf(popup.explain_btn), -1)
             self.assertEqual(popup.chat_send_btn.text(), "Send")
             composer = popup.chat_composer
             self.assertEqual(composer.indexOf(popup.chat_input), 0)
-            self.assertEqual(composer.indexOf(popup.chat_send_btn), 1)
+            self.assertEqual(composer.indexOf(popup.chat_speed_btn), 1)
+            self.assertEqual(composer.indexOf(popup.chat_send_btn), 2)
+            self.assertEqual(popup.chat_send_btn.size().height(), 42)
+            self.assertEqual(popup.chat_speed_btn.text(), "»")
             popup._on_done("Current translation", "test")
             self.assertGreaterEqual(
                 popup.chat_transcript.font().pointSize(), 16)
 
             popup.show()
             self.app.processEvents()
+            with (
+                mock.patch("config.settings.load", return_value={}),
+                mock.patch("config.settings.save") as save_settings,
+            ):
+                popup.chat_speed_btn.click()
+                self.assertTrue(popup.speed_menu.isVisible())
+                popup._speed_presets[1.25].click()
+                self.assertEqual(popup.settings["speech_rate"], 1.25)
+                self.assertIn("1.25x", popup.chat_speed_btn.toolTip())
+                save_settings.assert_called_once()
+
             self.assertGreater(
                 popup.target_language_btn.geometry().center().x(),
                 popup.source_language_btn.geometry().center().x(),
             )
-            popup.chat_btn.click()
+            popup._toggle_chat_panel(True)
             self.app.processEvents()
             popup._speech_available = True
             self.assertFalse(popup.chat_panel.isHidden())
-            self.assertEqual(popup.chat_btn.text(), "اشرح بعمق")
             self.assertEqual(popup.content_splitter.count(), 2)
             self.assertEqual(
                 popup.content_splitter.widget(0), popup.translation_area)
@@ -1762,6 +1120,12 @@ class TestTranslationChat(unittest.TestCase):
                 self.assertEqual(
                     popup.result.toPlainText(), "Current translation")
 
+                live_answer = "This English reply is arriving in full."
+                worker.partial.emit(live_answer)
+                popup._chat_render_timer.stop()
+                popup._render_chat_transcript()
+                self.assertIn(
+                    live_answer, popup.chat_transcript.toPlainText())
                 worker.done.emit("هذا **شرح** للنص.")
                 worker.finished.emit()
             self.app.processEvents()
@@ -1798,9 +1162,27 @@ class TestTranslationChat(unittest.TestCase):
             )
             self.assertEqual(popup.speak_btn.text(), "Read answer")
             self.assertEqual(popup.result.toPlainText(), "Current translation")
-            self.assertEqual(popup.chat_btn.text(), "اشرح بعمق")
             self.assertEqual(popup.chat_send_btn.text(), "Send")
             self.assertTrue(popup.chat_send_btn.isEnabled())
+
+            popup.chat_input.setPlainText("One more question")
+            with mock.patch("popup.translate_popup.ChatWorker", StubChatWorker):
+                popup.chat_send_btn.click()
+                failed_worker = popup._chat_worker
+                failed_worker.partial.emit("An English reply that stopped")
+                popup._chat_render_timer.stop()
+                popup._render_chat_transcript()
+                failed_worker.failed.emit("Provider stopped before completion")
+                failed_worker.finished.emit()
+            self.app.processEvents()
+            self.assertEqual(
+                [message["role"] for message in popup._chat_messages],
+                ["user", "assistant"],
+            )
+            transcript = popup.chat_transcript.toPlainText()
+            self.assertIn("Partial answer", transcript)
+            self.assertIn("An English reply that stopped", transcript)
+            self.assertIn("Provider stopped before completion", transcript)
 
             word_cursor = popup.chat_transcript.document().find("شرح")
             word_rect = popup.chat_transcript.cursorRect(word_cursor)
@@ -1867,31 +1249,10 @@ class TestTranslationChat(unittest.TestCase):
                     explain_mode=False,
                     explain_instructions="Explain musical terms in context.",
                 ))
-            self.assertTrue(popup.chat_btn.isHidden())
+            popup._on_done("Current translation", "Gemini")
+            self.assertFalse(hasattr(popup, "chat_btn"))
             self.assertTrue(popup.chat_panel.isHidden())
-            self.assertFalse(popup.explain_btn.isChecked())
-
-            with (
-                mock.patch(
-                    "popup.translate_popup.load",
-                    return_value=dict(
-                        settings,
-                        explain_instructions="Explain musical terms in context.",
-                    ),
-                ),
-                mock.patch("popup.translate_popup.save") as save_settings,
-                mock.patch(
-                    "popup.translate_popup.TranslateWorker",
-                    StubTranslateWorker,
-                ),
-            ):
-                popup.explain_btn.click()
-            self.assertTrue(popup.explain_btn.isChecked())
-            self.assertIn(
-                "QPushButton#explainModeButton:checked",
-                popup.explain_btn.styleSheet(),
-            )
-            self.assertTrue(save_settings.call_args.args[0]["explain_mode"])
+            self.assertFalse(hasattr(popup, "explain_btn"))
         finally:
             popup.close()
 
@@ -1906,223 +1267,240 @@ class TestTranslationChat(unittest.TestCase):
         editor.show()
         try:
             positions = []
+            backgrounds = []
             editor.positionClicked.connect(positions.append)
+            editor.backgroundClicked.connect(
+                lambda: backgrounds.append(True))
+            self.app.processEvents()
+            cursor = editor.document().find("target")
+            cursor.setPosition(cursor.selectionStart() + 2)
+            word_point = editor.cursorRect(cursor).center()
             QTest.mouseClick(
-                editor.viewport(), Qt.MouseButton.LeftButton,
-                pos=QPoint(20, 10))
+                editor.viewport(), Qt.MouseButton.LeftButton, pos=word_point)
             self.app.processEvents()
             self.assertEqual(len(positions), 1)
             self.assertGreaterEqual(positions[0], 0)
+            self.assertEqual(backgrounds, [])
+            QTest.mouseClick(
+                editor.viewport(), Qt.MouseButton.LeftButton,
+                pos=QPoint(64, 10))
+            self.app.processEvents()
+            self.assertEqual(len(positions), 1)
+            self.assertEqual(backgrounds, [True])
+            QTest.mouseClick(
+                editor.viewport(), Qt.MouseButton.LeftButton,
+                pos=QPoint(300, 90))
+            self.app.processEvents()
+            self.assertEqual(backgrounds, [True, True])
         finally:
             editor.close()
 
-    def test_translation_text_selection_does_not_emit_clicked_position(self):
-        from PySide6.QtCore import QPoint, Qt
+    def test_translation_text_selection_does_not_emit_read_click(self):
+        from PySide6.QtCore import Qt
         from PySide6.QtTest import QTest
         from popup.translate_popup import TranslationTextEdit
 
         editor = TranslationTextEdit()
-        editor.setPlainText("Select some words here")
+        editor.setPlainText("first second third")
         editor.resize(320, 100)
         editor.show()
         try:
             positions = []
+            backgrounds = []
             editor.positionClicked.connect(positions.append)
-            QTest.mousePress(
-                editor.viewport(), Qt.MouseButton.LeftButton,
-                pos=QPoint(8, 10))
-            QTest.mouseMove(editor.viewport(), QPoint(90, 10))
-            QTest.mouseRelease(
-                editor.viewport(), Qt.MouseButton.LeftButton,
-                pos=QPoint(90, 10))
+            editor.backgroundClicked.connect(
+                lambda: backgrounds.append(True))
             self.app.processEvents()
-
+            first = editor.document().find("first")
+            last = editor.document().find("third")
+            start = editor.cursorRect(first).center()
+            end = editor.cursorRect(last).center()
+            QTest.mousePress(
+                editor.viewport(), Qt.MouseButton.LeftButton, pos=start)
+            QTest.mouseMove(editor.viewport(), end, delay=10)
+            QTest.mouseRelease(
+                editor.viewport(), Qt.MouseButton.LeftButton, pos=end)
+            self.app.processEvents()
             self.assertTrue(editor.textCursor().hasSelection())
             self.assertEqual(positions, [])
-
-            QTest.mouseClick(
-                editor.viewport(), Qt.MouseButton.LeftButton,
-                pos=QPoint(20, 10))
-            self.app.processEvents()
-            self.assertEqual(len(positions), 1)
+            self.assertEqual(backgrounds, [])
         finally:
             editor.close()
 
-    def test_translation_text_clicks_distinguish_text_from_empty_area(self):
-        from PySide6.QtCore import QPoint, Qt
-        from PySide6.QtTest import QTest
-        from popup.translate_popup import TranslationTextEdit
-
-        editor = TranslationTextEdit()
-        self.addCleanup(editor.close)
-        editor.setPlainText("text on the first line")
-        editor.resize(320, 180)
-        editor.show()
-        self.app.processEvents()
-        text_clicks = []
-        background_clicks = []
-        editor.positionClicked.connect(text_clicks.append)
-        editor.backgroundClicked.connect(
-            lambda: background_clicks.append(True))
-        cursor = editor.document().find("first")
-        text_point = editor.cursorRect(cursor).center()
-        QTest.mouseClick(
-            editor.viewport(), Qt.MouseButton.LeftButton, pos=text_point)
-        self.app.processEvents()
-        self.assertEqual(len(text_clicks), 1)
-        self.assertEqual(background_clicks, [])
-
-        QTest.mouseClick(
-            editor.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(280, 140))
-        self.app.processEvents()
-        self.assertEqual(len(text_clicks), 1)
-        self.assertEqual(background_clicks, [True])
-
-    def test_translation_background_click_pauses_and_resumes_at_next_word(self):
-        from unittest import mock
-        from PySide6.QtCore import QPoint, Qt
-        from PySide6.QtTest import QTest
-        from config.settings import DEFAULTS
-        from popup.translate_popup import TranslatePopup
-
-        with mock.patch.object(TranslatePopup, "_start_translation_worker"):
-            popup = TranslatePopup(dict(DEFAULTS, target_language="en"))
-        self.addCleanup(popup.close)
-        popup.result.setPlainText("first second third")
-        popup.resize(500, 300)
-        popup.show()
-        self.app.processEvents()
-        popup._speech_available = True
-        popup._speech_active = True
-        popup._speech_index = 0
-        popup._speech_start_offset = 0
-        popup._speech_boundaries = {
-            0: [
-                (0, 10_000_000, 0, 5),
-                (10_000_000, 10_000_000, 6, 12),
-                (20_000_000, 10_000_000, 13, 18),
-            ],
-        }
-        popup._player.position = mock.Mock(return_value=500)
-        popup._highlight_translation_range(6, 12)
-        self.assertEqual(len(popup.result.extraSelections()), 1)
-
-        with (
-            mock.patch.object(popup._player, "stop"),
-            mock.patch.object(popup._player, "setSource"),
-            mock.patch.object(popup, "_request_speech") as request_speech,
-        ):
-            empty_position = (
-                popup.result.viewport().rect().bottomRight() - QPoint(8, 8))
-            QTest.mouseClick(
-                popup.result.viewport(),
-                Qt.MouseButton.LeftButton,
-                pos=empty_position,
-            )
-            self.assertFalse(popup._speech_active)
-            self.assertEqual(popup._speech_start_offset, 6)
-            self.assertEqual(len(popup.result.extraSelections()), 1)
-            QTest.mouseClick(
-                popup.result.viewport(),
-                Qt.MouseButton.LeftButton,
-                pos=empty_position,
-            )
-
-        request_speech.assert_called_once_with(6)
-
-    def test_finished_translation_read_starts_over_on_background_click(self):
-        from unittest import mock
-        from config.settings import DEFAULTS
-        from popup.translate_popup import TranslatePopup
-
-        with mock.patch.object(TranslatePopup, "_start_translation_worker"):
-            popup = TranslatePopup(dict(DEFAULTS, target_language="en"))
-        self.addCleanup(popup.close)
-        popup.result.setPlainText("first second")
-        popup._speech_available = True
-        popup._speech_start_offset = 6
-
-        with (
-            mock.patch.object(popup._player, "stop"),
-            mock.patch.object(popup._player, "setSource"),
-            mock.patch.object(popup, "_close_speech_stream_server"),
-            mock.patch.object(popup, "_clear_speech_files"),
-            mock.patch.object(popup, "_clear_speech_highlight"),
-            mock.patch.object(popup, "_request_speech") as request_speech,
-        ):
-            popup._finish_speech()
-            self.assertEqual(popup._speech_start_offset, 0)
-            popup._on_translation_background_clicked()
-
-        request_speech.assert_called_once_with(0)
-
-    def test_translation_selection_context_menu_offers_explanation_styles(self):
+    def test_translation_context_menu_keeps_explain_actions(self):
         from PySide6.QtGui import QTextCursor
         from popup.translate_popup import TranslationTextEdit
 
         editor = TranslationTextEdit()
-        self.addCleanup(editor.close)
-        editor.setPlainText("Explain this selected phrase")
-        cursor = editor.textCursor()
+        editor.setPlainText("selected translation")
+        cursor = QTextCursor(editor.document())
         cursor.setPosition(0)
-        cursor.setPosition(
-            len("Explain this selected phrase"),
-            QTextCursor.MoveMode.KeepAnchor,
-        )
+        cursor.setPosition(len("selected"), QTextCursor.MoveMode.KeepAnchor)
         editor.setTextCursor(cursor)
+        try:
+            requests = []
+            editor.explainRequested.connect(
+                lambda style, text: requests.append((style, text)))
+            menu = editor.create_context_menu()
+            try:
+                self.assertIn("font-size: 16px", menu.styleSheet())
+                actions = [
+                    action.text().replace("&", "").split("\t", 1)[0]
+                    for action in menu.actions()
+                    if not action.isSeparator()
+                ]
+                self.assertEqual(
+                    actions,
+                    [
+                        "Copy",
+                        "Select All",
+                        "Explain linguistically",
+                        "Explain etymologically",
+                        "Explain simply",
+                        "Explain in context",
+                    ],
+                )
+                explanation_actions = [
+                    action for action in menu.actions()
+                    if action.text().startswith("Explain ")
+                ]
+                self.assertTrue(all(
+                    action.isEnabled() for action in explanation_actions))
+                for action, style in zip(
+                    explanation_actions,
+                    ("linguistic", "etymological", "simple", "context"),
+                ):
+                    action.trigger()
+                    self.assertEqual(requests[-1], (style, "selected"))
+            finally:
+                menu.close()
 
-        menu = editor._create_translation_context_menu()
-        self.addCleanup(menu.deleteLater)
-        actions = {
-            action.text(): action for action in menu.actions()
-            if action.text() != " "
-        }
-        expected_styles = {
-            "Explain linguistically": "linguistic",
-            "Explain simply": "simple",
-            "Explain etymologically": "etymological",
-            "Translate and explain": "translate_and_explain",
-            "Explain in context": "context",
-        }
-        requests = []
-        editor.explainRequested.connect(
-            lambda text, style: requests.append((text, style)))
-        for label, style in expected_styles.items():
-            actions[label].trigger()
-            self.assertEqual(
-                requests[-1], ("Explain this selected phrase", style))
+            editor.moveCursor(QTextCursor.MoveOperation.End)
+            menu = editor.create_context_menu()
+            try:
+                self.assertEqual(
+                    [action.text() for action in menu.actions()
+                     if not action.isSeparator()],
+                    [
+                        "Copy",
+                        "Select All",
+                        "Explain linguistically",
+                        "Explain etymologically",
+                        "Explain simply",
+                        "Explain in context",
+                    ],
+                )
+                self.assertTrue(all(
+                    not action.isEnabled()
+                    for action in menu.actions()
+                    if action.text().startswith("Explain ")
+                ))
+            finally:
+                menu.close()
+        finally:
+            editor.close()
 
-        cursor = editor.textCursor()
-        cursor.clearSelection()
-        editor.setTextCursor(cursor)
-        empty_menu = editor._create_translation_context_menu()
-        self.addCleanup(empty_menu.deleteLater)
-        empty_actions = [action.text() for action in empty_menu.actions()]
-        self.assertFalse(
-            any(label in empty_actions for label in expected_styles))
+    def test_translation_popup_explain_actions_leave_embedded_chat_closed(self):
+        from PySide6.QtGui import QTextCursor
+        from PySide6.QtCore import QObject, Signal
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
 
-    def test_popup_explain_selection_routes_to_standalone_chat(self):
-        from main import MainWindow
+        class StubTranslateWorker(QObject):
+            done = Signal(str, str)
+            stage = Signal(str)
+            failed = Signal(str)
+            source_ready = Signal(str)
+            partial = Signal(str)
+            finished = Signal()
 
-        window = MainWindow()
-        self.addCleanup(window.close)
-        with mock.patch("popup.worker.TranslateWorker.start"):
-            popup = window._show_popup(text="source passage")
-        self.addCleanup(popup.close)
-        popup._translation_text = "ترجمة السياق"
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+                self.translate_secs = 0.0
 
-        popup.explanationSelectionChanged.emit("selected phrase")
-        self.assertTrue(window.chat_panel.explain_button.isEnabled())
-        with mock.patch.object(
-            window.chat_panel, "explain_selection") as explain_selection:
-            popup.explainRequested.emit("selected phrase", "etymological")
+            def start(self):
+                pass
 
-        self.assertEqual(
-            window.chat_panel._translation_context, "ترجمة السياق")
-        self.assertEqual(
-            window.chat_panel._explanation_selection, "selected phrase")
-        self.assertTrue(window._chat_dock_user_visible)
-        explain_selection.assert_called_once_with("etymological")
+            def isRunning(self):
+                return False
+
+        with mock.patch(
+            "popup.translate_popup.TranslateWorker",
+            StubTranslateWorker,
+        ):
+            popup = TranslatePopup(
+                dict(DEFAULTS),
+                source_text="The original passage",
+            )
+        try:
+            popup.result.setPlainText("selected words")
+            cursor = QTextCursor(popup.result.document())
+            cursor.select(QTextCursor.SelectionType.Document)
+            popup.result.setTextCursor(cursor)
+            requests = []
+            popup.explanationRequested.connect(
+                lambda style, text: requests.append((style, text)))
+            menu = popup.result.create_context_menu()
+            try:
+                explain_action = next(
+                    action for action in menu.actions()
+                    if action.text() == "Explain linguistically")
+                explain_action.trigger()
+                self.assertEqual(requests, [
+                    ("linguistic", "selected words"),
+                ])
+            finally:
+                menu.close()
+
+            popup.show()
+            self.app.processEvents()
+            self.assertTrue(popup.chat_panel.isHidden())
+            self.assertEqual(popup.content_splitter.count(), 2)
+            self.assertFalse(popup.content_splitter.widget(1).isVisible())
+            self.assertEqual(popup.layout().indexOf(popup.content_splitter), 1)
+        finally:
+            popup.close()
+
+    def test_chat_transcript_selection_does_not_emit_read_click(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from popup.translate_popup import ChatTranscriptBrowser
+
+        transcript = ChatTranscriptBrowser()
+        transcript.setPlainText("first second third")
+        transcript.resize(320, 100)
+        transcript.show()
+        try:
+            clicked = []
+            transcript.paragraphClicked.connect(clicked.append)
+            self.app.processEvents()
+            first = transcript.document().find("first")
+            first.setPosition(first.selectionStart() + 2)
+            click_point = transcript.cursorRect(first).center()
+            QTest.mousePress(
+                transcript.viewport(), Qt.MouseButton.LeftButton,
+                pos=click_point)
+            self.app.processEvents()
+            self.assertEqual(clicked, [])
+            QTest.mouseRelease(
+                transcript.viewport(), Qt.MouseButton.LeftButton,
+                pos=click_point)
+            self.app.processEvents()
+            self.assertEqual(len(clicked), 1)
+
+            start = transcript.cursorRect(first).center()
+            last = transcript.document().find("third")
+            end = transcript.cursorRect(last).center()
+            QTest.mousePress(
+                transcript.viewport(), Qt.MouseButton.LeftButton, pos=start)
+            QTest.mouseMove(transcript.viewport(), end, delay=10)
+            QTest.mouseRelease(
+                transcript.viewport(), Qt.MouseButton.LeftButton, pos=end)
+            self.app.processEvents()
+            self.assertTrue(transcript.textCursor().hasSelection())
+            self.assertEqual(len(clicked), 1)
+        finally:
+            transcript.close()
 
     def test_speech_prefetch_uses_the_configured_debounce(self):
         from popup.translate_popup import (

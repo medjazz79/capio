@@ -113,7 +113,7 @@ class TestGoogleTranslateOption(unittest.TestCase):
         google.assert_called_once()
         mymemory.assert_called_once()
 
-    def test_translation_failure_reports_both_unavailable_free_services(self):
+    def test_no_glossary_match_is_reported_as_failure_not_translation(self):
         settings = dict(
             DEFAULTS,
             model=registry.GOOGLE_TRANSLATE_MODEL,
@@ -129,7 +129,7 @@ class TestGoogleTranslateOption(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "Could not translate into Arabic",
+                "no matching terms; no translation could be produced",
             ) as caught:
                 chain.translate("SCENE OF THE CRIME", settings)
 

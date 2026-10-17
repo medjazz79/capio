@@ -16,12 +16,10 @@ from .prompt import (
 from .vision import image_system_instructions, image_translation_prompt
 
 TIMEOUT = 12
-CHAT_TIMEOUT = 30
 IMAGE_TIMEOUT = 45
 IMAGE_MAX_OUTPUT_TOKENS = 8192
 TEXT_MIN_OUTPUT_TOKENS = 8192
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
-GOOGLE_SEARCH_TOOL = {"google_search": {}}
 
 # Google answers 503 ("high demand") and 429 (quota) for moments at a time --
 # verified on this key, where a plain retry minutes later succeeded. 400/404
@@ -501,23 +499,48 @@ def _parse(r, model: str) -> str:
     return out
 
 
-def _append_grounding_sources(text: str, metadata: dict | None) -> str:
-    sources = []
-    seen_urls = set()
-    if isinstance(metadata, dict):
-        for chunk in metadata.get("groundingChunks") or []:
-            web = chunk.get("web") if isinstance(chunk, dict) else None
-            if not isinstance(web, dict):
-                continue
-            url = web.get("uri")
-            title = web.get("title") or url
-            if isinstance(url, str) and url.startswith(("https://", "http://")):
-                if url not in seen_urls:
-                    seen_urls.add(url)
-                    sources.append(f"- [{title}]({url})")
+def _grounding_sources(candidate: dict) -> list[tuple[str, str]]:
+    sources: dict[str, str] = {}
+    metadata = candidate.get("groundingMetadata") or {}
+    for chunk in metadata.get("groundingChunks") or []:
+        web = chunk.get("web") if isinstance(chunk, dict) else None
+        if not isinstance(web, dict):
+            continue
+        uri = str(web.get("uri") or "").strip()
+        if uri.startswith(("https://", "http://")):
+            sources.setdefault(uri, str(web.get("title") or uri).strip())
+    return list(sources.items())
+
+
+def _append_grounding_sources(
+    text: str, sources: list[tuple[str, str]],
+) -> str:
     if not sources:
         return text
-    return f"{text.rstrip()}\n\nSources:\n" + "\n".join(sources)
+    lines = "\n".join(
+        f"- [{title}]({uri})" for uri, title in sources)
+    return f"{text.rstrip()}\n\nSources:\n{lines}"
+
+
+def _raise_search_quota_error(response: requests.Response) -> None:
+    if response.status_code != 429:
+        return
+    error_status = ""
+    error_message = ""
+    try:
+        error_data = response.json().get("error", {})
+        error_status = str(error_data.get("status") or "")
+        error_message = str(error_data.get("message") or "")
+    except (ValueError, AttributeError):
+        pass
+    response.close()
+    details = f" {error_status}." if error_status else ""
+    if error_message:
+        details += f" {error_message}"
+    raise RuntimeError(
+        "Google Search request was rejected with HTTP 429."
+        f"{details}"
+    )
 
 
 def chat(
@@ -525,6 +548,8 @@ def chat(
     api_key: str,
     model: str,
     system_prompt: str,
+    *,
+    use_google_search: bool = True,
 ) -> str:
     """Reply to a follow-up conversation using the selected Gemini model."""
     contents = [
@@ -534,124 +559,109 @@ def chat(
         }
         for message in messages
     ]
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": contents,
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
+    }
+    if use_google_search:
+        payload["tools"] = [{"google_search": {}}]
     response = requests.post(
         f"{API_ROOT}/models/{model}:generateContent",
         headers=_auth(api_key),
-        json={
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": contents,
-            "tools": [GOOGLE_SEARCH_TOOL],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
-        },
+        json=payload,
         timeout=TIMEOUT,
     )
+    if use_google_search:
+        _raise_search_quota_error(response)
     response.raise_for_status()
-    text = _parse(response, model)
+    answer = _parse(response, model)
     candidate = response.json()["candidates"][0]
     return _append_grounding_sources(
-        text, candidate.get("groundingMetadata"))
+        answer, _grounding_sources(candidate))
 
 
-def chat_stream(
+def stream_chat(
     messages: list[dict[str, str]],
     api_key: str,
     model: str,
     system_prompt: str,
+    *,
+    use_google_search: bool = True,
 ):
-    """Yield conversational reply text as Gemini generates it."""
-    url = f"{API_ROOT}/models/{model}:streamGenerateContent?alt=sse"
+    """Yield a Gemini chat reply as it arrives, rejecting incomplete replies."""
+    if not messages or messages[-1].get("role") != "user":
+        raise ValueError("A user message is required to ask the model.")
+    contents = [
+        {
+            "role": "model" if message["role"] == "assistant" else "user",
+            "parts": [{"text": message["content"]}],
+        }
+        for message in messages
+    ]
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": [
-            {
-                "role": "model" if item["role"] == "assistant" else "user",
-                "parts": [{"text": item["content"]}],
-            }
-            for item in messages
-        ],
+        "contents": contents,
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 8192,
         },
-        "tools": [GOOGLE_SEARCH_TOOL],
     }
-    for attempt in range(MAX_ATTEMPTS):
-        if attempt:
-            time.sleep(_backoff(attempt))
-        response = None
-        received_text = False
-        try:
-            response = requests.post(
-                url,
-                headers=_auth(api_key),
-                json=payload,
-                timeout=CHAT_TIMEOUT,
-                stream=True,
-            )
-            if response.status_code in RETRY_STATUSES:
-                if attempt + 1 == MAX_ATTEMPTS:
-                    response.raise_for_status()
-                response.close()
-                response = None
+    if use_google_search:
+        payload["tools"] = [{"google_search": {}}]
+    response = requests.post(
+        f"{API_ROOT}/models/{model}:streamGenerateContent?alt=sse",
+        headers=_auth(api_key),
+        json=payload,
+        timeout=TIMEOUT,
+        stream=True,
+    )
+    if use_google_search:
+        _raise_search_quota_error(response)
+    received_text = False
+    finish_reason = None
+    pending_usage = None
+    grounding_sources: dict[str, str] = {}
+    try:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
                 continue
-
-            response.raise_for_status()
-            finish_reason = None
-            pending_usage = None
-            grounding_chunks = []
-            seen_grounding_urls = set()
-            for line in response.iter_lines():
-                if not line:
-                    continue
-                chunk = (
-                    line.decode("utf-8", "replace")
-                    if isinstance(line, bytes) else line
-                )
-                if not chunk.startswith("data:"):
-                    continue
-                try:
-                    event = json.loads(chunk[len("data:"):].strip())
-                    candidate = event["candidates"][0]
-                except (ValueError, KeyError, IndexError, TypeError) as error:
-                    raise RuntimeError(
-                        f"Unexpected streamed reply from Gemini ({model})"
-                    ) from error
-                if event.get("usageMetadata"):
-                    pending_usage = event["usageMetadata"]
-                if candidate.get("groundingMetadata"):
-                    for chunk in (
-                        candidate["groundingMetadata"].get("groundingChunks")
-                        or []
-                    ):
-                        web = chunk.get("web") if isinstance(chunk, dict) else None
-                        url = web.get("uri") if isinstance(web, dict) else None
-                        if url and url not in seen_grounding_urls:
-                            seen_grounding_urls.add(url)
-                            grounding_chunks.append(chunk)
-                if candidate.get("finishReason"):
-                    finish_reason = candidate["finishReason"]
-                content = candidate.get("content") or {}
-                for part in content.get("parts") or []:
-                    delta = part.get("text", "")
-                    if delta:
-                        received_text = True
-                        yield delta
-            if pending_usage:
-                from . import usage as _usage
-
-                _usage.note(model, pending_usage, "gemini")
-            _validate_finish_reason(finish_reason)
-            if not received_text:
+            chunk = (
+                line.decode("utf-8", "replace")
+                if isinstance(line, bytes) else line
+            )
+            if not chunk.startswith("data:"):
+                continue
+            try:
+                event = json.loads(chunk[len("data:"):].strip())
+                candidate = event["candidates"][0]
+            except (ValueError, KeyError, IndexError, TypeError) as error:
                 raise RuntimeError(
-                    f"Gemini returned an empty reply for {model}")
-            sources = _append_grounding_sources(
-                "", {"groundingChunks": grounding_chunks})
-            if sources:
-                yield sources
-            return
-        except requests.exceptions.Timeout:
-            if received_text or attempt + 1 == MAX_ATTEMPTS:
-                raise
-        finally:
-            if response is not None:
-                response.close()
+                    f"Unexpected streamed reply from Gemini ({model})"
+                ) from error
+            if event.get("usageMetadata"):
+                pending_usage = event["usageMetadata"]
+            if candidate.get("finishReason"):
+                finish_reason = candidate["finishReason"]
+            for uri, title in _grounding_sources(candidate):
+                grounding_sources.setdefault(uri, title)
+            content = candidate.get("content") or {}
+            for part in content.get("parts") or []:
+                delta = part.get("text", "")
+                if delta:
+                    received_text = True
+                    yield delta
+    finally:
+        response.close()
+    if pending_usage:
+        from . import usage as _usage
+
+        _usage.note(model, pending_usage, "gemini")
+    _validate_finish_reason(finish_reason)
+    if not received_text:
+        raise RuntimeError(f"Gemini returned an empty chat reply for {model}")
+    if grounding_sources:
+        references = "\n".join(
+            f"- [{title}]({uri})" for uri, title in grounding_sources.items())
+        yield f"\n\nSources:\n{references}"

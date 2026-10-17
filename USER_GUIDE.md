@@ -97,12 +97,11 @@ Works on **both** kinds of PDFs:
 
 ## Use
 
-- Choose source and target languages from the language controls in the
-  translation popup. The source selector includes **Auto** (the default) plus
-  Arabic, French, English, Russian, Italian, Spanish, and German; the target
-  selector offers those seven languages. Choices are remembered. For example,
-  **Auto → Italiano** detects the selected passage's language and translates
-  it into Italian.
+- Use the two toolbar language selectors to choose a source and target. The
+  source selector includes **Auto** (the default) plus Arabic, French, English,
+  Russian, Italian, Spanish, and German; the target selector offers those
+  seven languages. Choices are remembered. For example, **Auto → Italiano**
+  detects the selected passage's language and translates it into Italian.
   Translation prompts for text and images explicitly require the selected
   target language even when the source is **Auto**. Longer model replies are
   checked; a mismatched reply gets one corrective request, and is rejected if
@@ -112,20 +111,19 @@ Works on **both** kinds of PDFs:
   selection. The selected target language is used for both text and OCR
   from scanned pages. Long passages are sent in larger, sentence-aware batches
   to reduce sequential model requests while preserving the full text.
-- Use **Chat** in the main toolbar, between **Pages** and **Settings**, to open
-  a separate chat panel on the right. It uses the selected model and keeps the
-  conversation while the app remains open. Use **Read aloud** to read the
-  latest response, or click a word to read from that word through the end of
-  that response; **Stop** ends playback, and the spoken word is highlighted.
-  Send with **Send** or Enter (Shift+Enter starts a new line); choose
-  **New chat** to clear the conversation. Responses stream into the transcript
-  as the selected model generates them. The Chat panel width and its font size
-  are remembered between launches.
-- Chat automatically receives the most recently completed translated passage,
-  so you can ask follow-up questions about it. It does not receive the original
-  book page or source text. The translation popup remains separate and no
-  longer contains Chat or Explain buttons. The floating translator's
-  **Explain** menu option can still add an explanation below a translation.
+- Use **Explain** in the translation popup (or right-click the floating bubble
+  and choose **Explain**) to ask the selected model to add a concise explanation
+  below each translation, in the target language. The setting is shared and
+  remembered; switch it off for translation only.
+- Use **Chat** beside Explain to ask follow-up questions about the selected
+  passage and its translation. Replies use the selected model; the conversation stays with
+  that popup and does not replace or edit the translation. The reply appears
+  as it is generated. If the provider stops before confirming completion,
+  Capio marks the received text as partial and shows the error instead of
+  treating it as a complete answer. Send a message with **Send** or Ctrl+Enter.
+  Use **»** beside the message field to change and remember reading speed.
+  Drag the blue divider between the translation and chat to resize the chat
+  area.
 - Right-click inside the main window, a page, or a thumbnail to choose
   **Refresh** (reapply saved settings and redraw open pages and thumbnails in
   place) or **ReOpen** (save the open session and restart the app, loading
@@ -161,8 +159,6 @@ Works on **both** kinds of PDFs:
 
 - Main window first opens at **1803×1044, centered**; later launches restore
   the last window size and position.
-- Document tabs have a fixed width; long titles are shortened with an
-  ellipsis. Use the colored **×** on a tab to close it.
 - Translation popup opens at outer frame **(514, 605, 1126, 326)** via Win32
   `SetWindowPos`; after moving or resizing, it remembers the user's chosen
   position and size.
@@ -230,6 +226,9 @@ Works on **both** kinds of PDFs:
   speech engine, voice, and speed controls in every open translation popup.
   Click a word in the translation to start reading from that point. During
   playback, clicking a word seeks within speech audio that is already prepared.
+  Clicking whitespace in the translation toggles playback; stopping this way
+  remembers the current word, and the next whitespace click resumes there.
+  Dragging to select text does not start or seek speech.
   Edge segments
   stream to the player; Gemini segments are returned as WAV files, with
   following segments prepared in the background. Markdown in model
@@ -265,10 +264,6 @@ Works on **both** kinds of PDFs:
   Instructions**; Markdown in model output is rendered automatically, with
   Markdown headings, paragraphs, and musical examples consistently aligned at
   the normal reading edge in both the main reader and floating translator.
-  Pipe-style Markdown tables and ordinary LaTeX `tabular` tables render with
-  visible borders and column alignment. Aligned tables in text-based PDFs are
-  reconstructed as Markdown before translation; **Image** mode sends the
-  rendered full page to a vision model instead of flattening its PDF text.
   Raw LaTeX artifacts trigger
   one corrective translation attempt and are rejected if they persist.
   Translation headings use a compact, consistent size hierarchy around the

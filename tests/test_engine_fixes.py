@@ -1132,33 +1132,6 @@ class TestBadgeNamesTheEngineThatAnswered(unittest.TestCase):
         merged = chain._merge_badges(badges, chosen="gemini-3.5-flash-lite")
         self.assertIn("not your model", merged)
 
-    def test_streaming_403_falls_back_without_retrying_the_blocked_model(self):
-        s = _settings(model="opencode-cli:opencode/space-bunny-free")
-
-        def denied_stream(*_args, **_kwargs):
-            if False:
-                yield ""
-            raise RuntimeError(
-                "403 — free tier blocked for this account")
-
-        with mock.patch(
-            "translators.opencode_cli.stream_translate",
-            side_effect=denied_stream,
-        ) as stream, mock.patch(
-            "translators.opencode_cli.translate",
-        ) as retry, mock.patch(
-            "translators.fallback.gtx_translate",
-            return_value="ترجمة مجانية",
-        ) as free_translation:
-            events = list(chain._stream_single_compatible("source", s))
-
-        self.assertEqual(stream.call_count, 1)
-        retry.assert_not_called()
-        free_translation.assert_called_once()
-        self.assertEqual(events[-1][0], "done")
-        self.assertEqual(events[-1][1], "ترجمة مجانية")
-        self.assertIn("403", events[-1][2])
-
     def test_end_to_end_bridge_page_reports_the_chosen_model_share(self):
         """3 chunks answered by the bridge, 1 by a substitute: the badge must
         count the bridge chunks instead of claiming none used your model."""
@@ -1427,8 +1400,8 @@ class TestGeminiCatalogueCacheIsKeyed(unittest.TestCase):
 
 class TestProbeHintNamesRealSubstitutes(unittest.TestCase):
     """The Settings screen said "If it fails, Gemini (...) translates instead."
-    The chain's fallback ladder is `gtx_translate -> mymemory`; Gemini is never
-    in it."""
+    The chain's fallback ladder is `gtx_translate -> mymemory -> offline
+    glossary`; Gemini is never in it."""
 
     def test_the_hint_names_the_layers_the_chain_actually_uses(self):
         results = probe.probe_all({"model": "space-bunny-free",
@@ -1438,6 +1411,7 @@ class TestProbeHintNamesRealSubstitutes(unittest.TestCase):
         hint = hints[0]
         self.assertNotIn("translates instead", hint)
         self.assertIn("free translation", hint)
+        self.assertIn("glossary", hint)
 
     def test_the_hint_still_names_the_key_and_the_model(self):
         """What the existing test locks in, kept: the user must see which key
@@ -1447,6 +1421,44 @@ class TestProbeHintNamesRealSubstitutes(unittest.TestCase):
         hint = [d for n, _ok, d in results if n == "💡 Hint"][0]
         self.assertIn("Gemini key", hint)
         self.assertIn("space-bunny-free", hint)
+
+
+# --- 7. the offline glossary must be reachable -------------------------------
+
+class TestOfflineGlossaryIsReachable(unittest.TestCase):
+    """`fallback.glossary_partial` returns mostly untranslated source text plus
+    a warning banner, so the Arabic-ratio check failed by construction and the
+    last-resort layer always raised: a hard error instead of the clearly
+    labelled partial output it was written to produce."""
+
+    def test_the_glossary_answers_when_both_free_services_fail(self):
+        s = _settings(model="space-bunny-free")
+        with mock.patch("translators.opencode_bridge.stream",
+                        side_effect=RuntimeError("403")), \
+                mock.patch("translators.opencode_bridge.translate",
+                           side_effect=RuntimeError("403")), \
+                mock.patch("translators.fallback.gtx_translate",
+                           side_effect=ConnectionError("down")), \
+                mock.patch("translators.mymemory.translate",
+                           side_effect=ConnectionError("down")):
+            text, badge = chain.translate(
+                "The dominant resolves to the tonic triad. Каданс.", s)
+        self.assertIn("Translation service unreachable", text)
+        self.assertIn("Offline glossary", badge)
+        self.assertIn("المهيمنة", text)   # the glossary actually replaced a term
+
+    def test_the_glossary_banner_still_names_the_chosen_model(self):
+        s = _settings(model="space-bunny-free")
+        with mock.patch("translators.opencode_bridge.stream",
+                        side_effect=RuntimeError("403")), \
+                mock.patch("translators.opencode_bridge.translate",
+                           side_effect=RuntimeError("403")), \
+                mock.patch("translators.fallback.gtx_translate",
+                           side_effect=ConnectionError("down")), \
+                mock.patch("translators.mymemory.translate",
+                           side_effect=ConnectionError("down")):
+            _text, badge = chain.translate("A cadence in C major.", s)
+        self.assertIn("space-bunny-free", badge)
 
 
 # --- 8. gateway exhaustion must not be retried on the router text path ------
@@ -1496,13 +1508,6 @@ class TestGatewayExhaustionIsNotRetried(unittest.TestCase):
                 opencode_compat.translate(
                     "source", "https://api.groq.com/openai/v1", "k", "m")
         self.assertEqual(post.call_count, opencode_compat.RATE_LIMIT_RETRIES + 1)
-
-    def test_list_error_response_does_not_raise_attribute_error(self):
-        response = mock.Mock()
-        response.headers = {}
-        response.json.return_value = [["unexpected response"]]
-
-        self.assertFalse(opencode_compat._is_gateway_exhaustion(response))
 
 
 # --- 9. the 429 retry loop must not leak responses --------------------------
@@ -1560,17 +1565,13 @@ class TestRateLimitRetryClosesResponses(unittest.TestCase):
                                 msg="a 429 that ends in a raise is still open")
 
 
-# --- 10. valid streamed output is passed through directly --------------------
+# --- 10. streamed output is not blocked by language validation ---------------
 
-class TestStreamingPreservesValidOutput(unittest.TestCase):
-    """Valid streamed output passes through; plain mode corrects wrong output."""
+class TestStreamingDoesNotValidateOutputLanguage(unittest.TestCase):
+    """Streaming passes through; plain mode retains language correction."""
 
     def _events(self):
-        s = _settings(
-            model="mimo-v2.6-flash-free",
-            fast_mode=True,
-            target_language="en",
-        )
+        s = _settings(model="mimo-v2.6-flash-free", fast_mode=True)
         with mock.patch("translators.opencode_bridge.stream",
                         return_value=iter([ENGLISH])), \
                 mock.patch("translators.opencode_bridge.translate",

@@ -60,6 +60,27 @@ _NORDIC_GRAY = {
     "warning": "#EBCB8B",
 }
 
+_PURE_LIGHT = {
+    "window": "#F8FAFC",
+    "toolbar": "#FFFFFF",
+    "panel": "#FFFFFF",
+    "surface": "#F1F5F9",
+    "surface_hover": "#E2E8F0",
+    "canvas": "#F1F5F9",
+    "text": "#0F172A",
+    "muted": "#64748B",
+    "border": "#E2E8F0",
+    "accent": "#2563EB",
+    "accent_hover": "#1D4ED8",
+    "accent_light": "#3B82F6",
+    "selection": "#DBEAFE",
+    "scroll": "#CBD5E1",
+    "scroll_hover": "#94A3B8",
+    "success": "#16A34A",
+    "warning": "#D97706",
+}
+
+
 def _palette(
     *,
     window: str,
@@ -158,14 +179,7 @@ def _family_palettes(
 
 
 THEME_VARIANTS = {
-    "Dark Slate": {
-        **_family_palettes(
-            "#0D1117", "#161B22", "#21262D", "#F0F6FC", "#8B949E",
-            "#30363D", "#4F46E5", "#4338CA", "#6366F1", "#26354A",
-            "#2563EB", "#1D4ED8", "#3B82F6", "#DBEAFE",
-        ),
-        "dark": _DARK_SLATE,
-    },
+    "Dark Slate": {"dark": _DARK_SLATE, "light": _PURE_LIGHT},
     "Midnight Blue": {
         **_family_palettes(
             "#0F172A", "#1E293B", "#334155", "#F8FAFC", "#94A3B8",
@@ -182,6 +196,7 @@ THEME_VARIANTS = {
         ),
         "dark": _NORDIC_GRAY,
     },
+    "Pure Light": {"dark": _DARK_SLATE, "light": _PURE_LIGHT},
     "Amoled": _family_palettes(
         "#000000", "#090909", "#171717", "#F5F5F5", "#A3A3A3",
         "#262626", "#22C55E", "#16A34A", "#4ADE80", "#052E16",
@@ -249,7 +264,10 @@ THEME_VARIANTS = {
     ),
 }
 
-THEMES = {name: variants["dark"] for name, variants in THEME_VARIANTS.items()}
+THEMES = {
+    name: variants["light" if name == "Pure Light" else "dark"]
+    for name, variants in THEME_VARIANTS.items()
+}
 
 
 def system_color_scheme(app=None) -> str:
@@ -302,9 +320,6 @@ def settings_stylesheet(
         QWidget {{
             color: {colors["text"]};
             font-size: 14px;
-        }}
-        QMenu::item {{
-            font-size: 16px;
         }}
         QLabel {{
             color: {colors["text"]};
@@ -627,10 +642,10 @@ def settings_stylesheet(
             font-weight: 600;
         }}
         QCheckBox::indicator {{
-            width: 14px; height: 14px;
-            border: 1.5px solid {colors["accent_light"]};
+            width: 12px; height: 12px;
+            border: 1.5px solid {colors["border"]};
             border-radius: 3px;
-            background-color: {colors["surface_hover"]};
+            background-color: {colors["surface"]};
         }}
         QCheckBox::indicator:hover {{
             border-color: {colors["accent_light"]};

@@ -13,10 +13,7 @@ import json
 import re
 import threading
 
-from PySide6.QtCore import (
-    QCoreApplication, QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer,
-    Signal,
-)
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
@@ -296,10 +293,7 @@ class _ModelPickerDelegate(QStyledItemDelegate):
 
 def _is_free_model(model: str) -> bool:
     normalized = model.strip().casefold().rstrip("/")
-    return (
-        normalized.endswith(("-free", ":free", "/free"))
-        or normalized == "opencode-cli:opencode/big-pickle"
-    )
+    return normalized.endswith(("-free", ":free", "/free"))
 
 
 def _normalize_model_favorites(value: object) -> list[str]:
@@ -475,13 +469,6 @@ class _SafeModelComboBox(QComboBox):
 # Main dialog
 # ──────────────────────────────────────────────────────────────────────────────
 
-def destroy_dialog(dialog: QDialog) -> None:
-    """Synchronously delete a completed dialog and its child widget tree."""
-    dialog.deleteLater()
-    QCoreApplication.sendPostedEvents(
-        dialog, QEvent.Type.DeferredDelete)
-
-
 class SettingsDialog(QDialog):
     probeDone = Signal(list)
     verifyDone = Signal()
@@ -513,8 +500,6 @@ class SettingsDialog(QDialog):
         self._auto_fetch_in_progress: set[str] = set()
         self._auto_fetch_last: dict[str, tuple[str, str]] = {}
         self._settings.setdefault("color_scheme", "system")
-        if self._settings.get("theme") not in THEMES:
-            self._settings["theme"] = "Dark Slate"
         self.setStyleSheet(settings_stylesheet(
             self._settings.get("theme", "Dark Slate"),
             self._settings.get("color_scheme", "system"),
@@ -872,6 +857,10 @@ class SettingsDialog(QDialog):
         if not isinstance(theme, str) or theme not in THEMES:
             return
         self._settings["theme"] = theme
+        if theme == "Pure Light":
+            self._settings["color_scheme"] = "light"
+            self.color_scheme_combo.setCurrentIndex(
+                self.color_scheme_combo.findData("light"))
         self._apply_theme_style()
 
     def _on_color_scheme_changed(self, _idx: int) -> None:
@@ -879,6 +868,10 @@ class SettingsDialog(QDialog):
         if scheme not in ("system", "dark", "light"):
             return
         self._settings["color_scheme"] = scheme
+        if scheme == "dark" and self._settings.get("theme") == "Pure Light":
+            self._settings["theme"] = "Dark Slate"
+            self.header_theme_combo.setCurrentIndex(
+                self.header_theme_combo.findData("Dark Slate"))
         self._apply_theme_style()
 
     def _apply_theme_style(self) -> None:
@@ -987,8 +980,7 @@ class SettingsDialog(QDialog):
         self.model_image_badge.setMinimumHeight(34)
         self.z_refresh = QPushButton("⟳")
         self.z_refresh.setObjectName("iconBtn")
-        self.z_refresh.setToolTip(
-            "Reload Gemini, provider, and current OpenCode CLI free-model lists")
+        self.z_refresh.setToolTip("Reload Gemini, OpenCode Zen, and OpenCode CLI model lists")
         self.z_refresh.setFixedSize(38, 38)
         self.z_refresh.clicked.connect(self._refresh_zen_models)
 
@@ -1467,6 +1459,8 @@ class SettingsDialog(QDialog):
             self._show_plain_results()
 
     def _build_general_group(self) -> QWidget:
+        from translators.prompt import LANGUAGE_CHOICES
+
         s = self._settings
         outer = QWidget()
         lay = QVBoxLayout(outer)
@@ -1495,31 +1489,27 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Selection Reading", self.selection_mode)
 
-        from translators.prompt import LANGUAGE_CHOICES
-
         self.chat_reply_language = QComboBox()
-        self.chat_reply_language.setObjectName("chatReplyLanguage")
-        for label, language_code in LANGUAGE_CHOICES:
-            self.chat_reply_language.addItem(label, language_code)
-        configured_reply_language = self.chat_reply_language.findData(
-            s.get("chat_reply_language", s.get("target_language", "ar")))
+        for language_name, language_code in LANGUAGE_CHOICES:
+            self.chat_reply_language.addItem(language_name, language_code)
+        reply_language = s.get("chat_reply_language", "ar")
+        reply_language_index = self.chat_reply_language.findData(
+            reply_language)
         self.chat_reply_language.setCurrentIndex(
-            max(0, configured_reply_language))
+            max(0, reply_language_index))
+        self.chat_reply_language.setEnabled(
+            bool(s.get("chat_reply_language_only", False)))
+        self.chat_reply_language.setToolTip(
+            "Choose the language Chat should use when the option below is enabled."
+        )
+        form.addRow("Chat Reply Language", self.chat_reply_language)
+
         self.chat_reply_language_only = QCheckBox(
-            "Reply only in this language")
-        self.chat_reply_language_only.setObjectName(
-            "chatReplyLanguageOnly")
+            "Force Chat replies to use this language")
         self.chat_reply_language_only.setChecked(
             bool(s.get("chat_reply_language_only", False)))
-        self.chat_reply_language_only.setToolTip(
-            "When enabled, Chat replies must use only the selected language, "
-            "regardless of the translation language or the language of your "
-            "question.")
-        self.chat_reply_language.setEnabled(
-            self.chat_reply_language_only.isChecked())
         self.chat_reply_language_only.toggled.connect(
             self.chat_reply_language.setEnabled)
-        form.addRow("Chat Response Language", self.chat_reply_language)
         form.addRow("", self.chat_reply_language_only)
 
         lay.addWidget(app_card)
@@ -3648,12 +3638,7 @@ class SettingsDialog(QDialog):
         def display_model(label: str) -> tuple[str, str]:
             is_cli_model = label.startswith(registry.OPENCODE_CLI_PREFIX)
             is_custom = label.startswith(registry.CUSTOM_PROVIDER_PREFIX)
-            display = label
-            if is_cli_model:
-                model_id = label[len(registry.OPENCODE_CLI_PREFIX):]
-                if model_id.startswith("opencode/"):
-                    model_id = model_id[len("opencode/"):]
-                display = f"⌘ {model_id}"
+            display = (f"⌘ {label[len(registry.OPENCODE_CLI_PREFIX):]}" if is_cli_model else label)
             if registry.provider_of(label) == "google_translate":
                 display = "🌐 Google Translate"
             provider_label = ""
@@ -3771,12 +3756,7 @@ class SettingsDialog(QDialog):
             from translators import registry
             is_cli_model = current.startswith(registry.OPENCODE_CLI_PREFIX)
             is_custom = current.startswith(registry.CUSTOM_PROVIDER_PREFIX)
-            display = current
-            if is_cli_model:
-                model_id = current[len(registry.OPENCODE_CLI_PREFIX):]
-                if model_id.startswith("opencode/"):
-                    model_id = model_id[len("opencode/"):]
-                display = f"⌘ {model_id}"
+            display = (f"⌘ {current[len(registry.OPENCODE_CLI_PREFIX):]}" if is_cli_model else current)
             if is_custom:
                 display = f"🔧 {registry.custom_provider_label(current, self._credentials())}"
             self.z_model.addItem(display, current)
@@ -3968,10 +3948,7 @@ class SettingsDialog(QDialog):
             return
         if not self._live_cli:
             return
-        from translators import opencode_cli
-        models = opencode_cli.free_models(self._live_cli)
-        if not models:
-            return
+        models = list(self._live_cli)
         snapshot = self._settings
 
         def job():

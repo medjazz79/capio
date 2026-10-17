@@ -74,7 +74,30 @@ def translate(
     return out
 
 
-def _stream_response(payload: dict, model: str):
+def stream_chat(
+    messages: list[dict[str, str]],
+    model: str,
+    system_prompt: str,
+):
+    """Yield OpenCode Zen chat deltas."""
+    if not messages or messages[-1].get("role") != "user":
+        raise ValueError("A user message is required to ask the model.")
+    user_text = messages[-1]["content"]
+    yield from _stream_response({
+        "model": model,
+        "temperature": 0.3,
+        "max_tokens": max(
+            8192, output_token_budget(user_text, minimum=4096)),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            *messages,
+        ],
+    }, model, require_completion=True)
+
+
+def _stream_response(
+    payload: dict, model: str, require_completion: bool = False,
+):
     response = requests.post(
         f"{BASE}/chat/completions",
         json={**payload, "stream": True},
@@ -83,6 +106,7 @@ def _stream_response(payload: dict, model: str):
     )
     received_text = False
     truncated = False
+    finish_reason = None
     try:
         if response.status_code != 200:
             response.raise_for_status()
@@ -106,6 +130,8 @@ def _stream_response(payload: dict, model: str):
                 ) from error
             if choice.get("finish_reason") == "length":
                 truncated = True
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
             delta = choice.get("delta") or {}
             text = delta.get("content") or delta.get("reasoning_content") or ""
             if isinstance(text, list):
@@ -118,6 +144,9 @@ def _stream_response(payload: dict, model: str):
         if truncated:
             raise RuntimeError(
                 "OpenCode Zen reply was cut off — try a shorter selection")
+        if require_completion and finish_reason != "stop":
+            raise RuntimeError(
+                f"OpenCode Zen chat stream ended before completion ({model})")
         if not received_text:
             raise RuntimeError(f"OpenCode Zen returned an empty reply for {model}")
     finally:
@@ -241,16 +270,3 @@ def chat(
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError(f"OpenCode returned an empty chat reply for {model}")
     return content.strip()
-
-
-def chat_stream(messages: list[dict[str, str]], model: str, system_prompt: str):
-    """Yield conversational text deltas from OpenCode Zen."""
-    yield from _stream_response({
-        "model": model,
-        "temperature": 0.3,
-        "max_tokens": 4096,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            *messages,
-        ],
-    }, model)

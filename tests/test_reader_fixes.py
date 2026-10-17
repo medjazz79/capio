@@ -41,13 +41,6 @@ def _pump(app, predicate, timeout=5.0):
     return predicate()
 
 
-def _thumbnail_spawn_probe(output_queue):
-    import pymupdf
-    import sys
-
-    output_queue.put((sys.prefix, pymupdf.__file__))
-
-
 # ---------------------------------------------------------------------------
 # Defect 1 + 4: retired thumbnail workers must outlive the panel, and
 # clear_document() must not block the GUI thread.
@@ -763,74 +756,6 @@ class TestThumbnailQueueDrain(unittest.TestCase):
     def setUp(self):
         self.app = _app()
 
-    def test_thumbnail_processes_use_windowless_venv_python(self):
-        from unittest import mock
-        from reader import thumbnails
-
-        processes = [mock.Mock(), mock.Mock()]
-        observed = []
-        pythonw = Path(thumbnails.sys._base_executable).with_name("pythonw.exe")
-        original_launcher = os.environ.get("__PYVENV_LAUNCHER__")
-        try:
-            with (
-                mock.patch.object(
-                    thumbnails.Path, "is_file", return_value=True),
-                mock.patch.object(
-                    thumbnails.multiprocessing.spawn,
-                    "get_executable",
-                    return_value=b"previous-python.exe",
-                ),
-                mock.patch.object(
-                    thumbnails.multiprocessing,
-                    "set_executable",
-                ) as set_executable,
-            ):
-                for process in processes:
-                    process.start.side_effect = lambda: observed.append(
-                        (os.environ.get("__PYVENV_LAUNCHER__"),))
-                thumbnails._start_thumbnail_processes(processes)
-
-            set_executable.assert_any_call(os.fsencode(pythonw))
-            set_executable.assert_any_call(b"previous-python.exe")
-            self.assertEqual(
-                observed,
-                [(thumbnails.sys.executable,), (thumbnails.sys.executable,)],
-            )
-            self.assertEqual(
-                os.environ.get("__PYVENV_LAUNCHER__"), original_launcher)
-            for process in processes:
-                process.start.assert_called_once_with()
-        finally:
-            if original_launcher is None:
-                os.environ.pop("__PYVENV_LAUNCHER__", None)
-            else:
-                os.environ["__PYVENV_LAUNCHER__"] = original_launcher
-
-    def test_windowless_thumbnail_process_keeps_venv_dependencies(self):
-        import multiprocessing
-        import sys
-
-        from reader.thumbnails import _start_thumbnail_processes
-
-        context = multiprocessing.get_context("spawn")
-        output_queue = context.Queue()
-        process = context.Process(
-            target=_thumbnail_spawn_probe, args=(output_queue,))
-        try:
-            _start_thumbnail_processes([process])
-            child_prefix, pymupdf_path = output_queue.get(timeout=30)
-            process.join(timeout=30)
-            self.assertEqual(process.exitcode, 0)
-            self.assertEqual(Path(child_prefix), Path(sys.prefix))
-            self.assertTrue(
-                Path(pymupdf_path).is_relative_to(Path(sys.prefix)))
-        finally:
-            if process.is_alive():
-                process.terminate()
-                process.join()
-            output_queue.close()
-            output_queue.join_thread()
-
     def test_queue_is_drained_after_the_last_child_exits(self):
         """multiprocessing.Queue has a feeder thread; buffered payloads survive.
 
@@ -1059,19 +984,13 @@ class TestOneOCRBackend(OneOCRTestCase):
         from ocr_providers import oneocr_backend as ob
 
         try:
-            with mock.patch(
-                "subprocess.run",
-                side_effect=FileNotFoundError("powershell"),
-            ) as run:
+            with mock.patch("subprocess.run",
+                            side_effect=FileNotFoundError("powershell")):
                 with self.assertLogs(ob.log, level="WARNING") as captured:
                     self.assertIsNone(ob.find_snipping_dir())
             self.assertTrue(
                 any("powershell" in line for line in captured.output),
                 "the real reason was swallowed: %r" % (captured.output,),
-            )
-            self.assertEqual(
-                run.call_args.kwargs["creationflags"],
-                getattr(ob.subprocess, "CREATE_NO_WINDOW", 0),
             )
         finally:
             ob._dir_cache.clear()
