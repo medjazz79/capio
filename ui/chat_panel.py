@@ -9,7 +9,6 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
-    QKeySequence,
     QMouseEvent,
     QTextCharFormat,
     QTextCursor,
@@ -94,56 +93,6 @@ class ChatTranscriptBrowser(QTextBrowser):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.viewport().setContextMenuPolicy(
             Qt.ContextMenuPolicy.NoContextMenu)
-        self.viewport().installEventFilter(self)
-        self._context_menu = self._create_context_menu()
-        self._copy_action = self._context_menu.actions()[0]
-        self._select_all_action = self._context_menu.actions()[1]
-
-    def eventFilter(self, watched, event) -> bool:
-        if (
-            watched is self.viewport()
-            and event.type() == QEvent.Type.MouseButtonRelease
-            and isinstance(event, QMouseEvent)
-            and event.button() == Qt.MouseButton.RightButton
-        ):
-            self._show_context_menu(event.globalPosition().toPoint())
-            event.accept()
-            return True
-        return super().eventFilter(watched, event)
-
-    def _show_context_menu(self, global_position) -> None:
-        has_text = bool(self.toPlainText().strip())
-        self._copy_action.setEnabled(has_text)
-        self._select_all_action.setEnabled(has_text)
-        self._context_menu.popup(global_position)
-
-    def _create_context_menu(self) -> QMenu:
-        menu = QMenu(self)
-        menu.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
-        copy_action = menu.addAction("Copy")
-        copy_action.setShortcut(QKeySequence.StandardKey.Copy)
-        copy_action.setEnabled(bool(self.toPlainText().strip()))
-        copy_action.triggered.connect(self._copy_chat_text)
-        select_all_action = menu.addAction("Select All")
-        select_all_action.setShortcut(QKeySequence.StandardKey.SelectAll)
-        select_all_action.setEnabled(bool(self.toPlainText().strip()))
-        select_all_action.triggered.connect(self.selectAll)
-        menu.addSeparator()
-        refresh_action = menu.addAction("⟳ Refresh")
-        refresh_action.triggered.connect(self.refreshRequested.emit)
-        reopen_action = menu.addAction("↻ ReOpen")
-        reopen_action.triggered.connect(self.reopenRequested.emit)
-        return menu
-
-    def _copy_chat_text(self) -> None:
-        cursor = self.textCursor()
-        text = (
-            cursor.selectedText()
-            if cursor.hasSelection()
-            else self.toPlainText()
-        )
-        QApplication.clipboard().setText(
-            text.replace("\u2029", "\n").replace("\u2028", "\n"))
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         super().mouseReleaseEvent(event)
@@ -301,6 +250,9 @@ class ChatPanel(QWidget):
         self.input.setPlaceholderText(
             "Ask a question… (Enter to send; Shift+Enter for a new line)")
         self.input.setMinimumHeight(64)
+        self.input.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self.input.viewport().setContextMenuPolicy(
+            Qt.ContextMenuPolicy.NoContextMenu)
         self.input.sendRequested.connect(self.send_message)
         composer.addWidget(self.input, 1)
         self.send_button = QPushButton("Send")
@@ -313,6 +265,8 @@ class ChatPanel(QWidget):
         self.input_splitter.setStretchFactor(1, 0)
         self.input_splitter.setSizes([300, 96])
         layout.addWidget(self.input_splitter, 1)
+        self._context_menu_target: QTextEdit | QPlainTextEdit | None = None
+        self._context_menu = self._create_context_menu()
         self._compact_chat_actions: bool | None = None
         for widget in (
             self, self.transcript, self.transcript.viewport(),
@@ -531,6 +485,19 @@ class ChatPanel(QWidget):
         self._apply_chat_font_size()
 
     def eventFilter(self, watched, event) -> bool:
+        if (
+            watched in (self.transcript.viewport(), self.input.viewport())
+            and event.type() == QEvent.Type.MouseButtonRelease
+            and isinstance(event, QMouseEvent)
+            and event.button() == Qt.MouseButton.RightButton
+        ):
+            self._show_context_menu(
+                self.transcript if watched is self.transcript.viewport()
+                else self.input,
+                event.globalPosition().toPoint(),
+            )
+            event.accept()
+            return True
         if event.type() == QEvent.Type.Wheel and isinstance(event, QWheelEvent):
             if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                 delta = event.angleDelta().y()
@@ -540,6 +507,48 @@ class ChatPanel(QWidget):
                     event.accept()
                     return True
         return super().eventFilter(watched, event)
+
+    def _create_context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        menu.setStyleSheet(
+            "QMenu::item { font-size: 17px; padding: 9px 24px; }")
+        self._copy_context_action = menu.addAction("Copy")
+        self._copy_context_action.triggered.connect(
+            self._copy_context_text)
+        self._select_all_context_action = menu.addAction("Select All")
+        self._select_all_context_action.triggered.connect(
+            self._select_all_context_text)
+        menu.addSeparator()
+        refresh_action = menu.addAction("Refresh")
+        refresh_action.triggered.connect(self.transcript.refreshRequested.emit)
+        reopen_action = menu.addAction("ReOpen")
+        reopen_action.triggered.connect(self.transcript.reopenRequested.emit)
+        return menu
+
+    def _show_context_menu(
+        self,
+        target: QTextEdit | QPlainTextEdit,
+        global_position,
+    ) -> None:
+        self._context_menu_target = target
+        has_text = bool(target.toPlainText().strip())
+        self._copy_context_action.setEnabled(has_text)
+        self._select_all_context_action.setEnabled(has_text)
+        self._context_menu.popup(global_position)
+
+    def _copy_context_text(self) -> None:
+        target = self._context_menu_target
+        if target is None:
+            return
+        cursor = target.textCursor()
+        text = cursor.selectedText() if cursor.hasSelection() else target.toPlainText()
+        QApplication.clipboard().setText(
+            text.replace("\u2029", "\n").replace("\u2028", "\n"))
+
+    def _select_all_context_text(self) -> None:
+        if self._context_menu_target is not None:
+            self._context_menu_target.selectAll()
 
     def _set_chat_font_size(self, size: float) -> None:
         self._chat_font_size = min(30.0, max(8.0, size))

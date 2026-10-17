@@ -491,15 +491,34 @@ class _CtrlWheelThumbsFilter(QObject):
             widget = widget.parentWidget()
         return False
 
+    @staticmethod
+    def _is_chat_context_target(target: QWidget) -> bool:
+        widget = target
+        while widget is not None:
+            if widget.objectName() in ("standaloneChatPanel", "mainChatDock"):
+                return True
+            widget = widget.parentWidget()
+        return False
+
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.ContextMenu:
             target = obj if isinstance(obj, QWidget) else None
+            if target is None or not (
+                target is self._window.tabs.tabBar()
+                or self._is_thumbnail_context_target(target)
+                or self._is_page_canvas_context_target(target)
+                or self._is_chat_context_target(target)
+            ):
+                screen_target = QApplication.widgetAt(event.globalPos())
+                if screen_target is not None:
+                    target = screen_target
             if (
                 target is not None
                 and target.window() is self._window
                 and target is not self._window.tabs.tabBar()
                 and not self._is_thumbnail_context_target(target)
                 and not self._is_page_canvas_context_target(target)
+                and not self._is_chat_context_target(target)
             ):
                 self._window._show_app_context_menu(event.globalPos())
                 return True
@@ -2643,6 +2662,10 @@ class MainWindow(QMainWindow):
             title_layout.addWidget(self._chat_close_button)
             dock.setTitleBarWidget(self._chat_title_bar)
             self._chat_panel = ChatPanel(lambda: self.settings, dock)
+            self._chat_panel.transcript.refreshRequested.connect(
+                self._refresh_application)
+            self._chat_panel.transcript.reopenRequested.connect(
+                self._reopen_application)
             self._chat_panel.setMinimumWidth(0)
             saved_splitter_sizes = self.settings.get(
                 "chat_composer_splitter_sizes")

@@ -11,6 +11,105 @@ class TestTranslationChat(unittest.TestCase):
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_chat_transcript_has_one_plain_large_context_menu(self):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QContextMenuEvent
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QMainWindow, QTabWidget
+        from main import _CtrlWheelThumbsFilter
+        from ui.chat_panel import ChatPanel
+
+        window = QMainWindow()
+        window.tabs = QTabWidget(window)
+        window._show_app_context_menu = mock.Mock()
+        panel = ChatPanel(lambda: {"chat_font_size": 12.0}, window)
+        window.setCentralWidget(panel)
+        panel.resize(400, 300)
+        panel.transcript.setPlainText("Assistant reply")
+        panel.input.setPlainText("User message")
+        window.resize(440, 340)
+        app_filter = _CtrlWheelThumbsFilter(window)
+        self.app.installEventFilter(app_filter)
+        window.show()
+        self.app.processEvents()
+        refresh_requests = []
+        reopen_requests = []
+        panel.transcript.refreshRequested.connect(
+            lambda: refresh_requests.append(True))
+        panel.transcript.reopenRequested.connect(
+            lambda: reopen_requests.append(True))
+        menu = panel._context_menu
+        menu_shown = []
+        menu.aboutToShow.connect(lambda: menu_shown.append(True))
+        try:
+            actions = menu.actions()
+            self.assertEqual(
+                [action.text() for action in actions],
+                ["Copy", "Select All", "", "Refresh", "ReOpen"],
+            )
+            self.assertTrue(all(
+                action.icon().isNull()
+                for action in actions if not action.isSeparator()
+            ))
+            self.assertIn("font-size: 17px", menu.styleSheet())
+            for widget in (panel.transcript, panel.input):
+                self.assertEqual(
+                    widget.contextMenuPolicy(),
+                    Qt.ContextMenuPolicy.NoContextMenu)
+                self.assertEqual(
+                    widget.viewport().contextMenuPolicy(),
+                    Qt.ContextMenuPolicy.NoContextMenu)
+                QTest.mouseClick(
+                    widget.viewport(), Qt.MouseButton.RightButton,
+                    pos=widget.viewport().rect().center())
+                self.app.processEvents()
+                self.assertEqual(len(menu_shown), 1)
+                self.assertIs(panel._context_menu_target, widget)
+                self.assertFalse(window._show_app_context_menu.called)
+                menu.hide()
+                self.app.processEvents()
+                QTest.mouseClick(
+                    widget.viewport(), Qt.MouseButton.LeftButton,
+                    pos=widget.viewport().rect().center())
+                self.app.processEvents()
+                self.assertEqual(len(menu_shown), 1)
+                self.app.sendEvent(
+                    widget.viewport(),
+                    QContextMenuEvent(
+                        QContextMenuEvent.Reason.Mouse,
+                        widget.viewport().rect().center(),
+                        widget.viewport().mapToGlobal(
+                            widget.viewport().rect().center()),
+                    ),
+                )
+                self.app.processEvents()
+                self.assertFalse(window._show_app_context_menu.called)
+                menu.hide()
+                self.app.processEvents()
+                menu_shown.clear()
+
+            for widget, expected_text in (
+                (panel.transcript, "Assistant reply"),
+                (panel.input, "User message"),
+            ):
+                panel._show_context_menu(widget, widget.mapToGlobal(
+                    widget.rect().center()))
+                panel._select_all_context_text()
+                self.assertEqual(
+                    widget.textCursor().selectedText(), expected_text)
+                panel._copy_context_text()
+                self.assertEqual(
+                    self.app.clipboard().text(), expected_text)
+
+            actions[3].trigger()
+            actions[4].trigger()
+            self.assertEqual(refresh_requests, [True])
+            self.assertEqual(reopen_requests, [True])
+        finally:
+            menu.close()
+            self.app.removeEventFilter(app_filter)
+            window.close()
+
     def test_standalone_chat_speed_button_and_resizable_composer(self):
         from PySide6.QtCore import QPoint, Qt
         from PySide6.QtTest import QTest
