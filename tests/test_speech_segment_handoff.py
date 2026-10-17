@@ -11,6 +11,7 @@ Two distinct defects are pinned here:
    resume as soon as the next stream is available.
 """
 import asyncio
+import inspect
 import io
 import os
 import sys
@@ -205,6 +206,64 @@ class TestHandOffKeepsHighlight(unittest.TestCase):
             popup._speech_waiting,
             "the popup must know it is between segments")
 
+    def test_continuous_stream_end_waits_for_worker_instead_of_advancing_segment(self):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        popup = self._popup("first second")
+        popup._speech_active = True
+        popup._speech_index = 0
+        popup._speech_playing_stream_index = 0
+        popup._speech_worker = mock.MagicMock()
+        popup._speech_worker.isRunning.return_value = True
+
+        popup._on_media_status_changed(QMediaPlayer.MediaStatus.EndOfMedia)
+
+        self.assertEqual(popup._speech_index, 0)
+        self.assertTrue(popup._speech_stream_end_pending)
+        self.assertTrue(popup._speech_waiting)
+        self.assertTrue(popup._speech_active)
+
+    def test_complete_continuous_stream_finishes_without_restarting(self):
+        popup = self._popup("first second")
+        popup._speech_active = True
+        popup._speech_start_offset = 0
+        popup._speech_expected_end_offset = 12
+        popup._speech_boundaries_finalized = True
+        popup._speech_boundaries[0] = [
+            (0, 1_000_000, 0, 5),
+            (1_000_000, 1_000_000, 6, 12),
+        ]
+
+        with (
+            mock.patch.object(popup, "_recover_speech_playback") as recover,
+            mock.patch.object(popup, "_finish_speech") as finish,
+        ):
+            popup._resolve_continuous_stream_end()
+
+        finish.assert_called_once_with()
+        recover.assert_not_called()
+
+    def test_truncated_continuous_stream_resumes_from_last_boundary(self):
+        popup = self._popup("first second third")
+        popup._speech_active = True
+        popup._speech_index = 0
+        popup._speech_start_offset = 0
+        popup._speech_expected_end_offset = 18
+        popup._speech_boundaries[0] = [
+            (0, 1_000_000, 0, 5),
+            (1_000_000, 1_000_000, 6, 12),
+        ]
+
+        with (
+            mock.patch.object(popup._player, "position", return_value=200),
+            mock.patch.object(popup, "_begin_speech") as begin,
+            mock.patch.object(popup, "_finish_speech") as finish,
+        ):
+            popup._resolve_continuous_stream_end()
+
+        begin.assert_called_once_with(6)
+        finish.assert_not_called()
+
     def test_ready_segment_resumes_playback_and_highlight(self):
         from PySide6.QtMultimedia import QMediaPlayer
 
@@ -231,6 +290,112 @@ class TestHandOffKeepsHighlight(unittest.TestCase):
         self.assertTrue(
             popup._speech_boundaries.get(popup._speech_index),
             "the new segment must have boundaries for the current index")
+
+    def test_new_word_boundary_refreshes_the_highlight_immediately(self):
+        popup = self._popup("A short speech passage.")
+        popup._speech_active = True
+        popup._speech_index = 0
+
+        with mock.patch.object(popup, "_update_speech_highlight") as update:
+            popup._on_speech_word_boundary_ready(0, (0, 10_000, 0, 1))
+
+        self.assertEqual(popup._speech_boundaries[0], [(0, 10_000, 0, 1)])
+        update.assert_called_once_with()
+
+    def test_playback_recovery_restarts_at_the_current_word_once(self):
+        popup = self._popup("first second third")
+        popup._speech_active = True
+        popup._speech_index = 0
+        popup._speech_start_offset = 0
+        popup._speech_boundaries[0] = [
+            (0, 1_000_000, 0, 5),
+            (1_000_000, 1_000_000, 6, 12),
+            (2_000_000, 1_000_000, 13, 18),
+        ]
+
+        with (
+            mock.patch.object(popup._player, "position", return_value=150),
+            mock.patch.object(popup, "_begin_speech") as begin,
+            mock.patch.object(popup, "_finish_speech") as finish,
+        ):
+            popup._recover_speech_playback("temporary playback failure")
+            begin.assert_called_once_with(6)
+            self.assertEqual(popup._speech_recovery_attempts, 1)
+
+            popup._recover_speech_playback("playback failed again")
+            finish.assert_called_once_with("playback failed again")
+
+    def test_recovery_waits_for_the_current_worker_to_stop(self):
+        popup = self._popup("first second third")
+        popup._speech_active = True
+        popup._speech_index = 0
+        popup._speech_boundaries[0] = [(0, 2_000_000, 0, 5)]
+        popup._speech_worker = mock.MagicMock()
+        popup._speech_worker.isRunning.return_value = True
+
+        with (
+            mock.patch.object(popup._player, "position", return_value=100),
+            mock.patch.object(popup._player, "stop"),
+            mock.patch.object(popup._player, "setSource"),
+            mock.patch.object(popup, "_close_speech_stream_server"),
+            mock.patch.object(popup, "_finish_speech") as finish,
+        ):
+            popup._recover_speech_playback("temporary playback failure")
+            self.assertFalse(popup._speech_active)
+            self.assertEqual(popup._pending_speech_offset, 0)
+            popup._speech_worker.requestInterruption.assert_called_once_with()
+
+            popup._recover_speech_playback("stale player error")
+            finish.assert_not_called()
+
+    def test_failure_from_an_old_worker_does_not_interrupt_new_read(self):
+        popup = self._popup("first second third")
+        current_worker = mock.MagicMock()
+        current_worker.isRunning.return_value = False
+        popup._speech_worker = current_worker
+        popup._speech_active = True
+
+        with (
+            mock.patch.object(popup, "sender", return_value=object()),
+            mock.patch.object(popup, "_recover_speech_playback") as recover,
+        ):
+            popup._on_speech_failed("stale failure")
+
+        self.assertIsNone(popup._speech_error)
+        recover.assert_not_called()
+
+    def test_unexpected_stop_is_ignored_when_media_reaches_end(self):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        popup = self._popup("A short speech passage.")
+        popup._speech_active = True
+        popup._speech_playback_has_started = True
+        popup._player.playbackState = mock.Mock(
+            return_value=QMediaPlayer.PlaybackState.StoppedState)
+        popup._player.mediaStatus = mock.Mock(
+            return_value=QMediaPlayer.MediaStatus.EndOfMedia)
+
+        with mock.patch.object(popup, "_recover_speech_playback") as recover:
+            popup._recover_unexpected_playback_stop()
+
+        recover.assert_not_called()
+
+    def test_unexpected_stop_attempts_recovery(self):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        popup = self._popup("A short speech passage.")
+        popup._speech_active = True
+        popup._speech_playback_has_started = True
+        popup._player.playbackState = mock.Mock(
+            return_value=QMediaPlayer.PlaybackState.StoppedState)
+        popup._player.mediaStatus = mock.Mock(
+            return_value=QMediaPlayer.MediaStatus.BufferedMedia)
+
+        with mock.patch.object(popup, "_recover_speech_playback") as recover:
+            popup._recover_unexpected_playback_stop()
+
+        recover.assert_called_once_with(
+            "Audio playback stopped unexpectedly.")
 
     def test_end_of_speech_still_finishes_cleanly(self):
         from PySide6.QtMultimedia import QMediaPlayer
@@ -272,6 +437,17 @@ class TestSegmentCoordinateSpaces(unittest.TestCase):
             [span for spans in worker._segment_word_spans for span in spans],
             _word_spans(text),
         )
+
+    def test_worker_reports_end_of_last_word_it_will_speak(self):
+        text = "مرحبا hello بالعالم"
+        worker = self._worker(text, target_language="ar")
+        expected_end = max(
+            end
+            for spans in worker._segment_word_spans
+            for _, end in spans
+        )
+
+        self.assertEqual(worker.source_end_offset, expected_end)
 
     def test_every_word_span_belongs_to_a_chunk(self):
         text = ("قبل المواصلة في دراسة علاقة التوافقات بالهارموني الموسيقي، "
@@ -347,6 +523,177 @@ class TestShortFirstSegmentIsExpected(unittest.TestCase):
             len(segments[0]), FIRST_CHUNK_LENGTH + 1,
             "the first segment is deliberately short for fast start")
         self.assertGreater(len(segments[1]), FIRST_CHUNK_LENGTH)
+
+
+class TestStalledPlaybackIsRecovered(unittest.TestCase):
+    """A player can stop advancing without ever emitting an event.
+
+    Every recovery path in the popup is edge-triggered: EndOfMedia, the
+    worker's finished signal, a failed signal, or a transition into
+    StoppedState. When the audio simply stops advancing while the state stays
+    PlayingState, none of those edges fires, so the reading hangs forever with
+    the highlight frozen on the last spoken word and the button still on Stop.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _playing(self, source="first second third"):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        class _Sig:
+            def connect(self, *_a, **_k):
+                pass
+
+            def emit(self, *_a, **_k):
+                pass
+
+        class Stub:
+            def __init__(self, *a, **k):
+                for name in ("stage", "partial", "done", "failed",
+                             "source_ready", "finished"):
+                    setattr(self, name, _Sig())
+
+            def start(self):
+                pass
+
+            def isRunning(self):
+                return False
+
+            def requestInterruption(self):
+                pass
+
+            def cleanup_output(self):
+                pass
+
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        with mock.patch(
+                "popup.translate_popup.TranslateWorker", Stub), \
+                mock.patch("popup.translate_popup.ChatWorker", Stub):
+            popup = TranslatePopup(dict(DEFAULTS, target_language="en"),
+                                   source_text=source)
+        self.addCleanup(popup.close)
+        popup._speech_active = True
+        popup._speech_playback_has_started = True
+        popup._speech_index = 0
+        popup._speech_playing_stream_index = 0
+        popup._speech_boundaries[0] = [
+            (0, 1_000_000, 0, 5),
+            (1_000_000, 1_000_000, 6, 12),
+        ]
+        popup._player.playbackState = mock.Mock(
+            return_value=QMediaPlayer.PlaybackState.PlayingState)
+        popup._player.mediaStatus = mock.Mock(
+            return_value=QMediaPlayer.MediaStatus.BufferedMedia)
+        return popup
+
+    def test_frozen_position_is_recovered(self):
+        popup = self._playing()
+
+        with (
+            mock.patch.object(
+                popup._player, "position", return_value=150),
+            mock.patch("popup.translate_popup.time.monotonic") as clock,
+            mock.patch.object(popup, "_recover_speech_playback") as recover,
+        ):
+            clock.return_value = 0.0
+            popup._check_speech_playback_progress()
+            recover.assert_not_called()
+
+            clock.return_value = 2.0
+            popup._check_speech_playback_progress()
+            recover.assert_not_called()
+
+            # The position never moved, long past any natural pause.
+            clock.return_value = 30.0
+            popup._check_speech_playback_progress()
+
+        recover.assert_called_once_with(
+            "Audio playback stalled before the text was finished.")
+
+    def test_advancing_position_is_left_alone(self):
+        popup = self._playing()
+        position = mock.Mock(return_value=0)
+
+        with (
+            mock.patch.object(popup._player, "position", position),
+            mock.patch("popup.translate_popup.time.monotonic") as clock,
+            mock.patch.object(popup, "_recover_speech_playback") as recover,
+        ):
+            for step in range(6):
+                clock.return_value = float(step) * 30.0
+                position.return_value = step * 500
+                popup._check_speech_playback_progress()
+
+        recover.assert_not_called()
+
+    def test_waiting_between_segments_is_not_mistaken_for_a_stall(self):
+        popup = self._playing()
+        popup._speech_waiting = True
+
+        with (
+            mock.patch.object(
+                popup._player, "position", return_value=150),
+            mock.patch("popup.translate_popup.time.monotonic") as clock,
+            mock.patch.object(popup, "_recover_speech_playback") as recover,
+        ):
+            clock.return_value = 0.0
+            popup._check_speech_playback_progress()
+            clock.return_value = 60.0
+            popup._check_speech_playback_progress()
+
+        recover.assert_not_called()
+
+    def test_paused_player_is_not_mistaken_for_a_stall(self):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        popup = self._playing()
+        popup._player.playbackState = mock.Mock(
+            return_value=QMediaPlayer.PlaybackState.PausedState)
+
+        with (
+            mock.patch.object(
+                popup._player, "position", return_value=150),
+            mock.patch("popup.translate_popup.time.monotonic") as clock,
+            mock.patch.object(popup, "_recover_speech_playback") as recover,
+        ):
+            clock.return_value = 0.0
+            popup._check_speech_playback_progress()
+            clock.return_value = 60.0
+            popup._check_speech_playback_progress()
+
+        recover.assert_not_called()
+
+    def test_inactive_speech_is_never_stall_checked(self):
+        popup = self._playing()
+        popup._speech_active = False
+
+        with (
+            mock.patch.object(
+                popup._player, "position", return_value=150),
+            mock.patch("popup.translate_popup.time.monotonic") as clock,
+            mock.patch.object(popup, "_recover_speech_playback") as recover,
+        ):
+            clock.return_value = 0.0
+            popup._check_speech_playback_progress()
+            clock.return_value = 60.0
+            popup._check_speech_playback_progress()
+
+        recover.assert_not_called()
+
+    def test_watchdog_runs_on_the_highlight_timer(self):
+        """The stall check must share the timer that already polls playback."""
+        from popup import translate_popup
+
+        source = inspect.getsource(
+            translate_popup.TranslatePopup.__init__)
+        self.assertIn(
+            "_check_speech_playback_progress", source,
+            "the progress watchdog must be wired into the highlight timer")
 
 
 if __name__ == "__main__":

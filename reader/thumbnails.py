@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QToolButton, QHBoxLayout, QVBoxLayout,
     QStackedWidget, QWidget, QMenu, QStyledItemDelegate, QStyle,
 )
+from ui.context_menu import style_context_menu
 
 log = logging.getLogger("harmony_translator.reader.thumbnails")
 
@@ -555,11 +556,11 @@ class ThumbPanel(QWidget):
         copy_action.triggered.connect(
             lambda: self.copyPageImageRequested.emit(page_index))
         menu.addSeparator()
-        refresh_action = menu.addAction("⟳ Refresh")
+        refresh_action = menu.addAction("Refresh")
         refresh_action.triggered.connect(self.refreshRequested)
-        reopen_action = menu.addAction("↻ ReOpen")
+        reopen_action = menu.addAction("ReOpen")
         reopen_action.triggered.connect(self.reopenRequested)
-        return menu
+        return style_context_menu(menu)
 
     def _show_bookmarks(self, shown: bool) -> None:
         self.pages.setCurrentWidget(

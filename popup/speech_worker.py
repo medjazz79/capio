@@ -609,6 +609,14 @@ class SpeechWorker(QThread):
         )
         self._source_text = text
         self._source_offset = source_offset
+        self.source_end_offset = source_offset + max(
+            (
+                end
+                for spans in self._segment_word_spans
+                for _, end in spans
+            ),
+            default=0,
+        )
         self._voice = voice
         self._engine = engine
         self._gemini_api_key = gemini_api_key

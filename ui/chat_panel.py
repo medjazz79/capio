@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QWidgetAction,
 )
+from ui.context_menu import style_context_menu
 
 from popup.chat_worker import ChatWorker
 from popup.speech_worker import (
@@ -511,11 +512,15 @@ class ChatPanel(QWidget):
     def _create_context_menu(self) -> QMenu:
         menu = QMenu(self)
         menu.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
-        menu.setStyleSheet(
-            "QMenu::item { font-size: 17px; padding: 9px 24px; }")
         self._copy_context_action = menu.addAction("Copy")
         self._copy_context_action.triggered.connect(
             self._copy_context_text)
+        self._cut_context_action = menu.addAction("Cut")
+        self._cut_context_action.triggered.connect(
+            self._cut_context_text)
+        self._paste_context_action = menu.addAction("Paste")
+        self._paste_context_action.triggered.connect(
+            self._paste_context_text)
         self._select_all_context_action = menu.addAction("Select All")
         self._select_all_context_action.triggered.connect(
             self._select_all_context_text)
@@ -524,7 +529,7 @@ class ChatPanel(QWidget):
         refresh_action.triggered.connect(self.transcript.refreshRequested.emit)
         reopen_action = menu.addAction("ReOpen")
         reopen_action.triggered.connect(self.transcript.reopenRequested.emit)
-        return menu
+        return style_context_menu(menu)
 
     def _show_context_menu(
         self,
@@ -534,6 +539,13 @@ class ChatPanel(QWidget):
         self._context_menu_target = target
         has_text = bool(target.toPlainText().strip())
         self._copy_context_action.setEnabled(has_text)
+        has_selection = target.textCursor().hasSelection()
+        is_editable = target is self.input and not target.isReadOnly()
+        self._cut_context_action.setEnabled(
+            is_editable and has_selection)
+        self._paste_context_action.setEnabled(
+            is_editable
+            and bool(QApplication.clipboard().text()))
         self._select_all_context_action.setEnabled(has_text)
         self._context_menu.popup(global_position)
 
@@ -549,6 +561,26 @@ class ChatPanel(QWidget):
     def _select_all_context_text(self) -> None:
         if self._context_menu_target is not None:
             self._context_menu_target.selectAll()
+
+    def _cut_context_text(self) -> None:
+        target = self._context_menu_target
+        if (
+            target is self.input
+            and target is not None
+            and not target.isReadOnly()
+            and target.textCursor().hasSelection()
+        ):
+            target.cut()
+
+    def _paste_context_text(self) -> None:
+        target = self._context_menu_target
+        if (
+            target is self.input
+            and target is not None
+            and not target.isReadOnly()
+            and bool(QApplication.clipboard().text())
+        ):
+            target.paste()
 
     def _set_chat_font_size(self, size: float) -> None:
         self._chat_font_size = min(30.0, max(8.0, size))

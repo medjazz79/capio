@@ -459,6 +459,7 @@ MAIN_W, MAIN_H = 1803, 1044
 
 
 from ui.settings_dialog import SettingsDialog  # noqa: F401  (re-exported)
+from ui.context_menu import style_context_menu
 
 
 class _CtrlWheelThumbsFilter(QObject):
@@ -1603,13 +1604,13 @@ class MainWindow(QMainWindow):
             return
         pinned = getattr(book, "pinned", False)
         menu = QMenu(self)
-        close_act = menu.addAction("✕ Close tab")
+        close_act = menu.addAction("Close tab")
         others_act = menu.addAction("Close other tabs")
         unpinned_act = menu.addAction("Close unpinned tabs")
         menu.addSeparator()
         pin_act = menu.addAction(
-            "📍 Unpin tab" if pinned else "📌 Pin tab")
-        chosen = menu.exec(bar.mapToGlobal(pos))
+            "Unpin tab" if pinned else "Pin tab")
+        chosen = style_context_menu(menu).exec(bar.mapToGlobal(pos))
         if chosen == pin_act:
             book.pinned = not pinned
             self._apply_pin_title(book)
@@ -1691,15 +1692,15 @@ class MainWindow(QMainWindow):
         copy_text_action.triggered.connect(
             lambda: self.copy_page_text(book, page_index))
         menu.addSeparator()
-        refresh_action = menu.addAction("⟳ Refresh")
+        refresh_action = menu.addAction("Refresh")
         refresh_action.setToolTip(
             "Reapply saved settings and refresh open pages")
         refresh_action.triggered.connect(self._refresh_application)
-        reopen_action = menu.addAction("↻ ReOpen")
+        reopen_action = menu.addAction("ReOpen")
         reopen_action.setToolTip(
             "Restart the application to load updated code and settings")
         reopen_action.triggered.connect(self._reopen_application)
-        return menu
+        return style_context_menu(menu)
 
     def _rotate_book_page(
         self, book: BookView, page_index: int, degrees: int,
@@ -1718,13 +1719,13 @@ class MainWindow(QMainWindow):
 
     def _show_app_context_menu(self, pos) -> None:
         menu = QMenu(self)
-        refresh_action = menu.addAction("⟳  Refresh")
+        refresh_action = menu.addAction("Refresh")
         refresh_action.setToolTip(
             "Reapply saved settings and refresh open pages")
-        reopen_action = menu.addAction("↻  ReOpen")
+        reopen_action = menu.addAction("ReOpen")
         reopen_action.setToolTip(
             "Restart the application to load updated code and settings")
-        selected_action = menu.exec(pos)
+        selected_action = style_context_menu(menu).exec(pos)
         if selected_action == refresh_action:
             self._refresh_application()
         elif selected_action == reopen_action:

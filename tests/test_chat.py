@@ -45,13 +45,20 @@ class TestTranslationChat(unittest.TestCase):
             actions = menu.actions()
             self.assertEqual(
                 [action.text() for action in actions],
-                ["Copy", "Select All", "", "Refresh", "ReOpen"],
+                ["Copy", "Cut", "Paste", "Select All", "",
+                 "Refresh", "ReOpen"],
             )
             self.assertTrue(all(
                 action.icon().isNull()
                 for action in actions if not action.isSeparator()
             ))
-            self.assertIn("font-size: 17px", menu.styleSheet())
+            self.assertEqual(
+                menu.styleSheet(),
+                "QMenu::item { font-size: 17px; padding: 9px 24px; }")
+            self.assertTrue(all(
+                action.shortcut().isEmpty()
+                for action in actions if not action.isSeparator()
+            ))
             for widget in (panel.transcript, panel.input):
                 self.assertEqual(
                     widget.contextMenuPolicy(),
@@ -101,10 +108,44 @@ class TestTranslationChat(unittest.TestCase):
                 self.assertEqual(
                     self.app.clipboard().text(), expected_text)
 
-            actions[3].trigger()
-            actions[4].trigger()
+            actions[5].trigger()
+            actions[6].trigger()
             self.assertEqual(refresh_requests, [True])
             self.assertEqual(reopen_requests, [True])
+
+            self.app.clipboard().setText("Pasted text")
+            panel.transcript.selectAll()
+            panel._show_context_menu(
+                panel.transcript, panel.transcript.mapToGlobal(
+                    panel.transcript.rect().center()))
+            self.assertFalse(actions[1].isEnabled())
+            self.assertFalse(actions[2].isEnabled())
+
+            panel.input.setPlainText("Cut me")
+            panel.input.selectAll()
+            panel._show_context_menu(
+                panel.input, panel.input.mapToGlobal(
+                    panel.input.rect().center()))
+            self.assertTrue(actions[1].isEnabled())
+            self.assertTrue(actions[2].isEnabled())
+            actions[1].trigger()
+            self.assertEqual(panel.input.toPlainText(), "")
+            self.assertEqual(self.app.clipboard().text(), "Cut me")
+
+            self.app.clipboard().setText("Pasted text")
+            panel.input.setPlainText("Replace me")
+            panel.input.selectAll()
+            panel._show_context_menu(
+                panel.input, panel.input.mapToGlobal(
+                    panel.input.rect().center()))
+            actions[2].trigger()
+            self.assertEqual(panel.input.toPlainText(), "Pasted text")
+
+            self.app.clipboard().clear()
+            panel._show_context_menu(
+                panel.input, panel.input.mapToGlobal(
+                    panel.input.rect().center()))
+            self.assertFalse(actions[2].isEnabled())
         finally:
             menu.close()
             self.app.removeEventFilter(app_filter)
@@ -418,6 +459,350 @@ class TestTranslationChat(unittest.TestCase):
         self.assertNotIn("S | D | T", speech)
         self.assertNotIn("```music", speech)
 
+    def test_wrapped_prose_uses_reference_markdown_line_breaks(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QTextDocument
+        from popup.translate_popup import TranslatePopup
+
+        markdown = (
+            "The door of the cabin had been blown to shreds and the roof had been\n"
+            "ripped off, but the occupant still remained inside. The posse left, minus\n"
+            "their quarry."
+        )
+        rendered = TranslatePopup._markdown_with_inline_notation(markdown)
+        self.assertEqual(
+            rendered,
+            "The door of the cabin had been blown to shreds and the roof had been"
+            "\u2028ripped off, but the occupant still remained inside. The posse left, "
+            "minus\u2028their quarry.",
+        )
+
+        document = QTextDocument()
+        document.setTextWidth(600)
+        document.setMarkdown(rendered)
+        document.documentLayout().documentSize()
+        block = document.begin()
+        self.assertEqual(block.layout().lineCount(), 5)
+        self.assertEqual(
+            document.defaultTextOption().alignment(),
+            Qt.AlignmentFlag.AlignLeft,
+        )
+
+        explicit_break = TranslatePopup._markdown_with_inline_notation(
+            "One line.  \nNext line."
+        )
+        self.assertEqual(explicit_break, "One line.  \u2028Next line.")
+        document.setMarkdown(explicit_break)
+        self.assertEqual(document.toPlainText(), "One line.  \nNext line.")
+
+        escaped_break = TranslatePopup._markdown_with_inline_notation(
+            "One line.\\\nNext line."
+        )
+        self.assertEqual(escaped_break, "One line.\\\u2028Next line.")
+
+    def test_markdown_blocks_keep_reference_line_break_handling(self):
+        from popup.translate_popup import TranslatePopup
+
+        markdown = (
+            "This English sentence starts on one line\n"
+            "and continues on the next.\n"
+            "### A heading\n"
+            "- First item\n"
+            "- Second item\n"
+            "This paragraph follows the list\n"
+            "and also wraps normally."
+        )
+        self.assertEqual(
+            TranslatePopup._markdown_with_inline_notation(markdown),
+            markdown,
+        )
+
+        even_backslashes = TranslatePopup._markdown_with_inline_notation(
+            "A literal backslash\\\\\ncontinues the same paragraph."
+        )
+        self.assertEqual(
+            even_backslashes,
+            "A literal backslash\\\\\u2028continues the same paragraph.",
+        )
+
+    def test_english_translation_reflows_wrapped_prose_without_changing_other_languages(self):
+        from PySide6.QtGui import QTextDocument
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        markdown = (
+            "The source paragraph starts here and this translated line is "
+            "relatively short.\n"
+            "The next line continues the same sentence with enough text to "
+            "show\n"
+            "that the right side of the document stays empty even though "
+            "the widget has room."
+        )
+        settings = dict(DEFAULTS, target_language="en")
+        popup = TranslatePopup(settings, source_text=None)
+        try:
+            popup._render_markdown(markdown)
+            english_block = popup.result.document().begin()
+            self.assertEqual(
+                english_block.text(),
+                "The source paragraph starts here and this translated line is "
+                "relatively short. The next line continues the same sentence "
+                "with enough text to show that the right side of the document "
+                "stays empty even though the widget has room.",
+            )
+            self.assertNotIn("\u2028", english_block.text())
+
+            normalized = TranslatePopup._markdown_with_inline_notation(
+                markdown, reflow_soft_line_breaks=True)
+            document = QTextDocument()
+            document.setTextWidth(560)
+            document.setMarkdown(normalized)
+            document.documentLayout().documentSize()
+            widths = [
+                document.begin().layout().lineAt(index).naturalTextWidth()
+                for index in range(document.begin().layout().lineCount())
+            ]
+            self.assertGreaterEqual(max(widths), 520)
+
+            structured_markdown = (
+                "Intro line continues\n"
+                "### Heading\n"
+                "- first item\n"
+                "- second item\n"
+                "After list continues\n"
+                "with another line.\n\n"
+                "Explicit hard break  \n"
+                "next explicit line.\n"
+                "Explicit escaped break\\\n"
+                "next escaped line.\n"
+                "```text\n"
+                "literal\n"
+                "line breaks\n"
+                "```"
+            )
+            self.assertEqual(
+                TranslatePopup._markdown_with_inline_notation(
+                    structured_markdown, reflow_soft_line_breaks=True),
+                "Intro line continues\n"
+                "### Heading\n"
+                "- first item\n"
+                "- second item\n"
+                "After list continues with another line.\n\n"
+                "Explicit hard break  \n"
+                "next explicit line. "
+                "Explicit escaped break\\\n"
+                "next escaped line.\n\n"
+                "```text\n"
+                "literal\n"
+                "line breaks\n"
+                "```\n\n",
+            )
+
+            settings["target_language"] = "ar"
+            popup._render_markdown(markdown)
+            self.assertIn(
+                "\u2028", popup.result.document().begin().text())
+        finally:
+            popup.close()
+
+    def test_reflow_wrapped_prose_joins_only_soft_wraps(self):
+        from popup.translate_popup import reflow_wrapped_prose
+
+        self.assertEqual(
+            reflow_wrapped_prose(
+                "a woman became tired of listening to the incessant barking\n"
+                "of a neighborhood dog near Kingsbury\n"
+                "Run. She bundled up and went outside.\n"
+                "\n"
+                "The woman found two baskets sitting in the snow\n"
+                "behind the Hart Manufacturing building."),
+            "a woman became tired of listening to the incessant barking of a "
+            "neighborhood dog near Kingsbury Run. She bundled up and went "
+            "outside.\n\n"
+            "The woman found two baskets sitting in the snow behind the Hart "
+            "Manufacturing building.",
+        )
+
+        # Blank lines, explicit hard breaks, headings, lists, quotes, tables,
+        # rules, and fenced code all keep their line break.
+        for kept in (
+            "Intro line continues\n### Heading\nafter the heading",
+            "Lead in\n- first item\n- second item",
+            "Lead in\n> quoted line",
+            "Lead in\n| a | b |",
+            "Lead in\n---",
+            "Lead in  \nhard break",
+            "Lead in\\\nescaped break",
+            "Lead in\n    indented literal",
+            "Heading\n===\nbody line",
+            "```text\nliteral\nline breaks\n```",
+        ):
+            with self.subTest(kept=kept):
+                self.assertEqual(reflow_wrapped_prose(kept), kept)
+
+    def test_streamed_english_preview_reflows_wrapped_prose(self):
+        """A page-faithful wrapped answer must not preview as short lines."""
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        markdown = (
+            "to have died as much as three or four weeks earlier. On "
+            "September 25,\n"
+            "1935, he was buried in a potter's field, taking the secret of "
+            "his identity\n"
+            "to his grave. The following morning, exactly a week after his "
+            "family\n"
+            "had last seen him alive, Andrassy was buried in St. Mary's "
+            "Cemetery.\n"
+            "\n"
+            "### MORE VICTIMS\n"
+            "\n"
+            "In the dead of winter on January 26, 1936, a woman became tired "
+            "of\n"
+            "listening to the incessant barking of a neighborhood dog near "
+            "Kingsbury\n"
+            "Run. She bundled up and went outside to investigate."
+        )
+
+        settings = dict(DEFAULTS, target_language="en")
+        popup = TranslatePopup(settings, source_text=None)
+        try:
+            step = max(1, len(markdown) // 12)
+            for end in range(step, len(markdown) + step, step):
+                popup._append_streamed_partial(markdown[:end])
+            preview = popup.result.toPlainText()
+
+            self.assertIn(
+                "a neighborhood dog near Kingsbury Run. She bundled up",
+                preview,
+            )
+            self.assertIn("MORE VICTIMS", preview)
+            self.assertNotIn("\n1935, he was buried", preview)
+            # One block per paragraph, plus the heading's own block.
+            self.assertLessEqual(
+                popup.result.document().blockCount(), 6)
+        finally:
+            popup.close()
+
+    def test_streamed_preview_matches_the_rendered_result(self):
+        from PySide6.QtGui import QTextDocument
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        markdown = (
+            "In the dead of winter on January 26, 1936, a woman became tired "
+            "of\n"
+            "listening to the incessant barking of a neighborhood dog near "
+            "Kingsbury\n"
+            "Run. She bundled up and went outside to investigate."
+        )
+        settings = dict(DEFAULTS, target_language="en")
+        popup = TranslatePopup(settings, source_text=None)
+        try:
+            for end in range(4, len(markdown) + 4, 4):
+                popup._append_streamed_partial(markdown[:end])
+
+            document = QTextDocument()
+            document.setMarkdown(popup._normalize_streamed_markdown(markdown))
+            self.assertEqual(
+                popup.result.toPlainText().strip(),
+                document.toPlainText().strip(),
+            )
+        finally:
+            popup.close()
+
+    def test_streamed_preview_keeps_arabic_line_breaks(self):
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        markdown = "السطر الأول من الفقرة\nيكمل في السطر الثاني."
+        settings = dict(DEFAULTS, target_language="ar")
+        popup = TranslatePopup(settings, source_text=None)
+        try:
+            popup._append_streamed_partial(markdown)
+            self.assertEqual(
+                popup.result.toPlainText().strip(), markdown)
+        finally:
+            popup.close()
+
+    def test_streamed_preview_normalization_grows_by_prefix(self):
+        """Each streamed prefix must extend the previous normalized text."""
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        markdown = (
+            "Lead line one that the model wrapped\n"
+            "onto a second source line\n"
+            "\n"
+            "### A heading\n"
+            "\n"
+            "- first item\n"
+            "- second item\n"
+            "\n"
+            "Trailing prose that the model also wrapped\n"
+            "onto a second line.\n"
+            "\n"
+            "```text\n"
+            "literal\n"
+            "line breaks\n"
+            "```\n"
+        )
+        settings = dict(DEFAULTS, target_language="en")
+        popup = TranslatePopup(settings, source_text=None)
+        try:
+            previous = ""
+            for end in range(1, len(markdown) + 1):
+                current = popup._normalize_streamed_markdown(markdown[:end])
+                self.assertTrue(
+                    current.startswith(previous),
+                    f"{current!r} does not extend {previous!r}",
+                )
+                previous = current
+        finally:
+            popup.close()
+
+    def test_streamed_preview_shows_exactly_the_normalized_text(self):
+        """Character by character streaming must always show the reflowed text."""
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        markdown = (
+            "to have died as much as three or four weeks earlier. On "
+            "September 25,\n"
+            "1935, he was buried in a potter's field, taking the secret of "
+            "his identity\n"
+            "to his grave. The following morning, exactly a week after his "
+            "family\n"
+            "had last seen him alive, Andrassy was buried in St. Mary's "
+            "Cemetery.\n"
+            "\n"
+            "### MORE VICTIMS\n"
+            "\n"
+            "In the dead of winter on January 26, 1936, a woman became tired "
+            "of\n"
+            "listening to the incessant barking of a neighborhood dog near "
+            "Kingsbury\n"
+            "Run. She bundled up and went outside to investigate."
+        )
+        settings = dict(DEFAULTS, target_language="en")
+        popup = TranslatePopup(settings, source_text=None)
+        try:
+            for end in range(1, len(markdown) + 1):
+                partial = markdown[:end]
+                popup._streamed_partial = markdown[:end - 1]
+                popup._streamed_displayed = (
+                    popup._normalize_streamed_markdown(markdown[:end - 1])
+                )
+                popup._append_streamed_partial(partial)
+                with self.subTest(end=end):
+                    self.assertEqual(
+                        popup.result.toPlainText().rstrip("\n"),
+                        popup._normalize_streamed_markdown(
+                            partial).rstrip("\n"),
+                    )
+        finally:
+            popup.close()
+
     def test_speech_adds_a_pause_after_standalone_bold_headings(self):
         from popup.translate_popup import TranslatePopup
 
@@ -537,6 +922,44 @@ class TestTranslationChat(unittest.TestCase):
         self.assertIn("0.72", speech)
         self.assertNotIn("<table", speech)
         self.assertNotIn("| Harmonic |", speech)
+
+    def test_translation_rendering_preserves_table_alignment_in_arabic(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QTextTable
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        markdown = (
+            "| يسار | وسط | يمين |\n"
+            "|:---|:---:|---:|\n"
+            "| أ | ب | ج |"
+        )
+        with mock.patch.object(TranslatePopup, "_start_translation_worker"):
+            popup = TranslatePopup(dict(DEFAULTS, target_language="ar"))
+        try:
+            popup._render_markdown(markdown)
+            tables = [
+                frame
+                for frame in popup.result.document().rootFrame().childFrames()
+                if isinstance(frame, QTextTable)
+            ]
+            self.assertEqual(len(tables), 1)
+            table = tables[0]
+            self.assertEqual((table.rows(), table.columns()), (2, 3))
+            expected = (
+                Qt.AlignmentFlag.AlignLeft,
+                Qt.AlignmentFlag.AlignHCenter,
+                Qt.AlignmentFlag.AlignRight,
+            )
+            for column, alignment in enumerate(expected):
+                cell_block = table.cellAt(
+                    0, column).firstCursorPosition().block()
+                self.assertEqual(
+                    int(cell_block.blockFormat().alignment()) & 0x7,
+                    int(alignment),
+                )
+        finally:
+            popup.close()
 
     def test_pipe_text_inside_fenced_code_is_not_converted_to_a_table(self):
         from PySide6.QtGui import QTextDocument, QTextTable
@@ -1442,7 +1865,14 @@ class TestTranslationChat(unittest.TestCase):
                 lambda style, text: requests.append((style, text)))
             menu = editor.create_context_menu()
             try:
-                self.assertIn("font-size: 16px", menu.styleSheet())
+                self.assertEqual(
+                    menu.styleSheet(),
+                    "QMenu::item { font-size: 17px; padding: 9px 24px; }")
+                self.assertTrue(all(
+                    action.icon().isNull()
+                    and action.shortcut().isEmpty()
+                    for action in menu.actions()
+                    if not action.isSeparator()))
                 actions = [
                     action.text().replace("&", "").split("\t", 1)[0]
                     for action in menu.actions()

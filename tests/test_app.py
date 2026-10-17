@@ -6793,10 +6793,17 @@ class TestReaderZoom(_GuiCase):
                 [action.text() for action in menu.actions()],
                 [
                     "Translate full page", "Extract pages…",
-                    "Delete pages", "Copy page image", "", "⟳ Refresh",
-                    "↻ ReOpen",
+                    "Delete pages", "Copy page image", "", "Refresh",
+                    "ReOpen",
                 ],
             )
+            self.assertEqual(
+                menu.styleSheet(),
+                "QMenu::item { font-size: 17px; padding: 9px 24px; }")
+            self.assertTrue(all(
+                action.icon().isNull() and action.shortcut().isEmpty()
+                for action in menu.actions() if not action.isSeparator()
+            ))
             menu.actions()[1].trigger()
             self.assertEqual(translate_pages, [])
             self.assertEqual(extract_pages, [[1, 2, 3, 4, 5]])
@@ -6808,7 +6815,7 @@ class TestReaderZoom(_GuiCase):
                 [action.text() for action in single_menu.actions()],
                 [
                     "Translate full page", "Extract page…", "Delete page",
-                    "Copy page image", "", "⟳ Refresh", "↻ ReOpen",
+                    "Copy page image", "", "Refresh", "ReOpen",
                 ],
             )
             single_menu.actions()[0].trigger()
@@ -9758,9 +9765,16 @@ class TestSession(_GuiCase):
                     "Copy page image", "", "Add bookmark",
                     "Rotate page left (view only)",
                     "Rotate page right (view only)", "Copy page text",
-                    "", "⟳ Refresh", "↻ ReOpen",
+                    "", "Refresh", "ReOpen",
                 ],
             )
+            self.assertEqual(
+                menu.styleSheet(),
+                "QMenu::item { font-size: 17px; padding: 9px 24px; }")
+            self.assertTrue(all(
+                action.icon().isNull() and action.shortcut().isEmpty()
+                for action in actions if not action.isSeparator()
+            ))
             menu.deleteLater()
         finally:
             try:
