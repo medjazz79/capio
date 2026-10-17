@@ -299,6 +299,60 @@ class TestSpeechStreamBackpressure(unittest.TestCase):
         self.assertEqual(heartbeat_at_release, [True])
 
 
+class TestEdgeTtsRateLimitRetry(unittest.TestCase):
+    def test_rate_limited_edge_handshake_retries_without_replaying_output(self):
+        import asyncio
+        from popup import speech_worker
+
+        class RateLimitedHandshake(Exception):
+            status = 429
+
+        instances = []
+
+        class FakeCommunicate:
+            def __init__(self, *_args, **_kwargs):
+                instances.append(self)
+
+            async def stream(self):
+                if len(instances) == 1:
+                    raise RateLimitedHandshake("429 Invalid response status")
+                yield {"type": "audio", "data": b"audio"}
+
+        async def no_wait(_delay):
+            return None
+
+        with (
+            mock.patch.object(
+                speech_worker, "edge_tts",
+                type("FakeEdgeTTS", (), {"Communicate": FakeCommunicate}),
+            ),
+            mock.patch.object(speech_worker.asyncio, "sleep", no_wait),
+        ):
+            chunks = asyncio.run(collect_edge_chunks(
+                speech_worker._edge_tts_stream_with_retry(
+                    "text", "voice", "+0%")))
+
+        self.assertEqual(len(instances), 2)
+        self.assertEqual(chunks, [{"type": "audio", "data": b"audio"}])
+
+    def test_edge_rate_limit_error_does_not_expose_subscription_key(self):
+        from popup.speech_worker import _safe_speech_error
+
+        message = (
+            "429, message='Invalid response status', "
+            "url='wss://example.test/tts?"
+            "Ocp-Apim-Subscription-Key=private-token&ConnectionId=abc'")
+
+        safe_message = _safe_speech_error(RuntimeError(message))
+
+        self.assertIn("Ocp-Apim-Subscription-Key=[redacted]", safe_message)
+        self.assertNotIn("private-token", safe_message)
+
+
+async def collect_edge_chunks(stream):
+    return [chunk async for chunk in stream]
+
+
 class TestSpeechCache(unittest.TestCase):
     def test_cache_round_trip_checks_audio_pair_and_refreshes_recency(self):
         import tempfile

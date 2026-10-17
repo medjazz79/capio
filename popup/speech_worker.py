@@ -84,6 +84,37 @@ def _install_language_aware_ssml() -> None:
 _install_language_aware_ssml()
 
 
+def _safe_speech_error(error: Exception) -> str:
+    return _EDGE_TTS_SUBSCRIPTION_KEY.sub(
+        r"\1[redacted]", str(error))
+
+
+async def _edge_tts_stream_with_retry(
+    text: str,
+    voice: str,
+    rate: str,
+):
+    """Retry a rate-limited Edge handshake before any stream data is received."""
+    for attempt in range(len(EDGE_TTS_429_RETRY_DELAYS) + 1):
+        communicate = edge_tts.Communicate(
+            text, voice, rate=rate, boundary="WordBoundary")
+        yielded_data = False
+        try:
+            async for chunk in communicate.stream():
+                yielded_data = True
+                yield chunk
+            return
+        except Exception as error:
+            if getattr(error, "status", None) != 429 or yielded_data:
+                raise
+            if attempt == len(EDGE_TTS_429_RETRY_DELAYS):
+                raise RuntimeError(
+                    "Microsoft Edge Read Aloud is temporarily rate-limiting "
+                    "requests (HTTP 429). Wait a little and try again."
+                ) from error
+            await asyncio.sleep(EDGE_TTS_429_RETRY_DELAYS[attempt])
+
+
 ARABIC_VOICE = "fr-FR-VivienneMultilingualNeural"
 AUTOMATIC_SPEECH_VOICES = {
     "ar": "ar-SA-ZariyahNeural",
@@ -109,8 +140,11 @@ CONTINUOUS_FIRST_CHUNK_LENGTH = 240
 MAX_CHUNK_LENGTH = 1200
 MAX_PARALLEL_SEGMENTS = 3
 CONTINUOUS_PREFETCH_SEGMENTS = 2
+EDGE_TTS_429_RETRY_DELAYS = (1.0, 3.0)
 _MP3_BITRATE_BPS = 48_000
 _TICKS_PER_SECOND = 10_000_000
+_EDGE_TTS_SUBSCRIPTION_KEY = re.compile(
+    r"(?i)(Ocp-Apim-Subscription-Key=)[^&\s'\"]+")
 
 DEFAULT_SPEECH_RATE = 1.0
 MIN_SPEECH_RATE = 0.25
@@ -619,7 +653,7 @@ class SpeechWorker(QThread):
             if self._trace is not None:
                 self._trace.mark(
                     "worker_failed", error_type=type(exc).__name__)
-            self.failed.emit(str(exc))
+            self.failed.emit(_safe_speech_error(exc))
         finally:
             if self._fast:
                 _prune_cache()
@@ -995,13 +1029,10 @@ class SpeechWorker(QThread):
                     segment=index,
                     voice=voice,
                 )
-            communicate = edge_tts.Communicate(
-                synthesis_text, voice, rate=self._rate,
-                boundary="WordBoundary"
-            )
             if ssml_language is not None:
                 language_token = _EDGE_TTS_LANGUAGE.set(ssml_language)
-            stream_iterator = communicate.stream().__aiter__()
+            stream_iterator = _edge_tts_stream_with_retry(
+                synthesis_text, voice, self._rate).__aiter__()
             while True:
                 if self.isInterruptionRequested():
                     raise asyncio.CancelledError()
