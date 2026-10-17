@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import multiprocessing.spawn
+import os
+import sys
+import threading
 import time
 from queue import Empty
+from pathlib import Path
 
 from PySide6.QtCore import (
     QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QThread,
@@ -28,6 +33,7 @@ _VIEW_POSITION_ROLE = Qt.ItemDataRole.UserRole + 1
 # list is module level, so it outlives every widget; entries are dropped as soon
 # as the worker really finishes (see _forget_retired_worker).
 _RETIRED_WORKERS: list[QThread] = []
+_SPAWN_CONFIGURATION_LOCK = threading.Lock()
 
 
 def _forget_retired_worker(worker) -> None:
@@ -56,6 +62,40 @@ def _park_retired_worker(worker) -> None:
             "Retired thumbnail worker has no finished signal to re-register",
             exc_info=True,
         )
+
+
+def _start_thumbnail_processes(processes) -> None:
+    if os.name != "nt" or getattr(sys, "frozen", False):
+        for process in processes:
+            process.start()
+        return
+
+    pythonw = Path(sys._base_executable).with_name("pythonw.exe")
+    if not pythonw.is_file():
+        log.warning(
+            "pythonw.exe was not found beside %s; thumbnail workers may "
+            "show console windows", sys._base_executable)
+        for process in processes:
+            process.start()
+        return
+
+    launcher_variable = "__PYVENV_LAUNCHER__"
+    is_venv = sys.prefix != sys.base_prefix
+    with _SPAWN_CONFIGURATION_LOCK:
+        previous_executable = multiprocessing.spawn.get_executable()
+        previous_launcher = os.environ.get(launcher_variable)
+        try:
+            multiprocessing.set_executable(os.fsencode(pythonw))
+            if is_venv:
+                os.environ[launcher_variable] = sys.executable
+            for process in processes:
+                process.start()
+        finally:
+            multiprocessing.set_executable(previous_executable)
+            if previous_launcher is None:
+                os.environ.pop(launcher_variable, None)
+            else:
+                os.environ[launcher_variable] = previous_launcher
 
 
 class _ThumbnailPositionDelegate(QStyledItemDelegate):
@@ -259,8 +299,7 @@ class ThumbWorker(QThread):
 
         self._handle_result = handle
         try:
-            for process in processes:
-                process.start()
+            _start_thumbnail_processes(processes)
             while completed_workers < worker_count:
                 try:
                     result = output_queue.get(timeout=0.1)
