@@ -1301,7 +1301,7 @@ class TranslatePopup(QDialog):
             f"background-color: {colors['panel']}; color: {text}; "
             f"border: 1px solid {border}; }}"
             "QMenu::item:selected { "
-            f"background-color: {colors['selection']}; }}"
+            f"background-color: {colors['selection']}; color: {text}; }}"
         )
         self.result.setStyleSheet(
             "QTextEdit#translationResult { "
@@ -1346,6 +1346,8 @@ class TranslatePopup(QDialog):
             "QMenu { "
             f"background-color: {colors['panel']}; color: {text}; "
             f"border: 1px solid {border}; padding: 2px; }}"
+            "QMenu::item:selected { "
+            f"background-color: {colors['selection']}; color: {text}; }}"
         )
         self._speed_panel.setStyleSheet(
             "QWidget#speechSpeedPanel { "
@@ -2680,6 +2682,7 @@ class TranslatePopup(QDialog):
         self.speed_menu.setStyleSheet(
             "QMenu { background: #f7f8fa; border: 1px solid #d8dde4;"
             " padding: 2px; }"
+            "QMenu::item:selected { background: #fff2a8; color: #222831; }"
         )
         action = QWidgetAction(self.speed_menu)
         action.setDefaultWidget(panel)

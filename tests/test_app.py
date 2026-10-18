@@ -7928,6 +7928,19 @@ class TestReaderZoom(_GuiCase):
         with mock_chain_translate(return_value=("translated", "T")):
             popup = TranslatePopup(settings, source_text="hello")
         try:
+            self.assertIn(
+                "QMenu::item:selected",
+                popup.styleSheet())
+            self.assertIn(
+                "background-color: #fff2a8; color: #222831",
+                popup.styleSheet())
+            self.assertIn(
+                "background-color: #fff2a8; color: #222831",
+                popup.speed_menu.styleSheet())
+            self.assertIn(
+                "color: #222831",
+                popup.page_number_label.styleSheet())
+
             popup._on_done("translated", "T")
             updated = dict(settings)
             updated.update({
