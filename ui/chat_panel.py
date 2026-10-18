@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QMouseEvent,
@@ -86,23 +86,56 @@ def explanation_instruction(style: str) -> str:
 
 class ChatTranscriptBrowser(QTextBrowser):
     textPositionClicked = Signal(int)
+    backgroundPositionClicked = Signal(int)
     refreshRequested = Signal()
     reopenRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._click_start = QPoint()
+        self._click_had_selection = False
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.viewport().setContextMenuPolicy(
             Qt.ContextMenuPolicy.NoContextMenu)
 
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        self._click_start = event.position().toPoint()
+        self._click_had_selection = self.textCursor().hasSelection()
+        super().mousePressEvent(event)
+
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         super().mouseReleaseEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        point = event.position().toPoint()
         if (
-            event.button() == Qt.MouseButton.LeftButton
-            and not self.textCursor().hasSelection()
+            self._click_had_selection
+            or self.textCursor().hasSelection()
+            or (point - self._click_start).manhattanLength()
+            > QApplication.startDragDistance()
+            or self.anchorAt(point)
         ):
-            cursor = self.cursorForPosition(event.position().toPoint())
-            self.textPositionClicked.emit(cursor.position())
+            return
+        document_point = point + QPoint(
+            self.horizontalScrollBar().value(),
+            self.verticalScrollBar().value(),
+        )
+        hit_position = self.document().documentLayout().hitTest(
+            document_point, Qt.HitTestAccuracy.ExactHit)
+        position = self.cursorForPosition(point).position()
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(position)
+        text = cursor.block().text()
+        python_position = qt_to_python_position(
+            text, cursor.positionInBlock())
+        if (
+            hit_position < 0
+            or python_position >= len(text)
+            or text[python_position].isspace()
+        ):
+            self.backgroundPositionClicked.emit(position)
+            return
+        self.textPositionClicked.emit(position)
 
 
 class ChatInputEdit(QPlainTextEdit):
@@ -144,8 +177,10 @@ class ChatPanel(QWidget):
         self._speech_boundaries: dict[int, list[tuple[int, int, int, int]]] = {}
         self._speech_index = 0
         self._speech_document_start: int | None = None
+        self._speech_message_start: int | None = None
         self._speech_text = ""
         self._speech_active = False
+        self._speech_paused = False
         self._speech_rate = normalize_speed(
             self._settings_provider().get("chat_speech_rate"))
         self._speech_highlight_background = QColor("#26354A")
@@ -236,8 +271,13 @@ class ChatPanel(QWidget):
         self.transcript = ChatTranscriptBrowser(self)
         self.transcript.setObjectName("standaloneChatTranscript")
         self.transcript.setOpenExternalLinks(True)
+        self.transcript.setToolTip(
+            "Click a word to read from there; click empty message space "
+            "to read, pause, or resume that message.")
         self.transcript.textPositionClicked.connect(
             self._on_transcript_position_clicked)
+        self.transcript.backgroundPositionClicked.connect(
+            self._on_transcript_background_clicked)
         chat_content_layout.addWidget(self.transcript, 1)
         chat_content_layout.addWidget(self.chat_actions_scroll)
         self.input_splitter.addWidget(chat_content)
@@ -884,7 +924,63 @@ class ChatPanel(QWidget):
     def _on_transcript_position_clicked(self, position: int) -> None:
         self._start_speech_from_position(position)
 
-    def _start_speech_from_position(self, position: int) -> None:
+    def _transcript_message_at_position(self, position: int):
+        document = self.transcript.document()
+        cursor = QTextCursor(document)
+        cursor.setPosition(max(0, min(position, document.characterCount() - 1)))
+        blocks = []
+        block = document.begin()
+        while block.isValid():
+            blocks.append(block)
+            block = block.next()
+
+        markers = {
+            "You": "user",
+            "Chat": "assistant",
+            "Chat (incomplete)": "incomplete",
+            "Error": "error",
+        }
+        clicked_index = cursor.block().blockNumber()
+        marker_index = next(
+            (index for index in range(clicked_index, -1, -1)
+             if blocks[index].text().strip() in markers),
+            None,
+        )
+        if marker_index is None:
+            return None
+        marker = blocks[marker_index]
+        role = markers[marker.text().strip()]
+        content_blocks = []
+        for block in blocks[marker_index + 1:]:
+            if block.text().strip() in markers:
+                break
+            content_blocks.append(block)
+        return role, marker.position(), cursor, content_blocks
+
+    def _on_transcript_background_clicked(self, position: int) -> None:
+        message = self._transcript_message_at_position(position)
+        if message is None:
+            return
+        role, marker_position, content_blocks = (
+            message[0], message[1], message[3])
+        if role not in {"user", "assistant"}:
+            return
+        if not any(block.text().strip() for block in content_blocks):
+            return
+        if (
+            self._speech_active
+            and self._speech_message_start == marker_position
+        ):
+            if self._speech_paused:
+                self._resume_speech()
+            else:
+                self._pause_speech()
+            return
+        self._start_speech_from_position(position, whole_message=True)
+
+    def _start_speech_from_position(
+        self, position: int, *, whole_message: bool = False,
+    ) -> None:
         settings = dict(self._settings_provider())
         engine = str(settings.get("speech_engine", "edge"))
         api_key = str(settings.get("gemini_key") or "")
@@ -894,56 +990,70 @@ class ChatPanel(QWidget):
             return
         self._update_context_notice()
 
-        document = self.transcript.document()
-        cursor = QTextCursor(document)
-        cursor.setPosition(max(0, min(
-            position, document.characterCount() - 1)))
-        blocks = []
-        block = document.begin()
-        while block.isValid():
-            blocks.append(block)
-            block = block.next()
-        clicked_block_index = cursor.block().blockNumber()
-        assistant_marker = next(
-            (index for index in range(clicked_block_index, -1, -1)
-             if blocks[index].text().strip() == "Chat"),
-            None,
-        )
-        if assistant_marker is None or assistant_marker == clicked_block_index:
+        message = self._transcript_message_at_position(position)
+        if message is None:
             return
-        if any(
-            blocks[index].text().strip() in {"You", "Error"}
-            for index in range(assistant_marker + 1, clicked_block_index + 1)
+        role, marker_position, cursor, content_blocks = message
+        if role != "assistant" and not (whole_message and role == "user"):
+            return
+        clicked_block = cursor.block()
+        if not any(
+            block.position() == clicked_block.position()
+            for block in content_blocks
         ):
             return
 
-        message_blocks = []
-        for block in blocks[clicked_block_index:]:
-            if block.text().strip() in {"You", "Chat", "Error"}:
-                break
-            message_blocks.append(block)
-        if not message_blocks:
+        if whole_message:
+            readable_blocks = [
+                block for block in content_blocks if block.text().strip()
+            ]
+            if not readable_blocks:
+                return
+            first_block = readable_blocks[0]
+            first_text = first_block.text()
+            leading_whitespace = len(first_text) - len(first_text.lstrip())
+            speech_text = "\n".join(
+                [first_text[leading_whitespace:]]
+                + [block.text() for block in readable_blocks[1:]]
+            )
+            document_start = (
+                first_block.position()
+                + python_to_qt_position(first_text, leading_whitespace)
+            )
+            start = speech_start_offset(speech_text, 0)
+        else:
+            clicked_text = clicked_block.text()
+            text_position = qt_to_python_position(
+                clicked_text, cursor.positionInBlock())
+            start = speech_start_offset(clicked_text, text_position)
+            if start >= len(clicked_text):
+                return
+            readable_blocks = [
+                clicked_text[start:]
+            ] + [
+                block.text()
+                for block in content_blocks
+                if block.position() > clicked_block.position()
+            ]
+            speech_text = "\n".join(readable_blocks)
+            document_start = (
+                clicked_block.position()
+                + python_to_qt_position(clicked_text, start)
+            )
+        if not speech_text.strip():
             return
-        clicked_text = message_blocks[0].text()
-
-        text_position = qt_to_python_position(
-            clicked_text, cursor.positionInBlock())
-        start = speech_start_offset(clicked_text, text_position)
-        if start >= len(clicked_text):
-            return
-        word_start, word_end = speech_word_span(clicked_text, start)
+        word_start, word_end = speech_word_span(
+            speech_text, speech_start_offset(speech_text, 0))
         self._stop_speech()
-        self._speech_text = "\n".join(
-            [clicked_text[start:]]
-            + [block.text() for block in message_blocks[1:]])
-        self._speech_document_start = (
-            message_blocks[0].position()
-            + python_to_qt_position(clicked_text, start))
+        self._speech_text = speech_text
+        self._speech_document_start = document_start
+        self._speech_message_start = marker_position
         self._speech_index = 0
         self._speech_paths.clear()
         self._speech_boundaries.clear()
         self._speech_active = True
-        self._highlight_speech_range(word_start - start, word_end - start)
+        self._speech_paused = False
+        self._highlight_speech_range(word_start, word_end)
         self._sync_speech_controls()
         self._player.setPlaybackRate(self._speech_rate)
 
@@ -998,7 +1108,7 @@ class ChatPanel(QWidget):
             Path(path).unlink(missing_ok=True)
             return
         self._speech_paths[index] = path
-        if index == self._speech_index:
+        if index == self._speech_index and not self._speech_paused:
             self._play_speech_segment(path)
 
     def _on_speech_word_boundaries(
@@ -1015,6 +1125,7 @@ class ChatPanel(QWidget):
     def _on_speech_media_status_changed(self, status) -> None:
         if (
             not self._speech_active
+            or self._speech_paused
             or status != QMediaPlayer.MediaStatus.EndOfMedia
         ):
             return
@@ -1052,6 +1163,8 @@ class ChatPanel(QWidget):
             worker.cleanup_output()
             self._speech_worker = None
             worker.deleteLater()
+            return
+        if self._speech_paused:
             return
         if not self._speech_active:
             self._speech_worker = None
@@ -1121,10 +1234,35 @@ class ChatPanel(QWidget):
             "Read the latest chat response aloud"
             if available else speech_missing_message(engine))
 
+    def _pause_speech(self) -> None:
+        if not self._speech_active or self._speech_paused:
+            return
+        self._speech_paused = True
+        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
+        self._sync_speech_controls()
+
+    def _resume_speech(self) -> None:
+        if not self._speech_active or not self._speech_paused:
+            return
+        self._speech_paused = False
+        state = self._player.playbackState()
+        if state == QMediaPlayer.PlaybackState.PausedState:
+            self._player.play()
+        elif state != QMediaPlayer.PlaybackState.PlayingState:
+            path = self._speech_paths.get(self._speech_index)
+            if path is not None:
+                self._play_speech_segment(path)
+            elif self._speech_worker is None or not self._speech_worker.isRunning():
+                self._finish_speech()
+        self._sync_speech_controls()
+
     def _stop_speech(self) -> None:
         worker = self._speech_worker
         self._speech_active = False
+        self._speech_paused = False
         self._speech_document_start = None
+        self._speech_message_start = None
         self.transcript.setExtraSelections([])
         self._player.stop()
         self._player.setSource(QUrl())
@@ -1138,7 +1276,9 @@ class ChatPanel(QWidget):
 
     def _finish_speech(self) -> None:
         self._speech_active = False
+        self._speech_paused = False
         self._speech_document_start = None
+        self._speech_message_start = None
         self.transcript.setExtraSelections([])
         self._player.stop()
         self._player.setSource(QUrl())

@@ -421,6 +421,141 @@ class TestTranslationChat(unittest.TestCase):
             panel._worker = None
             panel.close()
 
+    def test_chat_transcript_distinguishes_words_from_empty_message_space(self):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        from ui.chat_panel import ChatTranscriptBrowser
+
+        transcript = ChatTranscriptBrowser()
+        transcript.resize(480, 220)
+        transcript.setMarkdown(
+            "**You**\n\n> Explain: made a statement\n\n---\n\n"
+            "**Chat**\n\nThis is a longer answer from the model."
+        )
+        transcript.show()
+        try:
+            self.app.processEvents()
+            word_positions = []
+            background_positions = []
+            transcript.textPositionClicked.connect(word_positions.append)
+            transcript.backgroundPositionClicked.connect(
+                background_positions.append)
+            phrase = transcript.document().find("statement")
+            phrase.setPosition(phrase.selectionStart() + 3)
+            word_point = transcript.cursorRect(phrase).center()
+            QTest.mouseClick(
+                transcript.viewport(), Qt.MouseButton.LeftButton,
+                pos=word_point)
+            self.app.processEvents()
+            self.assertEqual(len(word_positions), 1)
+            self.assertEqual(background_positions, [])
+
+            phrase = transcript.document().find("Explain:")
+            phrase.setPosition(phrase.selectionStart() + 4)
+            empty_point = QPoint(
+                transcript.viewport().width() - 6,
+                transcript.cursorRect(phrase).center().y(),
+            )
+            QTest.mouseClick(
+                transcript.viewport(), Qt.MouseButton.LeftButton,
+                pos=empty_point)
+            self.app.processEvents()
+            self.assertEqual(len(background_positions), 1)
+            self.assertEqual(len(word_positions), 1)
+        finally:
+            transcript.close()
+
+    def test_empty_message_space_reads_only_clicked_message(self):
+        from ui.chat_panel import ChatPanel
+
+        panel = ChatPanel(lambda: {"speech_rate": 1.0})
+        panel._entries = [
+            ("user", "Explain: selected phrase"),
+            ("assistant", "A complete reply. Another sentence."),
+        ]
+        panel._render()
+        try:
+            with (
+                mock.patch("ui.chat_panel.speech_available", return_value=True),
+                mock.patch("ui.chat_panel.SpeechWorker") as speech_worker_factory,
+            ):
+                worker = mock.Mock()
+                worker.isRunning.return_value = False
+                speech_worker_factory.return_value = worker
+
+                user_position = panel.transcript.document().find(
+                    "Explain:").selectionStart()
+                panel._on_transcript_background_clicked(user_position)
+                self.assertEqual(panel._speech_text, "Explain: selected phrase")
+                self.assertEqual(
+                    speech_worker_factory.call_args.args[0],
+                    "Explain: selected phrase",
+                )
+
+                panel._stop_speech()
+                assistant_position = panel.transcript.document().find(
+                    "A complete").selectionStart()
+                panel._on_transcript_background_clicked(assistant_position)
+                self.assertEqual(
+                    panel._speech_text,
+                    "A complete reply. Another sentence.",
+                )
+                self.assertEqual(
+                    speech_worker_factory.call_args.args[0],
+                    "A complete reply. Another sentence.",
+                )
+
+                panel._stop_speech()
+                word_position = panel.transcript.document().find(
+                    "Another").selectionStart()
+                panel._on_transcript_position_clicked(word_position)
+                self.assertEqual(panel._speech_text, "Another sentence.")
+        finally:
+            panel._stop_speech()
+            panel.close()
+
+    def test_empty_message_click_pauses_and_resumes_current_speech(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtMultimedia import QMediaPlayer
+        from ui.chat_panel import ChatPanel
+
+        panel = ChatPanel(lambda: {"speech_rate": 1.0})
+        panel._entries = [("assistant", "A reply to read aloud.")]
+        panel._render()
+        try:
+            reply = panel.transcript.document().find("A reply")
+            message = panel._transcript_message_at_position(
+                reply.selectionStart())
+            self.assertIsNotNone(message)
+            marker_position = message[1]
+            panel._speech_active = True
+            panel._speech_paused = False
+            panel._speech_message_start = marker_position
+            with (
+                mock.patch.object(
+                    panel._player,
+                    "playbackState",
+                    return_value=QMediaPlayer.PlaybackState.PlayingState,
+                ),
+                mock.patch.object(panel._player, "pause") as pause,
+                mock.patch.object(panel._player, "play") as play,
+            ):
+                panel._on_transcript_background_clicked(
+                    reply.selectionStart())
+                self.assertTrue(panel._speech_paused)
+                pause.assert_called_once_with()
+
+                panel._player.playbackState.return_value = (
+                    QMediaPlayer.PlaybackState.PausedState)
+                panel._on_transcript_background_clicked(
+                    reply.selectionStart())
+                self.assertFalse(panel._speech_paused)
+                play.assert_called_once_with()
+        finally:
+            panel._speech_active = False
+            panel._speech_paused = False
+            panel.close()
+
     def test_all_explain_styles_allow_web_search(self):
         from ui.chat_panel import ChatPanel, explanation_instruction
 
