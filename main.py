@@ -53,7 +53,8 @@ from config.app_log import log_path, setup_logging  # noqa: E402  (needs sys.pat
 
 _fault_log_file = None
 from PySide6.QtCore import (
-    QByteArray, QEvent, QObject, QPoint, QRect, QTimer, QUrl, Qt, Signal,
+    QByteArray, QElapsedTimer, QEvent, QObject, QPoint, QRect, QTimer, QUrl,
+    Qt, Signal,
 )
 from PySide6.QtGui import (
     QAction, QColor, QDesktopServices, QKeySequence, QPainter, QPen,
@@ -639,6 +640,11 @@ class MainWindow(QMainWindow):
         self._automatic_page_reading_page: int | None = None
         self._automatic_page_waiting_for_speech = False
         self._automatic_page_reading_at_end = False
+        self._automatic_page_reading_elapsed = QElapsedTimer()
+        self._automatic_page_reading_time_timer = QTimer(self)
+        self._automatic_page_reading_time_timer.setSingleShot(True)
+        self._automatic_page_reading_time_timer.timeout.connect(
+            self._check_automatic_page_reading_time)
         self._automatic_page_prefetch_worker: TranslateWorker | None = None
         self._automatic_page_prefetch_workers: list[TranslateWorker] = []
         self._automatic_page_prefetch_metadata: dict[
@@ -1686,6 +1692,13 @@ class MainWindow(QMainWindow):
         translate_action = menu.addAction("Translate full page")
         translate_action.triggered.connect(
             lambda: self.translate_page(book, page_index))
+        successive_reading_action = menu.addAction("Successive reading")
+        successive_reading_action.setToolTip(
+            "Translate this page, then read following pages automatically "
+            "using the saved reading settings.")
+        successive_reading_action.triggered.connect(
+            lambda: self.translate_page(
+                book, page_index, successive_reading=True))
         extract_action = menu.addAction("Extract page…")
         extract_action.triggered.connect(
             lambda: self.extract_pages(book, [page_index]))
@@ -2096,6 +2109,7 @@ class MainWindow(QMainWindow):
         self, book: BookView, page_no: int, rect: QRect, force_ocr: bool,
         popup: TranslatePopup | None = None,
         omit_running_header: bool = False,
+        start_automatic_reading: bool = False,
     ) -> None:
         if book is None or not book.has_doc():
             return
@@ -2113,6 +2127,7 @@ class MainWindow(QMainWindow):
                     book=book,
                     page_no=page_no,
                     full_page_translation=omit_running_header,
+                    start_automatic_reading=start_automatic_reading,
                 )
                 return
             popup.set_page_navigation(page_no, book.page_count())
@@ -2172,7 +2187,13 @@ class MainWindow(QMainWindow):
             f"Reading scanned text (OCR), then translating into "
             f"{self.target_combo.currentText()}…")
 
-    def translate_page(self, book: BookView, page_no: int) -> None:
+    def translate_page(
+        self,
+        book: BookView,
+        page_no: int,
+        *,
+        successive_reading: bool = False,
+    ) -> None:
         if not book.has_doc() or not 0 <= page_no < book.page_count():
             return
         self._translate_selection(
@@ -2181,6 +2202,7 @@ class MainWindow(QMainWindow):
             book.page_rect_on_screen(page_no),
             force_ocr=book.page_needs_full_page_ocr(page_no),
             omit_running_header=True,
+            start_automatic_reading=successive_reading,
         )
 
     def _set_automatic_page_reading(
@@ -2188,6 +2210,8 @@ class MainWindow(QMainWindow):
         book: BookView,
         popup: TranslatePopup,
         enabled: bool,
+        *,
+        translate_current: bool = True,
     ) -> None:
         if not enabled:
             if popup is self._automatic_page_reading_popup:
@@ -2210,7 +2234,8 @@ class MainWindow(QMainWindow):
         self._automatic_page_waiting_for_speech = False
         self._automatic_page_reading_at_end = False
         self._cancel_automatic_page_prefetch()
-        self._translate_automatic_page(book, popup, page_no)
+        if translate_current:
+            self._translate_automatic_page(book, popup, page_no)
 
     def _translate_automatic_page(
         self,
@@ -2306,6 +2331,23 @@ class MainWindow(QMainWindow):
                 "is not available.")
             return
         self._automatic_page_waiting_for_speech = True
+        if (
+            not self._automatic_page_reading_time_timer.isActive()
+            and self.settings.get(
+                "automatic_page_reading_time_enabled", False)
+        ):
+            try:
+                duration_minutes = max(
+                    1,
+                    int(self.settings.get(
+                        "automatic_page_reading_time_minutes", 15)),
+                )
+            except (TypeError, ValueError):
+                duration_minutes = 15
+            duration_ms = duration_minutes * 60_000
+            self._automatic_page_reading_elapsed.start()
+            self._automatic_page_reading_time_timer.start(
+                min(duration_ms, 2_147_000_000))
         popup._toggle_speech()
         if self.settings.get("prefetch_next_page_translation", False):
             book = self._automatic_page_reading_book
@@ -2570,6 +2612,7 @@ class MainWindow(QMainWindow):
         next_page = page_no + 1
         if next_page >= book.page_count():
             self._automatic_page_reading_at_end = True
+            self._automatic_page_reading_time_timer.stop()
             self._flash_info(
                 "Automatic page reading reached the end of the book. "
                 "Click the page counter to turn it off.")
@@ -2601,6 +2644,7 @@ class MainWindow(QMainWindow):
 
     def _stop_automatic_page_reading(self) -> None:
         popup = self._automatic_page_reading_popup
+        self._automatic_page_reading_time_timer.stop()
         self._automatic_page_reading_book = None
         self._automatic_page_reading_popup = None
         self._automatic_page_reading_page = None
@@ -2611,6 +2655,31 @@ class MainWindow(QMainWindow):
             popup.set_automatic_page_reading(False)
             if popup._speech_active:
                 popup._toggle_speech()
+
+    def _check_automatic_page_reading_time(self) -> None:
+        if (
+            self._automatic_page_reading_popup is None
+            or not self.settings.get(
+                "automatic_page_reading_time_enabled", False)
+        ):
+            self._automatic_page_reading_time_timer.stop()
+            return
+        try:
+            duration_minutes = max(
+                1,
+                int(self.settings.get(
+                    "automatic_page_reading_time_minutes", 15)),
+            )
+        except (TypeError, ValueError):
+            duration_minutes = 15
+        duration_ms = duration_minutes * 60_000
+        remaining_ms = duration_ms - self._automatic_page_reading_elapsed.elapsed()
+        if remaining_ms > 0:
+            self._automatic_page_reading_time_timer.start(
+                min(remaining_ms, 2_147_000_000))
+            return
+        self._stop_automatic_page_reading()
+        self._flash_info("Automatic page reading stopped after its time limit.")
 
     def _navigate_translation_page(
         self, book: BookView, popup: TranslatePopup, direction: int,
@@ -2727,7 +2796,8 @@ class MainWindow(QMainWindow):
     def _show_popup(self, text: str | None = None, pil_image=None,
                     ocr_langs=("ru", "en"), book: BookView | None = None,
                     page_no: int | None = None,
-                    full_page_translation: bool = False) -> TranslatePopup:
+                    full_page_translation: bool = False,
+                    start_automatic_reading: bool = False) -> TranslatePopup:
         self.popups = [p for p in self.popups if p.isVisible()]
         for p in self.popups:
             if not getattr(p, "_pinned", False):
@@ -2768,6 +2838,14 @@ class MainWindow(QMainWindow):
         popup.usageReported.connect(self._show_model_usage)
         popup.show()
         self.popups.append(popup)
+        if (
+            start_automatic_reading
+            and book is not None
+            and page_no is not None
+        ):
+            popup.set_automatic_page_reading(True)
+            self._set_automatic_page_reading(
+                book, popup, True, translate_current=False)
         return popup
 
     def _explain_popup_selection(

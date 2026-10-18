@@ -5522,33 +5522,61 @@ class TestReaderZoom(_GuiCase):
         self.assertFalse(dialog.speech_read_latin_words.isChecked())
         self.assertFalse(
             dialog.prefetch_next_page_translation.isChecked())
+        self.assertFalse(
+            dialog.automatic_page_reading_time_enabled.isChecked())
+        self.assertEqual(
+            dialog.automatic_page_reading_time_preset.count(), 17)
+        self.assertEqual(
+            dialog.automatic_page_reading_time_custom.text(), "")
 
         for checkbox in (
             dialog.automatic_speech_voice,
             dialog.speech_read_latin_words,
             dialog.prefetch_next_page_translation,
+            dialog.automatic_page_reading_time_enabled,
         ):
             checkbox.blockSignals(True)
             checkbox.setChecked(True)
             checkbox.blockSignals(False)
+        dialog.automatic_page_reading_time_preset.setCurrentIndex(15)
+        self.assertEqual(
+            dialog.values()["automatic_page_reading_time_minutes"], 240)
+        self.assertEqual(
+            dialog.automatic_page_reading_time_display.text(), "4 h")
+        dialog.automatic_page_reading_time_preset.setCurrentIndex(16)
+        dialog.automatic_page_reading_time_custom.setText("70")
         self.assertTrue(dialog.values()["automatic_speech_voice"])
         self.assertTrue(dialog.values()["speech_read_latin_words"])
         self.assertTrue(
             dialog.values()["prefetch_next_page_translation"])
+        self.assertEqual(
+            dialog.values()["automatic_page_reading_time_minutes"], 70)
+        self.assertEqual(
+            dialog.automatic_page_reading_time_display.text(), "1 h 10 min")
 
         dialog.accept()
         self.assertTrue(host.settings["prefetch_next_page_translation"])
+        self.assertTrue(
+            host.settings["automatic_page_reading_time_enabled"])
 
         saved_settings = load()
         self.assertTrue(saved_settings["automatic_speech_voice"])
         self.assertTrue(saved_settings["speech_read_latin_words"])
         self.assertTrue(saved_settings["prefetch_next_page_translation"])
+        self.assertTrue(
+            saved_settings["automatic_page_reading_time_enabled"])
+        self.assertEqual(
+            saved_settings["automatic_page_reading_time_minutes"], 70)
 
         reopened = SettingsDialog(saved_settings)
         self.addCleanup(reopened.close)
         self.assertTrue(reopened.automatic_speech_voice.isChecked())
         self.assertTrue(reopened.speech_read_latin_words.isChecked())
         self.assertTrue(reopened.prefetch_next_page_translation.isChecked())
+        self.assertTrue(
+            reopened.automatic_page_reading_time_enabled.isChecked())
+        self.assertEqual(
+            reopened.automatic_page_reading_time_display.text(), "1 h 10 min")
 
     def test_speech_worker_streams_each_segment_in_order(self):
         from unittest import mock
@@ -9785,13 +9813,18 @@ class TestSession(_GuiCase):
             self.assertEqual(
                 [action.text() for action in actions],
                 [
-                    "Translate full page", "Extract page…", "Delete page",
-                    "Copy page image", "", "Add bookmark",
+                    "Translate full page", "Successive reading",
+                    "Extract page…", "Delete page", "Copy page image", "",
+                    "Add bookmark",
                     "Rotate page left (view only)",
                     "Rotate page right (view only)", "Copy page text",
                     "", "Refresh", "ReOpen",
                 ],
             )
+            with mock.patch.object(window, "translate_page") as translate:
+                actions[1].trigger()
+            translate.assert_called_once_with(
+                book, 1, successive_reading=True)
             self.assertEqual(
                 menu.styleSheet(),
                 "QMenu::item { font-size: 17px; padding: 9px 24px; }")
@@ -11009,7 +11042,7 @@ class TestMemoryZoom(_GuiCase):
 
             def record_page_translation(
                 source_book, page_no, _rect, force_ocr, popup=None,
-                omit_running_header=False,
+                omit_running_header=False, start_automatic_reading=False,
             ):
                 calls.append(
                     (page_no, force_ocr, popup, omit_running_header))
@@ -11060,6 +11093,51 @@ class TestMemoryZoom(_GuiCase):
             self.assertEqual(
                 [page for page, _force_ocr, _popup, _omit in calls],
                 [1, 2, 1])
+        finally:
+            for popup in window.popups:
+                popup.close()
+            window.close()
+
+    def test_context_successive_reading_starts_with_saved_reading_settings(self):
+        from unittest import mock
+        from main import MainWindow
+
+        path = self._make_pdf(
+            "context_successive_reading.pdf", pages=2)
+        window = MainWindow()
+        try:
+            window.settings["prefetch_next_page_translation"] = True
+            window.settings["automatic_page_reading_time_enabled"] = True
+            window.settings["automatic_page_reading_time_minutes"] = 75
+            book = window._add_tab(path)
+            self.assertIsNotNone(book)
+
+            with mock_chain_translate(
+                return_value=("first page translation", "Test")
+            ):
+                window.translate_page(book, 0, successive_reading=True)
+                popup = window.popups[-1]
+                self.assertTrue(popup.page_number_label.isChecked())
+                self.assertIs(window._automatic_page_reading_popup, popup)
+                self.assertEqual(window._automatic_page_reading_page, 0)
+
+                worker = popup._worker
+                self.assertIsNotNone(worker)
+                self.assertTrue(worker.wait(20000))
+                popup._speech_available = True
+                with mock.patch.object(popup, "_toggle_speech") as speak:
+                    self.app.processEvents()
+
+                self.assertEqual(popup._translation_text,
+                                 "first page translation")
+                speak.assert_called_once_with()
+                self.assertTrue(
+                    window._automatic_page_reading_time_timer.isActive())
+                self.assertEqual(
+                    window._automatic_page_reading_time_timer.interval(),
+                    4_500_000)
+                self.assertTrue(
+                    window._automatic_page_prefetch_timer.isActive())
         finally:
             for popup in window.popups:
                 popup.close()
@@ -11119,6 +11197,49 @@ class TestMemoryZoom(_GuiCase):
         finally:
             for popup in window.popups:
                 popup.close()
+            window.close()
+
+    def test_automatic_page_reading_time_stops_session_after_selected_duration(self):
+        from unittest import mock
+        from main import MainWindow
+
+        window = MainWindow()
+        try:
+            popup = mock.Mock(
+                navigation_page=0,
+                _translation_text="Page translation",
+                _speech_available=True,
+                _speech_active=True,
+            )
+            book = mock.Mock()
+            book.page_count.return_value = 2
+            window.settings["automatic_page_reading_time_enabled"] = True
+            window.settings["automatic_page_reading_time_minutes"] = 70
+            window._automatic_page_reading_book = book
+            window._automatic_page_reading_popup = popup
+            window._automatic_page_reading_page = 0
+
+            with mock.patch("main.QTimer.singleShot"):
+                window._on_automatic_page_translation_ready(popup)
+                timer = window._automatic_page_reading_time_timer
+                self.assertTrue(timer.isActive())
+                self.assertEqual(timer.interval(), 4_200_000)
+
+                window._on_automatic_page_speech_finished(popup, "")
+                self.assertTrue(timer.isActive())
+
+            window._automatic_page_reading_elapsed = mock.Mock()
+            window._automatic_page_reading_elapsed.elapsed.return_value = (
+                4_200_000)
+            with mock.patch.object(window, "_flash_info") as flash:
+                window._check_automatic_page_reading_time()
+
+            self.assertIsNone(window._automatic_page_reading_popup)
+            self.assertFalse(timer.isActive())
+            popup.set_automatic_page_reading.assert_called_with(False)
+            flash.assert_called_once_with(
+                "Automatic page reading stopped after its time limit.")
+        finally:
             window.close()
 
     def test_automatic_page_prefetch_waits_before_request_and_for_speech_worker(self):

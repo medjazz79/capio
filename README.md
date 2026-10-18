@@ -62,13 +62,19 @@ then translate its text with OCR or send the image to a vision-capable model.
   image files.
 
 For hands-free listening, start automatic page reading from the translation
-window's page counter. In **Settings → Read Aloud / TTS**, enable **Translate
-the next page while reading** to prepare each following page in the background.
+window's page counter, or right-click a page and choose **Successive reading**
+to open its translation and start reading automatically. In **Settings → Read
+Aloud / TTS**, enable **Translate the next page while reading** to prepare each
+following page in the background.
 Capio waits five seconds after speech starts before requesting the next
 translation, and waits for the current speech-generation task to finish before
 sending that request. The next page can then be ready when playback reaches it.
 Save the setting with **Save Changes**; it is remembered the next time you open
-Capio.
+Capio. You can also enable **Stop successive reading after a set time** and
+choose a duration in 15-minute steps up to four hours, or enter a custom
+duration in minutes. Custom values are shown as hours and minutes (for example,
+70 minutes becomes 1 h 10 min). When the limit is reached, Capio stops the
+automatic sequence and current speech.
 
 ## I want to use Capio
 

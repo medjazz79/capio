@@ -14,7 +14,7 @@ import re
 import threading
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QIntValidator, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
     QDoubleSpinBox, QInputDialog, QLineEdit, QMenu, QPushButton, QPlainTextEdit, QSizePolicy,
@@ -957,6 +957,17 @@ class SettingsDialog(QDialog):
 
     def accept(self) -> None:
         self._size_save_timer.stop()
+        if (
+            self.automatic_page_reading_time_enabled.isChecked()
+            and self.automatic_page_reading_time_preset.currentData() is None
+            and not self.automatic_page_reading_time_custom.text().strip()
+        ):
+            QMessageBox.warning(
+                self,
+                "Reading duration required",
+                "Enter a custom reading duration in minutes.",
+            )
+            return
         try:
             from config.settings import save
 
@@ -1738,6 +1749,75 @@ class SettingsDialog(QDialog):
             "page in the background while the current page is being read.")
         form.addRow("Successive Pages", self.prefetch_next_page_translation)
 
+        self.automatic_page_reading_time_enabled = QCheckBox(
+            "Stop successive reading after a set time")
+        self.automatic_page_reading_time_enabled.setChecked(
+            bool(settings.get(
+                "automatic_page_reading_time_enabled", False)))
+        self.automatic_page_reading_time_enabled.setToolTip(
+            "Stop automatic page reading and speech when the selected "
+            "reading time is reached.")
+        form.addRow("Time Reading", self.automatic_page_reading_time_enabled)
+
+        duration_minutes = settings.get(
+            "automatic_page_reading_time_minutes", 15)
+        try:
+            duration_minutes = max(1, int(duration_minutes))
+        except (TypeError, ValueError):
+            duration_minutes = 15
+        self.automatic_page_reading_time_preset = QComboBox()
+        for minutes in range(15, 241, 15):
+            if minutes < 60:
+                label = f"{minutes} minutes"
+            elif minutes % 60 == 0:
+                hours = minutes // 60
+                label = f"{hours} hour" if hours == 1 else f"{hours} hours"
+            else:
+                label = f"{minutes // 60} hours {minutes % 60} minutes"
+            self.automatic_page_reading_time_preset.addItem(
+                label, minutes)
+        preset_index = self.automatic_page_reading_time_preset.findData(
+            duration_minutes)
+        if preset_index < 0:
+            self.automatic_page_reading_time_preset.addItem(
+                "Custom", None)
+            preset_index = self.automatic_page_reading_time_preset.count() - 1
+        else:
+            self.automatic_page_reading_time_preset.addItem(
+                "Custom", None)
+        self.automatic_page_reading_time_preset.setCurrentIndex(preset_index)
+        self.automatic_page_reading_time_custom = QLineEdit()
+        self.automatic_page_reading_time_custom.setValidator(
+            QIntValidator(1, 999_999, self))
+        self.automatic_page_reading_time_custom.setMaxLength(6)
+        self.automatic_page_reading_time_custom.setPlaceholderText(
+            "Minutes")
+        if preset_index >= 16:
+            self.automatic_page_reading_time_custom.setText(
+                str(duration_minutes))
+        self.automatic_page_reading_time_custom.setToolTip(
+            "Enter a custom duration in minutes.")
+        self.automatic_page_reading_time_display = QLabel()
+        self.automatic_page_reading_time_display.setMinimumWidth(100)
+        duration_row = QWidget()
+        duration_layout = QHBoxLayout(duration_row)
+        duration_layout.setContentsMargins(0, 0, 0, 0)
+        duration_layout.setSpacing(8)
+        duration_layout.addWidget(
+            self.automatic_page_reading_time_preset, 1)
+        duration_layout.addWidget(self.automatic_page_reading_time_custom)
+        duration_layout.addWidget(
+            self.automatic_page_reading_time_display)
+        form.addRow("Reading duration", duration_row)
+
+        self.automatic_page_reading_time_preset.currentIndexChanged.connect(
+            self._on_automatic_reading_duration_preset_changed)
+        self.automatic_page_reading_time_custom.textChanged.connect(
+            self._on_automatic_reading_duration_custom_changed)
+        self.automatic_page_reading_time_enabled.toggled.connect(
+            self._update_automatic_reading_duration)
+        self._update_automatic_reading_duration()
+
         self.speech_engine.currentIndexChanged.connect(
             self._update_tts_engine_notice)
         self.speech_engine.currentIndexChanged.connect(
@@ -1748,6 +1828,72 @@ class SettingsDialog(QDialog):
         lay.addWidget(behavior_card)
         lay.addStretch(1)
         return outer
+
+    def _update_automatic_reading_duration(self, _value=None) -> None:
+        custom = (
+            self.automatic_page_reading_time_preset.currentData() is None)
+        self.automatic_page_reading_time_custom.setEnabled(
+            self.automatic_page_reading_time_enabled.isChecked() and custom)
+        self.automatic_page_reading_time_preset.setEnabled(
+            self.automatic_page_reading_time_enabled.isChecked())
+        self._update_automatic_reading_duration_display()
+
+    def _on_automatic_reading_duration_preset_changed(
+        self, _index: int,
+    ) -> None:
+        if self.automatic_page_reading_time_preset.currentData() is not None:
+            custom = self.automatic_page_reading_time_custom
+            custom.blockSignals(True)
+            custom.clear()
+            custom.blockSignals(False)
+        self._update_automatic_reading_duration()
+
+    def _on_automatic_reading_duration_custom_changed(
+        self, value: str,
+    ) -> None:
+        if (
+            value
+            and self.automatic_page_reading_time_preset.currentData() is not None
+        ):
+            custom_index = self.automatic_page_reading_time_preset.findData(None)
+            self.automatic_page_reading_time_preset.setCurrentIndex(
+                custom_index)
+        self._update_automatic_reading_duration_display()
+
+    def _update_automatic_reading_duration_display(self, _value=None) -> None:
+        preset_minutes = (
+            self.automatic_page_reading_time_preset.currentData())
+        if preset_minutes is None:
+            value = self.automatic_page_reading_time_custom.text().strip()
+            minutes = int(value) if value else 0
+            if minutes == 0:
+                self.automatic_page_reading_time_display.setText(
+                    "Enter minutes")
+                return
+        else:
+            minutes = int(preset_minutes)
+        hours, remainder = divmod(minutes, 60)
+        if hours and remainder:
+            text = f"{hours} h {remainder} min"
+        elif hours:
+            text = f"{hours} h"
+        else:
+            text = f"{remainder} min"
+        self.automatic_page_reading_time_display.setText(text)
+
+    def _automatic_reading_duration_minutes(self) -> int:
+        custom_minutes = self.automatic_page_reading_time_custom.text().strip()
+        if custom_minutes:
+            return int(custom_minutes)
+        preset_minutes = (
+            self.automatic_page_reading_time_preset.currentData())
+        if preset_minutes is not None:
+            return int(preset_minutes)
+        try:
+            return max(1, int(self._settings.get(
+                "automatic_page_reading_time_minutes", 15)))
+        except (TypeError, ValueError):
+            return 15
 
     def _update_tts_engine_notice(self) -> None:
         if self.speech_engine.currentData() == "gemini":
@@ -4131,6 +4277,12 @@ class SettingsDialog(QDialog):
             ),
             "prefetch_next_page_translation": (
                 self.prefetch_next_page_translation.isChecked()
+            ),
+            "automatic_page_reading_time_enabled": (
+                self.automatic_page_reading_time_enabled.isChecked()
+            ),
+            "automatic_page_reading_time_minutes": (
+                self._automatic_reading_duration_minutes()
             ),
             "settings_size": [self.width(), self.height()],
             "settings_pos": [self.x(), self.y()],
