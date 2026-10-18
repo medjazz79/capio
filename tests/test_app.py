@@ -4811,8 +4811,7 @@ class TestChain(unittest.TestCase):
         self.assertIn("not available", str(ctx.exception))
 
     def test_settings_save_writes_no_bom(self):
-        """A BOM makes json.loads raise, and load() then silently falls back to
-        defaults -- that is how the user's model silently reverted before."""
+        """Keep new writes strict-JSON while load() tolerates legacy BOMs."""
         import json
         import tempfile
         from pathlib import Path

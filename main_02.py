@@ -63,7 +63,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon, QVBoxLayout,
 )
 
-from config.settings import load, save
+from config.settings import SettingsLoadError, load, save
 from popup.translate_popup import TranslatePopup
 from ui.file_drop import local_document_paths
 from ui.theme import THEMES, theme_colors
@@ -599,6 +599,7 @@ class FloatButton(QDialog):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.settings = load()
+        self._settings_load_error_logged = False
         self.popups: list[TranslatePopup] = []
         self._drag_from: QPoint | None = None
         self._moved = False
@@ -707,8 +708,16 @@ class FloatButton(QDialog):
     def _reload_settings(self) -> None:
         try:
             cur = load()
-        except Exception:
+        except SettingsLoadError as error:
+            if not self._settings_load_error_logged:
+                log.warning(
+                    "Could not reload shared settings; retaining current "
+                    "settings: %s",
+                    error,
+                )
+                self._settings_load_error_logged = True
             return
+        self._settings_load_error_logged = False
         if cur == self.settings:
             return
         old = self.settings
@@ -1320,7 +1329,16 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Capio")
     app.setWindowIcon(_floating_app_icon())
-    w = FloatButton()
+    try:
+        w = FloatButton()
+    except SettingsLoadError as error:
+        log.exception("Settings could not be loaded safely")
+        QMessageBox.critical(
+            None,
+            "Settings could not be loaded",
+            str(error),
+        )
+        return
     w.show()
     w.raise_()
     w.activateWindow()

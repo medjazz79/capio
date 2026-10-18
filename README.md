@@ -87,6 +87,10 @@ automatic sequence and current speech.
 On first launch, Capio downloads the required libraries. Translation providers
 may require an API key.
 
+Your API keys and preferences are stored in your Windows user folder, outside
+the project. If Capio cannot safely read its settings, it reports the problem
+instead of starting with defaults that could overwrite your saved settings.
+
 - [Installation and everyday use](USER_GUIDE.md)
 - [Why Capio?](WHY_CAPIO.md)
 - [Advanced Setup](ADVANCED_SETUP.md)

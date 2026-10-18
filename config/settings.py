@@ -15,6 +15,7 @@ import os
 import secrets
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 log = logging.getLogger("harmony_translator.config.settings")
@@ -38,6 +39,47 @@ MAX_CHAT_FONT_SIZE = 30.0
 
 # Max settings file size to prevent DoS (1 MB is far beyond normal ~5 KB)
 _MAX_SETTINGS_FILE_BYTES = 1_048_576
+_SETTINGS_READ_RETRIES = 3
+
+
+class SettingsLoadError(ValueError):
+    """Settings could not be read safely, and no recovery copy was usable."""
+
+
+def _read_text_with_retry(path: Path) -> str:
+    for attempt in range(_SETTINGS_READ_RETRIES):
+        try:
+            return path.read_text(encoding="utf-8-sig")
+        except PermissionError:
+            if attempt + 1 == _SETTINGS_READ_RETRIES:
+                raise
+            time.sleep(0.05 * (2 ** attempt))
+    raise AssertionError("unreachable")
+
+
+def _read_settings_dict(path: Path) -> dict:
+    data = json.loads(_read_text_with_retry(path))
+    if not isinstance(data, dict):
+        raise ValueError("Settings file is not a JSON object")
+    return data
+
+
+def _settings_recovery_candidates(path: Path) -> list[Path]:
+    candidates = []
+    try:
+        recovery_copy = path.with_name(
+            f"{path.stem}.corrupt-{os.getpid()}-{secrets.token_hex(4)}"
+            f"{path.suffix}"
+        )
+        shutil.copy2(path, recovery_copy)
+        candidates.append(recovery_copy)
+    except OSError:
+        log.exception("Could not make a recovery copy of %s", path)
+
+    legacy_backup = path.with_suffix(".corrupt.json")
+    if legacy_backup not in candidates and legacy_backup.is_file():
+        candidates.append(legacy_backup)
+    return candidates
 
 DEFAULTS = {
     # --- AI engines -------------------------------------------------------
@@ -235,41 +277,57 @@ def _sanitize_vision_probes(raw, custom_providers) -> dict:
 
 
 def load() -> dict:
-    """Read settings, filling in defaults. Never raises: bad file -> defaults."""
+    """Read settings, filling in defaults without replacing unreadable data."""
     data = {}
     settings_file_loaded = False
+    settings_file_exists = False
     try:
-        # Guard against huge file (DoS)
-        try:
-            size = SETTINGS_PATH.stat().st_size
-            if size > _MAX_SETTINGS_FILE_BYTES:
-                log.warning("Settings file too large (%d bytes), using defaults", size)
-                try:
-                    _backup_oversized_file(SETTINGS_PATH)
-                except OSError:
-                    log.exception("Could not back up oversized settings file")
-        except (OSError, FileNotFoundError):
-            size = 0
-        if size <= _MAX_SETTINGS_FILE_BYTES:
-            # utf-8-sig tolerates a BOM written by an older version.
-            data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8-sig"))
-            if isinstance(data, dict):
-                settings_file_loaded = True
-            else:
-                log.warning("Settings file is not a dict, using defaults")
-                data = {}
+        size = SETTINGS_PATH.stat().st_size
+        settings_file_exists = True
     except FileNotFoundError:
-        pass
-    except (json.JSONDecodeError, OSError, ValueError) as exc:
-        log.warning("Could not load settings, using defaults: %s", exc)
-        # Backup corrupt file for recovery
+        size = 0
+    except OSError:
+        # Do not treat an access-denied stat as a missing settings file.
+        settings_file_exists = True
+        size = 0
+
+    if size > _MAX_SETTINGS_FILE_BYTES:
         try:
-            corrupt_backup = SETTINGS_PATH.with_suffix(".corrupt.json")
-            if SETTINGS_PATH.is_file():
-                shutil.copy2(str(SETTINGS_PATH), str(corrupt_backup))
-                log.warning("Backed up corrupt settings to %s", corrupt_backup)
-        except Exception:
-            pass
+            _backup_oversized_file(SETTINGS_PATH)
+        except OSError:
+            log.exception("Could not back up oversized settings file")
+        raise SettingsLoadError(
+            "The settings file is larger than the supported limit. "
+            "It was preserved; move or inspect the oversized backup before "
+            "starting Capio again."
+        )
+
+    if settings_file_exists:
+        try:
+            data = _read_settings_dict(SETTINGS_PATH)
+            settings_file_loaded = True
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            log.warning("Could not load settings file: %s", exc)
+            recovered = None
+            recovered_path = None
+            for candidate in _settings_recovery_candidates(SETTINGS_PATH):
+                try:
+                    if candidate.stat().st_size > _MAX_SETTINGS_FILE_BYTES:
+                        continue
+                    recovered = _read_settings_dict(candidate)
+                    recovered_path = candidate
+                    break
+                except (json.JSONDecodeError, OSError, ValueError):
+                    continue
+            if recovered is None:
+                raise SettingsLoadError(
+                    "Capio could not read your settings file, and no valid "
+                    "recovery copy was found. The existing file was preserved "
+                    "to avoid overwriting your keys and preferences."
+                ) from exc
+            data = recovered
+            settings_file_loaded = True
+            log.warning("Recovered settings from %s", recovered_path)
     merged = dict(DEFAULTS)
     merged.update({k: v for k, v in data.items() if k in DEFAULTS})
     if "color_scheme" not in data:
@@ -288,7 +346,7 @@ def load() -> dict:
         providers_file_exists = True
         if providers_stat.st_size > _MAX_SETTINGS_FILE_BYTES:
             log.warning(
-                "Custom providers file too large, using settings-file copy"
+                "Custom providers file exceeds the supported size"
             )
             try:
                 _backup_oversized_file(providers_path)
@@ -296,25 +354,32 @@ def load() -> dict:
                 log.exception(
                     "Could not back up oversized custom providers file"
                 )
-        else:
-            providers_data = json.loads(
-                providers_path.read_text(encoding="utf-8-sig")
+            raise SettingsLoadError(
+                "The custom providers file is larger than the supported "
+                "limit. It was preserved; inspect the oversized backup "
+                "before starting Capio again."
             )
+        else:
+            providers_data = json.loads(_read_text_with_retry(providers_path))
             if isinstance(providers_data, list):
                 merged["custom_providers"] = _sanitize_custom_providers(
                     providers_data
                 )
             else:
-                log.warning(
-                    "Custom providers file is not a list, using settings-file copy"
+                raise SettingsLoadError(
+                    "Capio's custom providers file is not a JSON list. The "
+                    "existing file was preserved to avoid overwriting "
+                    "provider settings."
                 )
     except FileNotFoundError:
         pass
+    except SettingsLoadError:
+        raise
     except (json.JSONDecodeError, OSError, ValueError) as exc:
-        log.warning(
-            "Could not load custom providers file, using settings-file copy: %s",
-            exc,
-        )
+        raise SettingsLoadError(
+            "Capio could not read its custom providers file. The existing file "
+            "was preserved to avoid overwriting provider settings."
+        ) from exc
     if not providers_file_exists and settings_file_loaded:
         legacy_providers = _sanitize_custom_providers(
             merged.get("custom_providers")
@@ -589,8 +654,16 @@ def _write_json_atomically(path: Path, value) -> None:
         os.fsync(tmp_fd)
         os.close(tmp_fd)
         tmp_fd = None
-        # Atomic replace
-        Path(tmp_path).replace(path)
+        # Windows can briefly deny a replace while another process or
+        # scanner has the destination open. Retry before surfacing the error.
+        for attempt in range(_SETTINGS_READ_RETRIES):
+            try:
+                Path(tmp_path).replace(path)
+                break
+            except PermissionError:
+                if attempt + 1 == _SETTINGS_READ_RETRIES:
+                    raise
+                time.sleep(0.05 * (2 ** attempt))
         # fsync directory on POSIX for durability (no-op on Windows but safe)
         try:
             dir_fd = os.open(tmp_dir, os.O_DIRECTORY)

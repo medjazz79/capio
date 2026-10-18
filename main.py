@@ -72,7 +72,9 @@ from PySide6.QtWidgets import (
     QWidget, QSpinBox,
 )
 
-from config.settings import DEFAULT_MODEL, load, resolve_model, save
+from config.settings import (
+    DEFAULT_MODEL, SettingsLoadError, load, resolve_model, save,
+)
 from popup.translate_popup import TranslatePopup
 from popup.worker import PageTranslationWorker, TranslateWorker
 from reader import pdf_utils
@@ -1821,7 +1823,19 @@ class MainWindow(QMainWindow):
 
     def _refresh_application(self) -> None:
         self._save_session_soon()
-        self.settings = load()
+        try:
+            refreshed_settings = load()
+        except SettingsLoadError as error:
+            logging.getLogger("harmony_translator").exception(
+                "Could not refresh settings safely"
+            )
+            QMessageBox.warning(
+                self,
+                "Settings could not be refreshed",
+                str(error),
+            )
+            return
+        self.settings = refreshed_settings
         self._sync_language_combos()
         theme = self.settings.get("theme", "Dark Slate")
         if theme not in THEMES:
@@ -3745,6 +3759,14 @@ def main():
     app.setStyleSheet(APP_STYLE)
     try:
         win = MainWindow()
+    except SettingsLoadError as error:
+        log.exception("Settings could not be loaded safely")
+        QMessageBox.critical(
+            None,
+            "Settings could not be loaded",
+            str(error),
+        )
+        return
     except Exception:
         # Without this a packaged build exits with no visible reason at all.
         log.exception("MainWindow failed to start")
