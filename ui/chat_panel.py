@@ -676,6 +676,7 @@ class ChatPanel(QWidget):
         self._send_question(
             f"{instruction}\n\nSelected text:\n{selected_text}",
             clear_input=False,
+            display_question=f"Explain: {selected_text}",
         )
 
     def _send_question(
@@ -683,6 +684,7 @@ class ChatPanel(QWidget):
         question: str,
         *,
         clear_input: bool = True,
+        display_question: str | None = None,
     ) -> None:
         if (
             not question
@@ -692,7 +694,10 @@ class ChatPanel(QWidget):
             return
         self._stop_speech()
         self._messages.append({"role": "user", "content": question})
-        self._entries.append(("user", question))
+        self._entries.append((
+            "user",
+            question if display_question is None else display_question,
+        ))
         if clear_input:
             self.input.clear()
         self.send_button.setEnabled(False)

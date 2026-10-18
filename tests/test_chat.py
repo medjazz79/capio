@@ -383,10 +383,42 @@ class TestTranslationChat(unittest.TestCase):
                 panel.explain_button.click()
                 question = send_question.call_args.args[0]
                 self.assertIn("Selected phrase", question)
+                self.assertEqual(
+                    send_question.call_args.kwargs["display_question"],
+                    "Explain: Selected phrase",
+                )
                 self.assertNotIn("Full translated passage", question)
                 self.assertNotIn(
                     "use_google_search", send_question.call_args.kwargs)
         finally:
+            panel.close()
+
+    def test_explain_instruction_is_sent_but_hidden_from_transcript(self):
+        from ui.chat_panel import ChatPanel
+
+        panel = ChatPanel(lambda: {"speech_rate": 1.0})
+        try:
+            panel.set_explanation_selection("made a statement")
+            with mock.patch("ui.chat_panel.ChatWorker") as chat_worker:
+                panel.explain_selection("simple")
+
+            sent_messages = chat_worker.call_args.args[0]
+            self.assertEqual(
+                sent_messages[-1]["content"],
+                "Explain the selected text in very simple, everyday "
+                "language. Avoid technical terms and use a brief example "
+                "only if it helps.\n\nSelected text:\nmade a statement",
+            )
+            self.assertEqual(
+                panel._entries[-1],
+                ("user", "Explain: made a statement"),
+            )
+            transcript = panel.transcript.toPlainText()
+            self.assertIn("Explain: made a statement", transcript)
+            self.assertNotIn("very simple, everyday language", transcript)
+            self.assertNotIn("Selected text:", panel.transcript.toPlainText())
+        finally:
+            panel._worker = None
             panel.close()
 
     def test_all_explain_styles_allow_web_search(self):
