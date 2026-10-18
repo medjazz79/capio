@@ -57,17 +57,22 @@ PARENTHESIS_RULES = (
 
 ARABIC_NAME_PRESERVATION_RULE = (
     "For an Arabic translation from a source written in the Latin alphabet, "
-    "consistently write each searchable proper name in Arabic followed by "
-    "its exact original Latin spelling in parentheses at that entity's first "
-    "occurrence only. Apply this to people, places, organizations and "
-    "institutions, titles of books and other works, brands, and distinctive "
-    "named events or concepts whose original spelling helps identify or "
-    "search for them. Example: جورج أورويل (George Orwell), سان فرانسيسكو "
-    "(San Francisco). Preserve source spelling exactly; do not invent or "
-    "alter a romanization. On later occurrences use the Arabic form alone. "
-    "Do not add parenthetical source spellings to ordinary words, generic "
-    "terms, or phrases, and do not duplicate a name already present in an "
-    "equivalent informative parenthesis."
+    "write each searchable proper name in Arabic followed by its exact "
+    "original Latin spelling in parentheses at that entity's first "
+    "occurrence only. After that first mention, never give the Latin "
+    "spelling again anywhere in the passage: every later mention of the same "
+    "entity uses the Arabic form alone with nothing in brackets, even inside "
+    "the same paragraph and even when the name recurs many times on the page. "
+    "Example: write Cleveland once as كليفلاند (Cleveland), then كليفلاند "
+    "for every later mention; likewise جورج أورويل (George Orwell), "
+    "سان فرانسيسكو (San Francisco). Apply this to people, places, "
+    "organizations and institutions, titles of books and other works, and "
+    "brands, and keep the number of such parentheses low. Do not apply it to "
+    "dates, common nouns, generic terms, ordinary descriptive phrases, or "
+    "repeated mentions. Preserve source spelling exactly; do not invent or "
+    "alter a romanization. Do not add parenthetical source spellings to "
+    "ordinary words, generic terms, or phrases, and do not duplicate a name "
+    "already present in an equivalent informative parenthesis."
 )
 
 ARABIC_DIGIT_STYLE_RULE = (
