@@ -27,6 +27,10 @@ else:
     if str(APP_DIR) not in sys.path:
         sys.path.insert(0, str(APP_DIR))
 
+from config.console import hide_standalone_console
+
+hide_standalone_console()
+
 # Double-clicking main.py may use a system Python without the app dependencies.
 VENV_PYTHON = APP_DIR / ".venv" / "Scripts" / "python.exe"
 VENV_PYTHONW = APP_DIR / ".venv" / "Scripts" / "pythonw.exe"
@@ -2585,6 +2589,9 @@ class MainWindow(QMainWindow):
             return
         self._automatic_page_prefetch_result = (
             book, page_no, source_text, translated_text, badge)
+        popup = self._automatic_page_reading_popup
+        if popup is not None:
+            popup.prefetch_speech_markdown(translated_text)
         if self._automatic_page_waiting_for_prefetch == page_no:
             self._automatic_page_waiting_for_prefetch = None
             QTimer.singleShot(

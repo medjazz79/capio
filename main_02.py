@@ -26,6 +26,10 @@ else:
     if str(APP_DIR) not in sys.path:
         sys.path.insert(0, str(APP_DIR))
 
+from config.console import hide_standalone_console
+
+hide_standalone_console()
+
 # Right-clicking "Settings" must never run this on a system Python that lacks
 # PySide6/PyMuPDF — that is why the float launcher used to fail to start.
 VENV_PYTHON = APP_DIR / ".venv" / "Scripts" / "python.exe"

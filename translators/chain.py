@@ -1181,12 +1181,16 @@ def _translation_instructions(settings: dict, model: str = "") -> str:
     if settings.get("target_language", "ar") == "ar":
         if settings.get("arabic_tashkeel", False):
             tashkeel_instruction = (
-                "Arabic tashkeel is enabled: write the complete Arabic "
-                "translation with accurate diacritical marks on all Arabic "
-                "words, including vowel marks, shadda, sukun, and tanween "
-                "wherever grammatically appropriate. Preserve the intended "
-                "meaning and do not add marks to Latin text, names, URLs, or "
-                "notation. This setting takes precedence over conflicting "
+                "Arabic tashkeel is enabled and required: fully vocalize every "
+                "word written in Arabic script throughout the entire Arabic "
+                "translation, not just selected words or word endings. Add "
+                "all grammatically appropriate short vowels to each word, "
+                "including internal vowels, case endings, shadda, sukun, and "
+                "tanween. Apply accurate tashkeel to Arabic-script names too; "
+                "leave Latin text, URLs, and notation unchanged. Preserve the "
+                "intended meaning. Example: write "
+                "'كَتَبَ الطَّالِبُ الدَّرْسَ', not 'كتب الطالب الدرس'. "
+                "This requirement takes precedence over conflicting "
                 "formatting requests."
             )
         else:

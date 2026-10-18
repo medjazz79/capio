@@ -68,7 +68,9 @@ Aloud / TTS**, enable **Translate the next page while reading** to prepare each
 following page in the background.
 Capio waits five seconds after speech starts before requesting the next
 translation, and waits for the current speech-generation task to finish before
-sending that request. The next page can then be ready when playback reaches it.
+sending that request. With Edge TTS and **Fast mode**, it also prepares the
+next page's first audio segment after translation finishes, so playback can
+start sooner when the current page ends.
 Save the setting with **Save Changes**; it is remembered the next time you open
 Capio. You can also enable **Stop successive reading after a set time** and
 choose a duration in 15-minute steps up to four hours, or enter a custom

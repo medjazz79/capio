@@ -54,7 +54,9 @@ Capio يترجم الكلمات والصفحات أثناء قراءتك للك�
 للعودة إلى الانتظار حتى تنتهي الصفحة ثم ترجمتها. عند تفعيله، ينتظر التطبيق
 5 ثوانٍ بعد بدء القراءة قبل طلب ترجمة الصفحة التالية، ولا يبدأ الطلب ما دام
 عامل توليد الصوت للصفحة الحالية يعمل؛ وهذا يقلل تزامن طلبات الصوت والترجمة
-إلى المزوّد نفسه. ويمكنك تفعيل **Stop successive reading after a set time**
+إلى المزوّد نفسه. عند استخدام **Edge TTS** مع **Fast mode**، يجهّز التطبيق
+أيضاً أول مقطع صوتي للصفحة التالية بعد اكتمال ترجمتها، لتبدأ القراءة أسرع عند
+انتهاء الصفحة الحالية. ويمكنك تفعيل **Stop successive reading after a set time**
 لتحديد مدة القراءة: اختر مدة بخطوات 15 دقيقة حتى 4 ساعات، أو اختر **Custom**
 وأدخل المدة بالدقائق. يعرض التطبيق المدة المخصصة بالساعات والدقائق؛ فمثلاً
 70 دقيقة تظهر **1 h 10 min**. عند انتهاء المدة يوقف التطبيق القراءة التتابعية
@@ -287,7 +289,9 @@ Works on **both** kinds of PDFs:
 
 `run_float.bat` starts the floating translator without leaving a terminal
 window open; its frameless button window has a taskbar entry and app icon.
-Running `python main_02.py` directly keeps the terminal available for debugging.
+Launching either Python entry point from File Explorer hides its standalone
+console window. Running `python main.py` or `python main_02.py` from an existing
+terminal leaves that terminal available for debugging.
 The app provides ONE floating 🌐 button for other
 programs (Foxit, browser...). Click it → drag-select any text on screen →
 screenshot → OCR → the same translation popup (works even on scanned pages).

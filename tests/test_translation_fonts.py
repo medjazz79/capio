@@ -52,6 +52,10 @@ class TestTranslationFonts(unittest.TestCase):
             "model_instructions": "Preserve the paragraph layout.",
         })
         self.assertIn("Arabic tashkeel is enabled", enabled)
+        self.assertIn("fully vocalize every word written in Arabic script", enabled)
+        self.assertIn("internal vowels", enabled)
+        self.assertIn("Arabic-script names too", enabled)
+        self.assertIn("'كَتَبَ الطَّالِبُ الدَّرْسَ'", enabled)
         self.assertIn("Preserve the paragraph layout.", enabled)
         self.assertIn("shadda, sukun, and tanween", enabled)
 

@@ -3596,6 +3596,38 @@ class TranslatePopup(QDialog):
         if not text or len(text) > SPEECH_PREFETCH_MAX_CHARS:
             return
         source_offset = len(raw) - len(text)
+        self._start_speech_prefetch_text(text, source_offset)
+
+    def prefetch_speech_markdown(self, markdown: str) -> None:
+        """Prefetch the first speech segment for an upcoming translation."""
+        self._speech_prefetch_timer.stop()
+        if (
+            not self._speech_available
+            or self._speech_engine != "edge"
+            or not self.settings.get("fast_mode", True)
+            or not self.chat_panel.isHidden()
+            or self._speech_text_override is not None
+            or (self._speech_worker is not None
+                and self._speech_worker.isRunning())
+        ):
+            return
+        from translators.chain import _remove_nonheading_bold
+
+        target_language = str(
+            self.settings.get("target_language", "ar")).split("-", 1)[0]
+        document = QTextDocument()
+        document.setMarkdown(self._markdown_with_inline_notation(
+            _remove_nonheading_bold(markdown),
+            reflow_soft_line_breaks=target_language == "en",
+        ))
+        text = self._speech_text_from_document(document).lstrip()
+        if not text or len(text) > SPEECH_PREFETCH_MAX_CHARS:
+            return
+        self._start_speech_prefetch_text(text, 0)
+
+    def _start_speech_prefetch_text(
+        self, text: str, source_offset: int,
+    ) -> None:
         kwargs = self._speech_worker_kwargs(text, source_offset)
         key = (
             text,

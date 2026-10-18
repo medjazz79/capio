@@ -11178,14 +11178,20 @@ class TestMemoryZoom(_GuiCase):
             window._automatic_page_reading_popup = popup
             window._automatic_page_reading_page = 0
             window._automatic_page_waiting_for_speech = True
-            with mock_chain_translate(
-                return_value=("prefetched page translation", "Test")
+            with (
+                mock.patch.object(
+                    popup, "prefetch_speech_markdown") as speech_prefetch,
+                mock_chain_translate(
+                    return_value=("prefetched page translation", "Test")
+                ),
             ):
                 window._start_automatic_page_prefetch(book, popup, 0)
                 worker = window._automatic_page_prefetch_worker
                 self.assertIsNotNone(worker)
                 self.assertTrue(worker.wait(20000))
                 self.app.processEvents()
+                speech_prefetch.assert_called_once_with(
+                    "prefetched page translation")
 
             prefetched = window._automatic_page_prefetch_result
             self.assertIsNotNone(prefetched)
@@ -11211,6 +11217,71 @@ class TestMemoryZoom(_GuiCase):
             for popup in window.popups:
                 popup.close()
             window.close()
+
+    def test_prefetches_upcoming_speech_during_current_page_read(self):
+        import time
+        from unittest import mock
+        from popup import speech_worker
+        from popup.translate_popup import TranslatePopup
+        from config.settings import DEFAULTS
+
+        with mock_chain_translate(return_value=("current page", "Test")):
+            popup = TranslatePopup(dict(DEFAULTS), source_text="source")
+        try:
+            if popup._worker is not None:
+                popup._worker.wait(20000)
+            self.app.processEvents()
+            popup._speech_available = True
+            popup._speech_active = True
+            markdown = "الصفحة **التالية**"
+            calls = []
+
+            class FakeCommunicate:
+                def __init__(self, text, *_args, **_kwargs):
+                    calls.append(text)
+                    self.text = text
+
+                async def stream(self):
+                    yield {"type": "audio", "data": b"prefetched-mp3"}
+                    for word in self.text.split():
+                        yield {
+                            "type": "WordBoundary",
+                            "offset": 0,
+                            "duration": 1_000_000,
+                            "text": word,
+                        }
+
+            fake_edge = type(
+                "Edge", (), {"Communicate": FakeCommunicate})
+            with tempfile.TemporaryDirectory(
+                prefix="harmony-next-page-tts-"
+            ) as cache_dir:
+                with mock.patch.dict(
+                    os.environ, {"HARMONY_TTS_CACHE": cache_dir}
+                ), mock.patch.object(speech_worker, "edge_tts", fake_edge):
+                    popup.prefetch_speech_markdown(markdown)
+                    for _ in range(500):
+                        self.app.processEvents()
+                        if popup._speech_prefetch_worker is None and calls:
+                            break
+                        time.sleep(0.02)
+                    self.assertEqual(len(calls), 1)
+                    self.assertTrue(popup._speech_active)
+                    self.assertTrue(popup._player.source().isEmpty())
+
+                    popup._render_markdown(markdown)
+                    spoken_text = popup._speech_text_from_document(
+                        popup.result.document())
+                    with mock.patch.object(
+                        popup, "_play_speech_segment") as play_cached:
+                        self.assertTrue(
+                            popup._try_play_cached_full_text(spoken_text))
+                        play_cached.assert_called_once()
+                    self.assertEqual(len(calls), 1)
+        finally:
+            popup._speech_active = False
+            popup._player.stop()
+            popup.close()
 
     def test_automatic_page_reading_time_stops_session_after_selected_duration(self):
         from unittest import mock
