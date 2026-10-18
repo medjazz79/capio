@@ -1007,6 +1007,58 @@ class MainWindow(QMainWindow):
             if isinstance(w, BookView):
                 yield w
 
+    # Re-applying an application stylesheet makes Qt restyle every widget in
+    # every window, including the PDF canvas and any open translation popup.
+    # With a book open that measured ~850 ms, so it is never applied twice for
+    # the same result, and a burst of theme clicks lands as one application.
+    # The per-window colour updates travel with it in the same turn: deferring
+    # only the stylesheet made the chat panel repaint in the new theme while
+    # the rest of the app was still in the old one.
+    APP_STYLESHEET_COALESCE_MS = 120
+
+    def _ensure_app_stylesheet_timer(self) -> QTimer:
+        timer = getattr(self, "_app_stylesheet_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(self.APP_STYLESHEET_COALESCE_MS)
+            timer.timeout.connect(self._flush_app_skin)
+            self._app_stylesheet_timer = timer
+        return timer
+
+    def _skin_already_applied(self, text: str, theme: str) -> bool:
+        return (
+            text == getattr(self, "_applied_app_stylesheet", None)
+            and theme == getattr(self, "_applied_theme", None)
+        )
+
+    def _apply_theme_skin(self, theme: str) -> None:
+        """Queue a complete theme change, applied atomically on the next turn."""
+        scheme = self.settings.get("color_scheme", "system")
+        pdf_background = bool(
+            self.settings.get("pdf_canvas_theme_background", False))
+        text = app_stylesheet(theme, scheme, pdf_background)
+        if self._skin_already_applied(text, theme):
+            return
+        self._pending_skin = (text, theme)
+        self._ensure_app_stylesheet_timer().start()
+
+    def _flush_app_skin(self) -> None:
+        pending = getattr(self, "_pending_skin", None)
+        if not pending:
+            return
+        text, theme = pending
+        self._pending_skin = None
+        if self._skin_already_applied(text, theme):
+            return
+        self._applied_app_stylesheet = text
+        self._applied_theme = theme
+        QApplication.instance().setStyleSheet(text)
+        # Same turn as the stylesheet, so no window shows the new theme alone.
+        self._apply_theme_to_books(theme)
+        self._apply_chat_theme()
+        self._apply_model_readout_theme()
+
     def _has_doc(self) -> bool:
         book = self.current_book()
         return book.has_doc() if book else False
@@ -2861,9 +2913,69 @@ class MainWindow(QMainWindow):
         self._chat_panel.set_explanation_selection(selected_text)
         self._chat_panel.explain_selection(style)
 
+    # Settings that change the app-wide skin. Re-applying an application
+    # stylesheet re-styles every widget in every window, so it must only run
+    # when the skin itself actually moved.
+    _APP_SKIN_KEYS = ("theme", "color_scheme", "pdf_canvas_theme_background")
+
+    # Settings a visible translation popup draws or reads out. Re-rendering a
+    # popup rebuilds its whole Markdown document, which is far too costly to
+    # repeat every time the dialog is closed.
+    _POPUP_DISPLAY_KEYS = (
+        "theme", "color_scheme", "font_size", "translation_font",
+        "translation_font_arabic", "translation_font_latin", "arabic_tashkeel",
+        "line_spacing_px", "translation_side_margin_px",
+        "translation_top_bottom_margin_px", "source_language",
+        "target_language", "explain_mode", "explain_instructions",
+        "speech_engine", "speech_rate", "speech_voice", "gemini_tts_voice",
+        "speech_read_latin_words", "automatic_speech_voice", "gemini_key",
+    )
+
+    @staticmethod
+    def _settings_changed(previous: dict, current: dict, keys) -> bool:
+        return any(previous.get(key) != current.get(key) for key in keys)
+
+    def _app_skin_changed(self, previous: dict, current: dict) -> bool:
+        return self._settings_changed(previous, current, self._APP_SKIN_KEYS)
+
+    def _popup_display_changed(self, previous: dict, current: dict) -> bool:
+        return self._settings_changed(previous, current, self._POPUP_DISPLAY_KEYS)
+
+    @staticmethod
+    def _settings_dialog_is_stale(dialog, settings: dict) -> bool:
+        dialog_settings = dialog.values()
+        transient_keys = {
+            "settings_size", "settings_pos", "settings_last_page",
+            "settings_last_page_version",
+        }
+        return any(
+            dialog_settings.get(key) != value
+            for key, value in settings.items()
+            if key not in transient_keys and key in dialog_settings
+        )
+
     def open_settings(self):
-        dlg = SettingsDialog(self.settings, self)
+        # The settings dialog builds six pages and hundreds of widgets, which
+        # costs far more than a click should. Building it once and reusing it
+        # makes every later open instant; only the very first click pays.
+        dlg = getattr(self, "_settings_dialog", None)
+        if dlg is not None and self._settings_dialog_is_stale(
+            dlg, self.settings
+        ):
+            worker = getattr(dlg, "_tts_voice_list_worker", None)
+            if worker is not None and worker.isRunning():
+                worker.finished.connect(dlg.deleteLater)
+            else:
+                dlg.deleteLater()
+            dlg = None
+        if dlg is None:
+            dlg = SettingsDialog(self.settings, self)
+            self._settings_dialog = dlg
         if dlg.exec():
+            # Keep the outgoing values so the expensive re-skin and popup
+            # re-render below can be skipped when the dialog was closed
+            # without changing anything that affects them.
+            previous = dict(self.settings)
             self.settings = dlg.values()
             self._sync_language_combos()
             save(self.settings)
@@ -2897,17 +3009,13 @@ class MainWindow(QMainWindow):
                         self._automatic_page_prefetch_scheduled = (
                             book, popup, page_no)
                         self._automatic_page_prefetch_timer.start(5000)
-            QApplication.instance().setStyleSheet(app_stylesheet(
-                self.settings.get("theme", "Dark Slate"),
-                self.settings.get("color_scheme", "system"),
-                bool(self.settings.get("pdf_canvas_theme_background", False)),
-            ))
-            self._apply_theme_to_books(self.settings.get("theme", "Dark Slate"))
-            self._apply_chat_theme()
-            self._apply_model_readout_theme()
-            for popup in self.popups:
-                if popup.isVisible():
-                    popup.refresh_display(self.settings)
+            if self._app_skin_changed(previous, self.settings):
+                self._apply_theme_skin(
+                    self.settings.get("theme", "Dark Slate"))
+            if self._popup_display_changed(previous, self.settings):
+                for popup in self.popups:
+                    if popup.isVisible():
+                        popup.refresh_display(self.settings)
             self._sync_theme_button(self.settings.get("theme", "Dark Slate"))
             self._sync_selection_mode_button()
             self._refresh_engine_label()
@@ -2920,15 +3028,7 @@ class MainWindow(QMainWindow):
         if theme == "Pure Light":
             self.settings["color_scheme"] = "light"
         self._sync_theme_button(theme)
-        QApplication.instance().setStyleSheet(app_stylesheet(
-            theme,
-            self.settings.get("color_scheme", "system"),
-            bool(self.settings.get("pdf_canvas_theme_background", False)),
-        ))
-        self._apply_theme_to_books(theme)
-        self._apply_chat_theme()
-        self._apply_model_readout_theme()
-        self._apply_model_readout_theme()
+        self._apply_theme_skin(theme)
         for popup in self.popups:
             if popup.isVisible():
                 popup.refresh_display(self.settings)
@@ -3212,13 +3312,8 @@ class MainWindow(QMainWindow):
                         theme = "Dark Slate"
                         self.settings["theme"] = theme
                     scheme = cur.get("color_scheme", "system")
-                    QApplication.instance().setStyleSheet(app_stylesheet(
-                        theme, scheme,
-                        bool(cur.get("pdf_canvas_theme_background", False)),
-                    ))
                     self._sync_theme_button(theme)
-                    self._apply_theme_to_books(theme)
-                    self._apply_chat_theme()
+                    self._apply_theme_skin(theme)
                 if (cur.get("font_size") != old.get("font_size")
                         or cur.get("translation_font")
                         != old.get("translation_font")

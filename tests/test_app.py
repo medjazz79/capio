@@ -11790,6 +11790,7 @@ class TestMemoryZoom(_GuiCase):
                 pass
 
     def test_theme_selector_applies_and_saves_theme(self):
+        from PySide6.QtTest import QTest
         from main import MainWindow, THEMES
         from config.settings import load
         from ui.theme import theme_colors
@@ -11807,6 +11808,7 @@ class TestMemoryZoom(_GuiCase):
             self.assertGreaterEqual(len(win.theme_menu.actions()), 16)
             self.assertIn("min-height: 32px", self.app.styleSheet())
             win._theme_actions["Midnight Blue"].trigger()
+            QTest.qWait(win.APP_STYLESHEET_COALESCE_MS + 20)
             self.assertEqual(win.settings["theme"], "Midnight Blue")
             self.assertIn(
                 theme_colors("Midnight Blue", win.settings["color_scheme"])["accent"],
@@ -11814,6 +11816,7 @@ class TestMemoryZoom(_GuiCase):
             )
             self.assertEqual(load()["theme"], "Midnight Blue")
             win._theme_actions["Pure Light"].trigger()
+            QTest.qWait(win.APP_STYLESHEET_COALESCE_MS + 20)
             self.assertEqual(win.settings["theme"], "Pure Light")
             self.assertEqual(win.settings["color_scheme"], "light")
             self.assertEqual(load()["color_scheme"], "light")
@@ -11822,6 +11825,7 @@ class TestMemoryZoom(_GuiCase):
                 self.app.styleSheet(),
             )
             win._theme_actions["Nordic Gray"].trigger()
+            QTest.qWait(win.APP_STYLESHEET_COALESCE_MS + 20)
             self.assertIn(
                 theme_colors("Nordic Gray", win.settings["color_scheme"])["accent"],
                 self.app.styleSheet(),
@@ -11857,6 +11861,7 @@ class TestMemoryZoom(_GuiCase):
 
     def test_pdf_canvas_theme_setting_reloads_from_shared_settings(self):
         from unittest import mock
+        from PySide6.QtTest import QTest
         from main import MainWindow, app_stylesheet
 
         win = MainWindow()
@@ -11867,6 +11872,7 @@ class TestMemoryZoom(_GuiCase):
             )
             with mock.patch("main.load", return_value=updated):
                 win._reload_settings()
+            QTest.qWait(win.APP_STYLESHEET_COALESCE_MS + 20)
 
             self.assertTrue(win.settings["pdf_canvas_theme_background"])
             self.assertEqual(
@@ -11877,6 +11883,33 @@ class TestMemoryZoom(_GuiCase):
                     True,
                 ),
             )
+        finally:
+            try:
+                win.close()
+            except RuntimeError:
+                pass
+
+    def test_reused_settings_dialog_is_rebuilt_after_external_settings_change(self):
+        from unittest import mock
+        from main import MainWindow
+
+        win = MainWindow()
+        try:
+            cached_dialog = mock.Mock()
+            cached_dialog.values.return_value = dict(
+                win.settings, theme="Dark Slate")
+            cached_dialog._tts_voice_list_worker = None
+            replacement = mock.Mock()
+            replacement.exec.return_value = False
+            win._settings_dialog = cached_dialog
+            win.settings["theme"] = "Everforest"
+
+            with mock.patch("main.SettingsDialog", return_value=replacement) as factory:
+                win.open_settings()
+
+            factory.assert_called_once_with(win.settings, win)
+            cached_dialog.deleteLater.assert_called_once_with()
+            self.assertIs(win._settings_dialog, replacement)
         finally:
             try:
                 win.close()
