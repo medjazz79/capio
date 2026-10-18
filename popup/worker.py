@@ -1,6 +1,8 @@
 """Background worker for PDF text, OCR, and direct image translation."""
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import QThread, Signal
 
 
@@ -22,6 +24,8 @@ class TranslateWorker(QThread):
         self.translate_secs: float = 0.0  # proof of which layer answered + how long
 
     def run(self) -> None:
+        if self.isInterruptionRequested():
+            return
         try:
             if self._pil_image is not None:
                 if self._settings.get("selection_mode", "ocr") == "image":
@@ -36,6 +40,8 @@ class TranslateWorker(QThread):
                     self._text, _used = ocr.auto_read(self._pil_image)
                 else:
                     self._text = ocr.read_text(self._pil_image, self._ocr_langs)
+                if self.isInterruptionRequested():
+                    return
                 if not (self._text or "").strip():
                     self.failed.emit(
                         "Could not read any text from this image.\n"
@@ -50,10 +56,14 @@ class TranslateWorker(QThread):
             translated_text, badge = "", "—"
             for kind, partial, badge in chain.translate_stream(
                     self._text, self._settings):
+                if self.isInterruptionRequested():
+                    return
                 if kind == "partial" and partial:
                     self.partial.emit(partial)
                 elif kind == "done":
                     translated_text, badge = partial, badge
+            if self.isInterruptionRequested():
+                return
             self.translate_secs = time.time() - t0
             self.done.emit(translated_text, badge)
         except Exception as e:  # safety net
@@ -69,9 +79,42 @@ class TranslateWorker(QThread):
         translated_text, badge = "", "—"
         for kind, partial, current_badge in chain.translate_image_stream(
                 self._pil_image, self._settings):
+            if self.isInterruptionRequested():
+                return
             if kind == "partial" and partial:
                 self.partial.emit(partial)
             elif kind == "done":
                 translated_text, badge = partial, current_badge
+        if self.isInterruptionRequested():
+            return
         self.translate_secs = time.time() - started
         self.done.emit(translated_text, badge)
+
+
+class PageTranslationWorker(TranslateWorker):
+    """Prepare a PDF page and translate it without blocking the GUI thread."""
+
+    def __init__(
+        self,
+        settings: dict,
+        prepare_input: Callable[
+            [], tuple[str | None, object | None, tuple[str, ...] | None]
+        ],
+    ):
+        super().__init__(settings)
+        self._prepare_input = prepare_input
+
+    def run(self) -> None:
+        if self.isInterruptionRequested():
+            return
+        try:
+            self.stage.emit("Preparing the next page…")
+            self._text, self._pil_image, ocr_langs = self._prepare_input()
+            self._ocr_langs = (
+                None if ocr_langs in (None, ("auto",))
+                else tuple(ocr_langs)
+            )
+        except Exception as error:
+            self.failed.emit(str(error))
+            return
+        super().run()

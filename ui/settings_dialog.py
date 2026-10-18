@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QSplitter, QStackedWidget,
     QScrollArea, QStyle, QStyleOptionButton, QStylePainter,
     QStyledItemDelegate, QStyleOptionViewItem, QTextEdit, QToolButton, QVBoxLayout,
-    QWidget,
+    QMessageBox, QWidget,
 )
 
 from config.app_log import get_logger
@@ -633,6 +633,8 @@ class SettingsDialog(QDialog):
 
         self._update_key_states()
         self._restore_dialog_geometry()
+        for checkbox in self.findChildren(QCheckBox):
+            checkbox.toggled.connect(self._persist_toggled_settings)
 
     # ── Chrome builders ──────────────────────────────────────────────────────
 
@@ -940,9 +942,40 @@ class SettingsDialog(QDialog):
         except (OSError, TypeError, ValueError):
             log.exception("Could not save Settings window geometry")
 
+    def _persist_toggled_settings(self, _checked: bool = False) -> None:
+        try:
+            from config.settings import save
+
+            live_settings = self.values()
+            save(live_settings)
+            self._settings.update(live_settings)
+            parent_settings = getattr(self.parent(), "settings", None)
+            if isinstance(parent_settings, dict):
+                parent_settings.update(live_settings)
+        except (OSError, TypeError, ValueError):
+            log.exception("Could not save settings after a toggle")
+
     def accept(self) -> None:
         self._size_save_timer.stop()
-        self._save_dialog_geometry()
+        try:
+            from config.settings import save
+
+            live_settings = self.values()
+            save(live_settings)
+        except (OSError, TypeError, ValueError):
+            log.exception("Could not save settings")
+            QMessageBox.warning(
+                self,
+                "Could not save settings",
+                "Settings could not be saved. Check that the settings file "
+                "is writable, then try again.",
+            )
+            return
+
+        self._settings.update(live_settings)
+        parent_settings = getattr(self.parent(), "settings", None)
+        if isinstance(parent_settings, dict):
+            parent_settings.update(live_settings)
         super().accept()
 
     # ── Content builders ─────────────────────────────────────────────────────
@@ -1696,6 +1729,15 @@ class SettingsDialog(QDialog):
             "into Arabic speech, using the selected voice.")
         form.addRow("Latin Words", self.speech_read_latin_words)
 
+        self.prefetch_next_page_translation = QCheckBox(
+            "Translate the next page while reading")
+        self.prefetch_next_page_translation.setChecked(
+            bool(settings.get("prefetch_next_page_translation", False)))
+        self.prefetch_next_page_translation.setToolTip(
+            "When automatic page reading is active, translate the next PDF "
+            "page in the background while the current page is being read.")
+        form.addRow("Successive Pages", self.prefetch_next_page_translation)
+
         self.speech_engine.currentIndexChanged.connect(
             self._update_tts_engine_notice)
         self.speech_engine.currentIndexChanged.connect(
@@ -2156,6 +2198,7 @@ class SettingsDialog(QDialog):
         enabled_check.setToolTip("Allow this provider to be selected and used for translations")
         enabled_check.setProperty("cp_id", cid)
         enabled_check.toggled.connect(lambda _v, _id=cid: self._on_custom_enabled_toggled(_id))
+        enabled_check.toggled.connect(self._persist_toggled_settings)
         header.addWidget(enabled_check)
 
         del_btn = _ProviderActionButton("×")
@@ -2293,6 +2336,7 @@ class SettingsDialog(QDialog):
         reasoning_check.setEnabled(reasoning_supported)
         reasoning_check.setToolTip("Gemma 2 does not support reasoning." if not reasoning_supported else "When enabled, send reasoning/thinking options with requests.")
         reasoning_check.toggled.connect(lambda _v, _id=cid: self._on_custom_reasoning_toggled(_id))
+        reasoning_check.toggled.connect(self._persist_toggled_settings)
         caps_layout.addWidget(reasoning_check)
         reasoning_detect_btn = QPushButton("Detect")
         reasoning_detect_btn.setFixedWidth(72)
@@ -2308,6 +2352,7 @@ class SettingsDialog(QDialog):
         vision_check.setChecked(bool(entry.get("vision_enabled", False)))
         vision_check.setToolTip("When enabled, allow image selections and send image input to this provider.")
         vision_check.toggled.connect(lambda _v, _id=cid: self._on_custom_vision_toggled(_id))
+        vision_check.toggled.connect(self._persist_toggled_settings)
         caps_layout.addWidget(vision_check)
         vision_detect_btn = QPushButton("Detect")
         vision_detect_btn.setFixedWidth(72)
@@ -4083,6 +4128,9 @@ class SettingsDialog(QDialog):
             ),
             "speech_read_latin_words": (
                 self.speech_read_latin_words.isChecked()
+            ),
+            "prefetch_next_page_translation": (
+                self.prefetch_next_page_translation.isChecked()
             ),
             "settings_size": [self.width(), self.height()],
             "settings_pos": [self.x(), self.y()],

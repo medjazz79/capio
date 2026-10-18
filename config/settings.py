@@ -125,6 +125,7 @@ DEFAULTS = {
     "speech_voice": "fr-FR-VivienneMultilingualNeural",
     "automatic_speech_voice": False,
     "speech_read_latin_words": False,
+    "prefetch_next_page_translation": False,
     # --- session memory ---------------------------------------------------
     "window_geometry": "",
     "splitter_sizes": [],

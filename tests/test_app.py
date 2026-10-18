@@ -5509,22 +5509,46 @@ class TestReaderZoom(_GuiCase):
             worker.cleanup_output()
 
     def test_automatic_speech_voice_setting_round_trips(self):
+        from config.settings import load
         from main import SettingsDialog
+        from PySide6.QtWidgets import QWidget
 
-        dialog = SettingsDialog(dict(DEFAULTS))
+        host = QWidget()
+        self.addCleanup(host.close)
+        host.settings = dict(DEFAULTS)
+        dialog = SettingsDialog(host.settings, host)
         self.addCleanup(dialog.close)
         self.assertFalse(dialog.automatic_speech_voice.isChecked())
         self.assertFalse(dialog.speech_read_latin_words.isChecked())
+        self.assertFalse(
+            dialog.prefetch_next_page_translation.isChecked())
 
-        dialog.automatic_speech_voice.setChecked(True)
-        dialog.speech_read_latin_words.setChecked(True)
+        for checkbox in (
+            dialog.automatic_speech_voice,
+            dialog.speech_read_latin_words,
+            dialog.prefetch_next_page_translation,
+        ):
+            checkbox.blockSignals(True)
+            checkbox.setChecked(True)
+            checkbox.blockSignals(False)
         self.assertTrue(dialog.values()["automatic_speech_voice"])
         self.assertTrue(dialog.values()["speech_read_latin_words"])
+        self.assertTrue(
+            dialog.values()["prefetch_next_page_translation"])
 
-        reopened = SettingsDialog(dialog.values())
+        dialog.accept()
+        self.assertTrue(host.settings["prefetch_next_page_translation"])
+
+        saved_settings = load()
+        self.assertTrue(saved_settings["automatic_speech_voice"])
+        self.assertTrue(saved_settings["speech_read_latin_words"])
+        self.assertTrue(saved_settings["prefetch_next_page_translation"])
+
+        reopened = SettingsDialog(saved_settings)
         self.addCleanup(reopened.close)
         self.assertTrue(reopened.automatic_speech_voice.isChecked())
         self.assertTrue(reopened.speech_read_latin_words.isChecked())
+        self.assertTrue(reopened.prefetch_next_page_translation.isChecked())
 
     def test_speech_worker_streams_each_segment_in_order(self):
         from unittest import mock
@@ -11039,6 +11063,177 @@ class TestMemoryZoom(_GuiCase):
         finally:
             for popup in window.popups:
                 popup.close()
+            window.close()
+
+    def test_automatic_page_reading_uses_prefetched_translation(self):
+        from unittest import mock
+        from main import MainWindow
+
+        path = self._make_pdf("prefetched_page_translation.pdf", pages=2)
+        window = MainWindow()
+        try:
+            window.settings["prefetch_next_page_translation"] = True
+            book = window._add_tab(path)
+            self.assertIsNotNone(book)
+            with mock_chain_translate(
+                return_value=("initial translation", "Test")
+            ):
+                window.translate_page(book, 0)
+                popup = window.popups[-1]
+                self.assertTrue(popup._worker.wait(20000))
+                self.app.processEvents()
+
+            window._automatic_page_reading_book = book
+            window._automatic_page_reading_popup = popup
+            window._automatic_page_reading_page = 0
+            window._automatic_page_waiting_for_speech = True
+            with mock_chain_translate(
+                return_value=("prefetched page translation", "Test")
+            ):
+                window._start_automatic_page_prefetch(book, popup, 0)
+                worker = window._automatic_page_prefetch_worker
+                self.assertIsNotNone(worker)
+                self.assertTrue(worker.wait(20000))
+                self.app.processEvents()
+
+            prefetched = window._automatic_page_prefetch_result
+            self.assertIsNotNone(prefetched)
+            self.assertEqual(prefetched[1], 1)
+            self.assertEqual(prefetched[2], "memory page 1")
+            window._automatic_page_waiting_for_speech = False
+            with (
+                mock.patch.object(
+                    window, "_translate_selection") as translate,
+                mock.patch.object(popup, "_toggle_speech"),
+                mock.patch.object(
+                    window, "_start_automatic_page_prefetch"),
+            ):
+                window._translate_automatic_page(book, popup, 1)
+                self.app.processEvents()
+
+            translate.assert_not_called()
+            self.assertEqual(popup.navigation_page, 1)
+            self.assertEqual(
+                popup._translation_text, "prefetched page translation")
+            self.assertIsNone(window._automatic_page_prefetch_result)
+        finally:
+            for popup in window.popups:
+                popup.close()
+            window.close()
+
+    def test_automatic_page_prefetch_waits_before_request_and_for_speech_worker(self):
+        from unittest import mock
+        from main import MainWindow
+
+        path = self._make_pdf("delayed_page_prefetch.pdf", pages=3)
+        window = MainWindow()
+        try:
+            window.settings["prefetch_next_page_translation"] = True
+            book = window._add_tab(path)
+            self.assertIsNotNone(book)
+            with mock_chain_translate(
+                return_value=("initial translation", "Test")
+            ):
+                window.translate_page(book, 0)
+                popup = window.popups[-1]
+                self.assertTrue(popup._worker.wait(20000))
+                self.app.processEvents()
+
+            window._automatic_page_reading_book = book
+            window._automatic_page_reading_popup = popup
+            window._automatic_page_reading_page = 0
+            popup._speech_available = True
+            with (
+                mock.patch.object(popup, "_toggle_speech"),
+                mock.patch.object(
+                    window, "_start_automatic_page_prefetch") as prefetch,
+            ):
+                timer = window._automatic_page_prefetch_timer
+                speech_worker = mock.Mock()
+                speech_worker.isRunning.return_value = True
+                popup._speech_worker = speech_worker
+                for page_no in (0, 1):
+                    speech_worker.isRunning.return_value = True
+                    window._automatic_page_reading_page = page_no
+                    popup.set_page_navigation(page_no, book.page_count())
+                    window._on_automatic_page_translation_ready(popup)
+
+                    self.assertEqual(timer.interval(), 5000)
+                    self.assertTrue(timer.isActive())
+                    self.assertEqual(
+                        window._automatic_page_prefetch_scheduled,
+                        (book, popup, page_no))
+
+                    timer.stop()
+                    window._start_scheduled_automatic_page_prefetch()
+                    self.assertEqual(timer.interval(), 250)
+                    self.assertTrue(timer.isActive())
+                    self.assertEqual(prefetch.call_count, page_no)
+
+                    speech_worker.isRunning.return_value = False
+                    timer.stop()
+                    window._start_scheduled_automatic_page_prefetch()
+                    prefetch.assert_called_with(book, popup, page_no)
+                self.assertIsNone(
+                    window._automatic_page_prefetch_scheduled)
+        finally:
+            window._automatic_page_prefetch_timer.stop()
+            for popup in window.popups:
+                popup.close()
+            window.close()
+
+    def test_automatic_page_prefetch_input_handles_ocr_and_image_pages(self):
+        from unittest import mock
+        from PySide6.QtCore import QRect
+        from main import MainWindow
+
+        window = MainWindow()
+        book = window._add_tab(
+            self._make_pdf("prefetch_input_modes.pdf", pages=1))
+        self.assertIsNotNone(book)
+        try:
+            image = object()
+            pil_image = object()
+            prepared_image = object()
+            with (
+                mock.patch.object(
+                    book, "page_needs_full_page_ocr", return_value=True),
+                mock.patch.object(
+                    book, "render_page_image", return_value=image
+                ) as render,
+                mock.patch("main.ocr.is_available", return_value=True),
+                mock.patch(
+                    "main.pdf_utils.qimage_to_pil", return_value=pil_image),
+                mock.patch(
+                    "main.ocr.prepare_image",
+                    return_value=prepared_image),
+            ):
+                self.assertEqual(
+                    window._automatic_page_translation_input(
+                        book, 0, QRect()),
+                    (None, prepared_image, None),
+                )
+                render.assert_called_once_with(0, dpi=300)
+
+            window.settings["selection_mode"] = "image"
+            with (
+                mock.patch.object(
+                    book, "page_needs_full_page_ocr", return_value=False),
+                mock.patch.object(
+                    book, "render_page_image", return_value=image
+                ) as render,
+                mock.patch(
+                    "main.pdf_utils.qimage_to_pil", return_value=pil_image),
+                mock.patch("main.ocr.prepare_image") as prepare,
+            ):
+                self.assertEqual(
+                    window._automatic_page_translation_input(
+                        book, 0, QRect()),
+                    (None, pil_image, ()),
+                )
+                render.assert_called_once_with(0, dpi=300)
+                prepare.assert_not_called()
+        finally:
             window.close()
 
     def test_translate_full_page_uses_ocr_for_scan_with_sparse_text_layer(self):

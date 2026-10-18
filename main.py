@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
 
 from config.settings import DEFAULT_MODEL, load, resolve_model, save
 from popup.translate_popup import TranslatePopup
+from popup.worker import PageTranslationWorker, TranslateWorker
 from reader import pdf_utils
 from reader.bookview import BookView
 from reader.document_import import SUPPORTED_EXTENSIONS, SUPPORTED_FILE_FILTER
@@ -638,6 +639,24 @@ class MainWindow(QMainWindow):
         self._automatic_page_reading_page: int | None = None
         self._automatic_page_waiting_for_speech = False
         self._automatic_page_reading_at_end = False
+        self._automatic_page_prefetch_worker: TranslateWorker | None = None
+        self._automatic_page_prefetch_workers: list[TranslateWorker] = []
+        self._automatic_page_prefetch_metadata: dict[
+            TranslateWorker, tuple[BookView, int, str | None]
+        ] = {}
+        self._automatic_page_prefetch_result: (
+            tuple[BookView, int, str | None, str, str] | None
+        ) = None
+        self._automatic_page_waiting_for_prefetch: int | None = None
+        self._automatic_page_prefetch_error: tuple[int, str] | None = None
+        self._automatic_page_prefetch_scheduled: (
+            tuple[BookView, TranslatePopup, int] | None
+        ) = None
+        self._automatic_page_prefetch_timer = QTimer(self)
+        self._automatic_page_prefetch_timer.setSingleShot(True)
+        self._automatic_page_prefetch_timer.setInterval(5000)
+        self._automatic_page_prefetch_timer.timeout.connect(
+            self._start_scheduled_automatic_page_prefetch)
         self._ocr_ok: bool | None = None
         self.ocrWarmed.connect(self._on_ocr_warmed)
 
@@ -1923,6 +1942,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         self.settings["source_language"] = source_language
         self.settings["target_language"] = target_language
+        if origin is self._automatic_page_reading_popup:
+            self._cancel_automatic_page_prefetch()
         self._sync_language_combos()
         for popup in self.popups:
             if popup is not origin and popup.isVisible():
@@ -2188,6 +2209,7 @@ class MainWindow(QMainWindow):
         self._automatic_page_reading_page = page_no
         self._automatic_page_waiting_for_speech = False
         self._automatic_page_reading_at_end = False
+        self._cancel_automatic_page_prefetch()
         self._translate_automatic_page(book, popup, page_no)
 
     def _translate_automatic_page(
@@ -2224,6 +2246,36 @@ class MainWindow(QMainWindow):
         book.last_selection = None
         self._save_session_soon()
         popup.set_page_navigation(page_no, book.page_count())
+        prefetched = self._automatic_page_prefetch_result
+        if (
+            prefetched is not None
+            and prefetched[0] is book
+            and prefetched[1] == page_no
+        ):
+            self._automatic_page_prefetch_result = None
+            self._automatic_page_prefetch_error = None
+            popup.set_pretranslated_content(
+                prefetched[3], prefetched[4], prefetched[2])
+            return
+
+        worker = self._automatic_page_prefetch_worker
+        prefetch_error = self._automatic_page_prefetch_error
+        if worker is not None:
+            metadata = self._automatic_page_prefetch_metadata.get(worker)
+            if (
+                metadata is not None
+                and metadata[0] is book
+                and metadata[1] == page_no
+            ):
+                self._automatic_page_waiting_for_prefetch = page_no
+                popup.spin.setText("Waiting for the next page translation…")
+                popup.spin.show()
+                return
+        self._cancel_automatic_page_prefetch()
+        if prefetch_error is not None and prefetch_error[0] == page_no:
+            self._flash_info(
+                "Background translation was not ready; translating this "
+                f"page normally. {prefetch_error[1]}")
         self._translate_selection(
             book,
             page_no,
@@ -2255,6 +2307,244 @@ class MainWindow(QMainWindow):
             return
         self._automatic_page_waiting_for_speech = True
         popup._toggle_speech()
+        if self.settings.get("prefetch_next_page_translation", False):
+            book = self._automatic_page_reading_book
+            page_no = self._automatic_page_reading_page
+            if book is not None and page_no is not None:
+                self._automatic_page_prefetch_scheduled = (
+                    book, popup, page_no)
+                self._automatic_page_prefetch_timer.start(5000)
+
+    def _start_scheduled_automatic_page_prefetch(self) -> None:
+        scheduled = self._automatic_page_prefetch_scheduled
+        if scheduled is None:
+            return
+        book, popup, page_no = scheduled
+        if (
+            book is not self._automatic_page_reading_book
+            or popup is not self._automatic_page_reading_popup
+            or page_no != self._automatic_page_reading_page
+            or not self.settings.get("prefetch_next_page_translation", False)
+        ):
+            self._automatic_page_prefetch_scheduled = None
+            return
+
+        speech_worker = popup._speech_worker
+        if speech_worker is not None and speech_worker.isRunning():
+            self._automatic_page_prefetch_timer.start(250)
+            return
+
+        self._automatic_page_prefetch_scheduled = None
+        self._start_automatic_page_prefetch(book, popup, page_no)
+
+    def _start_automatic_page_prefetch(
+        self,
+        book: BookView | None,
+        popup: TranslatePopup,
+        page_no: int | None,
+    ) -> None:
+        if (
+            not self.settings.get("prefetch_next_page_translation", False)
+            or book is None
+            or page_no is None
+            or book is not self._automatic_page_reading_book
+            or popup is not self._automatic_page_reading_popup
+            or page_no != self._automatic_page_reading_page
+            or not (
+                self._automatic_page_waiting_for_speech
+                or self._automatic_page_waiting_for_prefetch == page_no + 1
+            )
+            or not book.has_doc()
+        ):
+            return
+        next_page = page_no + 1
+        if next_page >= book.page_count():
+            return
+        current_worker = self._automatic_page_prefetch_worker
+        if current_worker is not None:
+            metadata = self._automatic_page_prefetch_metadata.get(
+                current_worker)
+            if metadata is not None and metadata[0] is book and metadata[1] == next_page:
+                return
+            self._cancel_automatic_page_prefetch()
+
+        cached = self._automatic_page_prefetch_result
+        if cached is not None and cached[0] is book and cached[1] == next_page:
+            return
+        self._automatic_page_prefetch_error = None
+        try:
+            page_rect = book.page_rect_on_screen(next_page)
+            worker_settings = dict(self.settings)
+            worker_settings["_full_page_translation"] = True
+            worker = PageTranslationWorker(
+                worker_settings,
+                prepare_input=lambda b=book, n=next_page, r=page_rect:
+                    self._automatic_page_translation_input(b, n, r),
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            logging.exception(
+                "Could not prepare automatic translation for page %d",
+                next_page + 1,
+            )
+            self._automatic_page_prefetch_error = (next_page, str(error))
+            return
+
+        self._automatic_page_prefetch_worker = worker
+        self._automatic_page_prefetch_workers.append(worker)
+        self._automatic_page_prefetch_metadata[worker] = (
+            book, next_page, None)
+        worker.source_ready.connect(
+            lambda source, w=worker:
+                self._on_automatic_page_prefetch_source_ready(w, source))
+        worker.done.connect(
+            lambda translated, badge, w=worker:
+                self._on_automatic_page_prefetch_done(
+                    w, translated, badge))
+        worker.failed.connect(
+            lambda error, w=worker:
+                self._on_automatic_page_prefetch_failed(w, error))
+        worker.finished.connect(
+            lambda w=worker: self._on_automatic_page_prefetch_finished(w))
+        try:
+            worker.start()
+        except RuntimeError as error:
+            logging.exception(
+                "Could not start automatic translation for page %d",
+                next_page + 1,
+            )
+            self._automatic_page_prefetch_worker = None
+            self._automatic_page_prefetch_error = (next_page, str(error))
+            self._automatic_page_prefetch_metadata.pop(worker, None)
+            self._automatic_page_prefetch_workers.remove(worker)
+            worker.deleteLater()
+
+    def _automatic_page_translation_input(
+        self, book: BookView, page_no: int, page_rect: QRect,
+    ) -> tuple[str | None, object | None, tuple[str, ...] | None]:
+        force_ocr = book.page_needs_full_page_ocr(page_no)
+        selection_mode = self.settings.get("selection_mode", "ocr")
+        if (
+            selection_mode != "image"
+            and not force_ocr
+        ):
+            body_text, page_number = book.page_body_text(page_no)
+            if body_text:
+                if page_number:
+                    body_text = f"{body_text}\n\n<small>{page_number}</small>"
+                return body_text, None, ("ru", "en")
+
+        if selection_mode == "image":
+            image = book.render_page_image(page_no, dpi=300)
+            return None, pdf_utils.qimage_to_pil(image), ()
+
+        if not force_ocr:
+            kind, payload = book.extract(page_no, page_rect)
+            if kind == "text":
+                return payload, None, ("ru", "en")
+        if not ocr.is_available():
+            raise RuntimeError(
+                "Scanned-page OCR requires OneOCR from the Windows 11 "
+                "Snipping Tool.")
+        image = book.render_page_image(page_no, dpi=300)
+        pil_image = ocr.prepare_image(pdf_utils.qimage_to_pil(image))
+        source_language = self.settings.get("source_language", "auto")
+        return None, pil_image, self._ocr_languages_for(source_language)
+
+    def _on_automatic_page_prefetch_source_ready(
+        self, worker: TranslateWorker, source: str,
+    ) -> None:
+        metadata = self._automatic_page_prefetch_metadata.get(worker)
+        if metadata is not None:
+            self._automatic_page_prefetch_metadata[worker] = (
+                metadata[0], metadata[1], source)
+
+    def _on_automatic_page_prefetch_done(
+        self, worker: TranslateWorker, translated_text: str, badge: str,
+    ) -> None:
+        metadata = self._automatic_page_prefetch_metadata.get(worker)
+        if worker is not self._automatic_page_prefetch_worker or metadata is None:
+            return
+        book, page_no, source_text = metadata
+        self._automatic_page_prefetch_worker = None
+        if (
+            not self.settings.get("prefetch_next_page_translation", False)
+            or book is not self._automatic_page_reading_book
+            or self._automatic_page_reading_page is None
+            or (
+                page_no != self._automatic_page_reading_page + 1
+                and self._automatic_page_waiting_for_prefetch != page_no
+            )
+            or not translated_text.strip()
+        ):
+            if not translated_text.strip():
+                self._automatic_page_prefetch_error = (
+                    page_no, "The translated page was empty.")
+                if self._automatic_page_waiting_for_prefetch == page_no:
+                    self._automatic_page_waiting_for_prefetch = None
+                    popup = self._automatic_page_reading_popup
+                    if popup is not None:
+                        QTimer.singleShot(
+                            0,
+                            lambda b=book, p=popup, n=page_no:
+                                self._translate_automatic_page(b, p, n),
+                        )
+            return
+        self._automatic_page_prefetch_result = (
+            book, page_no, source_text, translated_text, badge)
+        if self._automatic_page_waiting_for_prefetch == page_no:
+            self._automatic_page_waiting_for_prefetch = None
+            QTimer.singleShot(
+                0,
+                lambda b=book,
+                       p=self._automatic_page_reading_popup,
+                       n=page_no: self._translate_automatic_page(b, p, n)
+                       if p is not None else None,
+            )
+
+    def _on_automatic_page_prefetch_failed(
+        self, worker: TranslateWorker, error: str,
+    ) -> None:
+        metadata = self._automatic_page_prefetch_metadata.get(worker)
+        if worker is not self._automatic_page_prefetch_worker or metadata is None:
+            return
+        book, page_no, _source_text = metadata
+        self._automatic_page_prefetch_worker = None
+        self._automatic_page_prefetch_error = (page_no, error)
+        if self._automatic_page_waiting_for_prefetch == page_no:
+            self._automatic_page_waiting_for_prefetch = None
+            popup = self._automatic_page_reading_popup
+            if popup is not None:
+                QTimer.singleShot(
+                    0,
+                    lambda b=book, p=popup, n=page_no:
+                        self._translate_automatic_page(b, p, n),
+                )
+
+    def _on_automatic_page_prefetch_finished(
+        self, worker: TranslateWorker,
+    ) -> None:
+        self._automatic_page_prefetch_metadata.pop(worker, None)
+        if worker in self._automatic_page_prefetch_workers:
+            self._automatic_page_prefetch_workers.remove(worker)
+        worker.deleteLater()
+
+    def _cancel_automatic_page_prefetch(self) -> None:
+        worker = self._automatic_page_prefetch_worker
+        self._automatic_page_prefetch_worker = None
+        self._automatic_page_prefetch_result = None
+        self._automatic_page_waiting_for_prefetch = None
+        self._automatic_page_prefetch_error = None
+        self._automatic_page_prefetch_timer.stop()
+        self._automatic_page_prefetch_scheduled = None
+        if worker is None:
+            return
+        if worker.isRunning():
+            worker.requestInterruption()
+        else:
+            self._automatic_page_prefetch_metadata.pop(worker, None)
+            if worker in self._automatic_page_prefetch_workers:
+                self._automatic_page_prefetch_workers.remove(worker)
+            worker.deleteLater()
 
     def _on_automatic_page_speech_finished(
         self, popup: TranslatePopup, error: str
@@ -2284,6 +2574,19 @@ class MainWindow(QMainWindow):
                 "Automatic page reading reached the end of the book. "
                 "Click the page counter to turn it off.")
             return
+        scheduled = self._automatic_page_prefetch_scheduled
+        if (
+            self._automatic_page_prefetch_timer.isActive()
+            and scheduled is not None
+            and scheduled[0] is book
+            and scheduled[1] is popup
+            and scheduled[2] == page_no
+        ):
+            self._automatic_page_waiting_for_prefetch = next_page
+            popup.spin.setText(
+                "Waiting before translating the next page…")
+            popup.spin.show()
+            return
         QTimer.singleShot(
             0,
             lambda: self._translate_automatic_page(book, popup, next_page),
@@ -2303,6 +2606,7 @@ class MainWindow(QMainWindow):
         self._automatic_page_reading_page = None
         self._automatic_page_waiting_for_speech = False
         self._automatic_page_reading_at_end = False
+        self._cancel_automatic_page_prefetch()
         if popup is not None:
             popup.set_automatic_page_reading(False)
             if popup._speech_active:
@@ -2485,6 +2789,36 @@ class MainWindow(QMainWindow):
             self.settings = dlg.values()
             self._sync_language_combos()
             save(self.settings)
+            waiting_page = self._automatic_page_waiting_for_prefetch
+            book = self._automatic_page_reading_book
+            popup = self._automatic_page_reading_popup
+            delayed_prefetch_active = (
+                self._automatic_page_prefetch_timer.isActive()
+                and self._automatic_page_prefetch_scheduled is not None
+                and self.settings.get(
+                    "prefetch_next_page_translation", False)
+            )
+            if not delayed_prefetch_active:
+                self._cancel_automatic_page_prefetch()
+                if (
+                    waiting_page is not None
+                    and book is not None
+                    and popup is not None
+                ):
+                    self._translate_automatic_page(
+                        book, popup, waiting_page)
+                elif (
+                    self.settings.get(
+                        "prefetch_next_page_translation", False)
+                    and self._automatic_page_waiting_for_speech
+                    and book is not None
+                    and popup is not None
+                ):
+                    page_no = self._automatic_page_reading_page
+                    if page_no is not None:
+                        self._automatic_page_prefetch_scheduled = (
+                            book, popup, page_no)
+                        self._automatic_page_prefetch_timer.start(5000)
             QApplication.instance().setStyleSheet(app_stylesheet(
                 self.settings.get("theme", "Dark Slate"),
                 self.settings.get("color_scheme", "system"),
@@ -3128,6 +3462,14 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 QTimer.singleShot(100, self.close)
                 return
+
+        self._stop_automatic_page_reading()
+        if any(worker.isRunning()
+               for worker in self._automatic_page_prefetch_workers):
+            self._shutdown_waiting = True
+            e.ignore()
+            QTimer.singleShot(100, self.close)
+            return
 
         if self._restart_requested:
             self._save_session_soon()

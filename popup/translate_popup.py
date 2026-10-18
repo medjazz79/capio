@@ -719,6 +719,31 @@ class TranslatePopup(QDialog):
             ocr_langs=ocr_langs,
         )
 
+    def set_pretranslated_content(
+        self,
+        translated_text: str,
+        badge: str,
+        source_text: str | None = None,
+    ) -> None:
+        self._reset_speech_for_new_translation()
+        self._translation_generation += 1
+        self._chat_messages.clear()
+        self._chat_entries.clear()
+        self._chat_partial_text = ""
+        self._chat_render_timer.stop()
+        self.chat_transcript.clear()
+        self.chat_send_btn.setEnabled(False)
+        self._toggle_chat_panel(False)
+        self._streamed_partial = ""
+        self._streamed_displayed = ""
+        self._worker = None
+        self._source_text = source_text
+        self._source_image = None
+        self.result.clear()
+        self._apply_streamed_typography()
+        self._on_done(translated_text, badge)
+        self.translationReady.emit()
+
     def _create_language_button(
         self, kind: str, title: str, selected_code: str,
     ) -> QPushButton:

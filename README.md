@@ -61,6 +61,15 @@ then translate its text with OCR or send the image to a vision-capable model.
 - Open PDF, EPUB, DOCX, TXT, Markdown, HTML, XPS/OXPS, FB2, CBZ, and common
   image files.
 
+For hands-free listening, start automatic page reading from the translation
+window's page counter. In **Settings → Read Aloud / TTS**, enable **Translate
+the next page while reading** to prepare each following page in the background.
+Capio waits five seconds after speech starts before requesting the next
+translation, and waits for the current speech-generation task to finish before
+sending that request. The next page can then be ready when playback reaches it.
+Save the setting with **Save Changes**; it is remembered the next time you open
+Capio.
+
 ## I want to use Capio
 
 1. Install **Python 3.10 or newer** on Windows.
