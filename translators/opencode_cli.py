@@ -21,6 +21,12 @@ class OpenCodeCLIError(RuntimeError):
     """OpenCode CLI is missing, failed, or returned an invalid response."""
 
 
+def _hidden_console_options() -> dict[str, int]:
+    if os.name != "nt":
+        return {}
+    return {"creationflags": subprocess.CREATE_NO_WINDOW}
+
+
 def find_executable() -> str | None:
     executable = shutil.which("opencode")
     if executable:
@@ -64,6 +70,7 @@ def list_models(timeout: int = 30) -> list[str]:
             errors="replace",
             timeout=timeout,
             check=False,
+            **_hidden_console_options(),
         )
     except subprocess.TimeoutExpired as error:
         raise OpenCodeCLIError("Timed out while listing OpenCode models") from error
@@ -183,6 +190,7 @@ def translate(
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                **_hidden_console_options(),
             )
         except subprocess.TimeoutExpired as error:
             raise OpenCodeCLIError(
@@ -255,6 +263,7 @@ def stream_translate(
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    **_hidden_console_options(),
                 )
             except OSError as error:
                 raise OpenCodeCLIError(
@@ -382,6 +391,7 @@ def chat(
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                **_hidden_console_options(),
             )
         except subprocess.TimeoutExpired as error:
             raise OpenCodeCLIError(

@@ -3514,12 +3514,30 @@ class TestChain(unittest.TestCase):
             ),
             stderr="",
         )
-        with mock.patch.object(opencode_cli, "find_executable", return_value="opencode"):
-            with mock.patch.object(opencode_cli.subprocess, "run", return_value=completed):
-                self.assertEqual(
-                    opencode_cli.list_models(),
-                    ["opencode/glm-5.2", "anthropic/claude-sonnet-4"],
-                )
+        self.assertEqual(
+            opencode_cli._hidden_console_options(),
+            (
+                {"creationflags": opencode_cli.subprocess.CREATE_NO_WINDOW}
+                if opencode_cli.os.name == "nt"
+                else {}
+            ),
+        )
+        with (
+            mock.patch.object(
+                opencode_cli, "find_executable", return_value="opencode"),
+            mock.patch.object(
+                opencode_cli, "_hidden_console_options",
+                return_value={"creationflags": 123},
+            ),
+            mock.patch.object(
+                opencode_cli.subprocess, "run", return_value=completed,
+            ) as run,
+        ):
+            self.assertEqual(
+                opencode_cli.list_models(),
+                ["opencode/glm-5.2", "anthropic/claude-sonnet-4"],
+            )
+        self.assertEqual(run.call_args.kwargs["creationflags"], 123)
 
     def test_opencode_cli_finds_desktop_bundled_executable(self):
         from pathlib import Path
