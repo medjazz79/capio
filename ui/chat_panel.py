@@ -272,9 +272,6 @@ class ChatPanel(QWidget):
         self.transcript = ChatTranscriptBrowser(self)
         self.transcript.setObjectName("standaloneChatTranscript")
         self.transcript.setOpenExternalLinks(True)
-        self.transcript.setToolTip(
-            "Click a word to read from there; click empty message space "
-            "to read, pause, or resume that message.")
         self.transcript.textPositionClicked.connect(
             self._on_transcript_position_clicked)
         self.transcript.backgroundPositionClicked.connect(
@@ -1024,7 +1021,37 @@ class ChatPanel(QWidget):
         self._update_explain_button_state()
 
     def _on_transcript_position_clicked(self, position: int) -> None:
+        # A word click always starts the read from that word, even while
+        # something is already playing.
         self._start_speech_from_position(position)
+
+    def _toggle_message_speech(self, position: int) -> None:
+        """Pause or resume the read when the empty space of a message is clicked.
+
+        Clicking words is not a toggle: a word click always starts the read
+        from that word. Only a click on the blank space around the words pauses
+        the voice, and a later blank click resumes it from the last spoken
+        word. A blank click while nothing is playing starts the whole message.
+        """
+        message = self._transcript_message_at_position(position)
+        if message is None:
+            return
+        role, marker_position, content_blocks = (
+            message[0], message[1], message[3])
+        if role not in {"user", "assistant"}:
+            return
+        if not any(block.text().strip() for block in content_blocks):
+            return
+        if (
+            self._speech_active
+            and self._speech_message_start == marker_position
+        ):
+            if self._speech_paused:
+                self._resume_speech()
+            else:
+                self._pause_speech()
+            return
+        self._start_speech_from_position(position, whole_message=True)
 
     def _transcript_message_at_position(self, position: int):
         document = self.transcript.document()
@@ -1060,25 +1087,7 @@ class ChatPanel(QWidget):
         return role, marker.position(), cursor, content_blocks
 
     def _on_transcript_background_clicked(self, position: int) -> None:
-        message = self._transcript_message_at_position(position)
-        if message is None:
-            return
-        role, marker_position, content_blocks = (
-            message[0], message[1], message[3])
-        if role not in {"user", "assistant"}:
-            return
-        if not any(block.text().strip() for block in content_blocks):
-            return
-        if (
-            self._speech_active
-            and self._speech_message_start == marker_position
-        ):
-            if self._speech_paused:
-                self._resume_speech()
-            else:
-                self._pause_speech()
-            return
-        self._start_speech_from_position(position, whole_message=True)
+        self._toggle_message_speech(position)
 
     def _start_speech_from_position(
         self, position: int, *, whole_message: bool = False,
@@ -1097,7 +1106,7 @@ class ChatPanel(QWidget):
         if message is None:
             return
         role, marker_position, cursor, content_blocks = message
-        if role != "assistant" and not (whole_message and role == "user"):
+        if role not in {"user", "assistant"}:
             return
         clicked_block = cursor.block()
         if not any(
@@ -1137,6 +1146,7 @@ class ChatPanel(QWidget):
                 block.text()
                 for block in content_blocks
                 if block.position() > clicked_block.position()
+                and block.text().strip()
             ]
             speech_text = "\n".join(readable_blocks)
             document_start = (

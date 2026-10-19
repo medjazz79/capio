@@ -612,6 +612,70 @@ class TestTranslationChat(unittest.TestCase):
             panel._speech_paused = False
             panel.close()
 
+    def test_a_word_click_restarts_the_read_from_that_word(self):
+        """A word click is not a toggle: it always starts from that word.
+
+        Only a click on the blank space around the words pauses and resumes.
+        """
+        from ui.chat_panel import ChatPanel
+
+        panel = ChatPanel(lambda: {"speech_rate": 1.0})
+        panel._entries = [
+            ("assistant", "First sentence. Second sentence."),
+        ]
+        panel._render()
+        try:
+            with (
+                mock.patch("ui.chat_panel.speech_available", return_value=True),
+                mock.patch("ui.chat_panel.SpeechWorker") as worker_factory,
+            ):
+                worker = mock.Mock()
+                worker.isRunning.return_value = False
+                worker_factory.return_value = worker
+
+                first = panel.transcript.document().find("First")
+                panel._on_transcript_position_clicked(first.selectionStart())
+                self.assertEqual(panel._speech_text, "First sentence. Second sentence.")
+
+                second = panel.transcript.document().find("Second")
+                panel._on_transcript_position_clicked(second.selectionStart())
+
+                self.assertEqual(panel._speech_text, "Second sentence.")
+                self.assertFalse(panel._speech_paused)
+                self.assertEqual(worker_factory.call_count, 2)
+        finally:
+            panel._stop_speech()
+            panel.close()
+
+    def test_a_word_in_the_user_message_starts_reading_from_that_word(self):
+        """The user's own message is readable too, from the clicked word."""
+        from ui.chat_panel import ChatPanel
+
+        panel = ChatPanel(lambda: {"speech_rate": 1.0})
+        panel._entries = [
+            ("user", "Explain: selected phrase"),
+            ("assistant", "A complete reply."),
+        ]
+        panel._render()
+        try:
+            with (
+                mock.patch("ui.chat_panel.speech_available", return_value=True),
+                mock.patch("ui.chat_panel.SpeechWorker") as worker_factory,
+            ):
+                worker = mock.Mock()
+                worker.isRunning.return_value = False
+                worker_factory.return_value = worker
+
+                word = panel.transcript.document().find("selected")
+                panel._on_transcript_position_clicked(word.selectionStart())
+
+                self.assertEqual(panel._speech_text, "selected phrase")
+                self.assertEqual(
+                    worker_factory.call_args.args[0], "selected phrase")
+        finally:
+            panel._stop_speech()
+            panel.close()
+
     def test_all_explain_styles_allow_web_search(self):
         from ui.chat_panel import ChatPanel, explanation_instruction
 
