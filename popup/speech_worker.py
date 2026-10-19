@@ -207,7 +207,7 @@ def _cache_key(
     ssml_language: str | None = None,
     engine: str = "edge",
 ) -> str:
-    parts = ["v17", engine, voice, rate]
+    parts = ["v18", engine, voice, rate]
     if ssml_language is not None:
         parts.append(f"ssml-language:{ssml_language}")
     parts.append(segment)
@@ -1579,6 +1579,19 @@ def _speech_source_word_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+_MAX_BOUNDARY_WORDS = 32
+"""How many source words a single provider boundary may be matched against.
+
+Edge reports one boundary per spoken token, but tokens that carry no boundary
+of their own -- digits, notation -- are folded into the neighbouring word. Real
+synthesis of "l'heure du décès entre 2 h et 3 h du matin." returns
+"entre 2 h et 3 h" as one boundary covering seven source words, so a small
+window left it unmatched and the highlight froze there for the rest of the
+read. The loop still stops as soon as the accumulated text stops being a
+prefix of the boundary, so this bound is only a safety valve.
+"""
+
+
 def _match_boundary_span(
     boundary_text: str,
     source_text: str,
@@ -1591,7 +1604,8 @@ def _match_boundary_span(
         return None
     start_index = next_word_index
     combined = ""
-    for end_index in range(start_index, min(start_index + 5, len(spans))):
+    for end_index in range(
+            start_index, min(start_index + _MAX_BOUNDARY_WORDS, len(spans))):
         start, end = spans[end_index]
         source_token = _normalize_boundary_token(source_text[start:end])
         combined += source_token
@@ -1624,23 +1638,26 @@ def _match_synthesis_boundary_span(
     """Prefer alignment against the actual spoken words after pronunciation conversion."""
     target = _normalize_boundary_token(boundary_text)
     spoken_words = _speech_source_word_spans(synthesis_text)
-    if target and next_word_index < len(spoken_words):
-        combined = ""
-        for end_index in range(
-            next_word_index, min(next_word_index + 5, len(spoken_words))
-        ):
-            start, end = spoken_words[end_index]
-            combined += _normalize_boundary_token(
-                synthesis_text[start:end])
-            if combined == target:
-                if end_index >= len(source_spans):
-                    return None
-                return (
-                    source_spans[next_word_index][0],
-                    source_spans[end_index][1],
-                    end_index + 1,
-                )
-            if len(combined) > len(target) or not target.startswith(combined):
-                break
+    if target:
+        search_end = min(next_word_index + 4, len(spoken_words))
+        for start_index in range(next_word_index, search_end):
+            combined = ""
+            for end_index in range(
+                start_index,
+                min(start_index + _MAX_BOUNDARY_WORDS, len(spoken_words)),
+            ):
+                start, end = spoken_words[end_index]
+                combined += _normalize_boundary_token(
+                    synthesis_text[start:end])
+                if combined == target:
+                    if end_index >= len(source_spans):
+                        return None
+                    return (
+                        source_spans[start_index][0],
+                        source_spans[end_index][1],
+                        end_index + 1,
+                    )
+                if len(combined) > len(target) or not target.startswith(combined):
+                    break
     return _match_boundary_span(
         boundary_text, source_text, source_spans, next_word_index)

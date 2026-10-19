@@ -131,6 +131,59 @@ class TestSpeechSynthesis(unittest.TestCase):
             (10, 16, 3),
         )
 
+    def test_boundary_matching_resynchronizes_after_a_missed_french_word(self):
+        text = "Webb fixa l'heure du décès entre 2 h et 3 h du matin."
+        words = speech_worker._speech_source_word_spans(text)
+        spans = speech_worker._segment_word_spans(text, [text])[0]
+        expected_index = next(
+            index for index, (start, end) in enumerate(words)
+            if text[start:end] == "décès"
+        )
+
+        matched = speech_worker._match_synthesis_boundary_span(
+            "entre", text, text, spans, expected_index)
+
+        self.assertEqual(
+            matched,
+            (spans[expected_index + 1][0],
+             spans[expected_index + 1][1],
+             expected_index + 2),
+        )
+
+    def test_multi_word_boundary_group_does_not_freeze_the_highlight(self):
+        """Edge returns one word for every token that has no boundary itself.
+
+        Captured from the real synthesis of this sentence: the boundary text
+        "entre 2 h et 3 h" arrives as a *single* word even though it covers
+        seven source words -- the digits produce no boundaries of their own.
+        A five-word alignment window could not match it, and a failed match
+        leaves the source cursor where it was, so every later boundary ("du",
+        "matin") was compared against the same stale word and dropped too.
+        The highlight then stopped on "décès" while the audio read on.
+        """
+        text = "Webb fixa l'heure du décès entre 2 h et 3 h du matin."
+        spans = speech_worker._segment_word_spans(text, [text])[0]
+        boundaries = [
+            "Webb", "fixa", "l'heure", "du", "décès",
+            "entre 2 h et 3 h", "du", "matin",
+        ]
+
+        index = 0
+        for boundary_text in boundaries:
+            matched = speech_worker._match_synthesis_boundary_span(
+                boundary_text, text, text, spans, index)
+            expected = text[spans[index][0]:spans[index][1]]
+            self.assertIsNotNone(
+                matched,
+                f"the boundary {boundary_text!r} was dropped at source word "
+                f"{index} ({expected!r}); the highlight freezes there for the "
+                f"rest of the read",
+            )
+            start, end, index = matched
+
+        self.assertEqual(index, len(spans))
+        self.assertEqual(text[spans[index - 1][0]:spans[index - 1][1]], "matin")
+
     def test_latin_phrases_normalize_wrappers_without_pause_tokens(self):
         examples = (
             "(Charles (Chauncey) C. Loomis)",
@@ -637,6 +690,14 @@ class TestSpeechSynthesis(unittest.TestCase):
     def test_audio_cache_version_skips_truncated_segment_entries(self):
         new_key = speech_worker._cache_key(
             "مرحبا بالعالم", "fr-FR-VivienneMultilingualNeural", "+15%")
+
+        old_alignment_key = hashlib.sha1(
+            "\x00".join((
+                "v17", "edge", "fr-FR-VivienneMultilingualNeural", "+15%",
+                "مرحبا بالعالم",
+            )).encode("utf-8")
+        ).hexdigest()
+        self.assertNotEqual(new_key, old_alignment_key)
 
         for old_version in (
             "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10",
