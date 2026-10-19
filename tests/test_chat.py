@@ -647,6 +647,46 @@ class TestTranslationChat(unittest.TestCase):
             panel._stop_speech()
             panel.close()
 
+    def test_the_user_message_header_and_blank_line_start_reading_too(self):
+        """Every band of a message reacts, not only the row holding words.
+
+        The "You" header and the blank line under it are separate blocks, so a
+        click there used to be ignored while the same click in a model reply
+        worked.
+        """
+        from ui.chat_panel import ChatPanel
+
+        panel = ChatPanel(lambda: {"speech_rate": 1.0})
+        panel._entries = [
+            ("user", "Explain: selected phrase"),
+            ("assistant", "A complete reply."),
+        ]
+        panel._render()
+        try:
+            document = panel.transcript.document()
+            marker = document.begin()
+            self.assertEqual(marker.text(), "You")
+            content = marker.next()
+            self.assertEqual(content.text(), "Explain: selected phrase")
+            blank = content.next()
+            self.assertEqual(blank.text(), "")
+            with (
+                mock.patch("ui.chat_panel.speech_available", return_value=True),
+                mock.patch("ui.chat_panel.SpeechWorker") as worker_factory,
+            ):
+                worker = mock.Mock()
+                worker.isRunning.return_value = False
+                worker_factory.return_value = worker
+
+                for position in (marker.position(), blank.position()):
+                    panel._stop_speech()
+                    panel._on_transcript_background_clicked(position)
+                    self.assertEqual(
+                        panel._speech_text, "Explain: selected phrase")
+        finally:
+            panel._stop_speech()
+            panel.close()
+
     def test_a_word_in_the_user_message_starts_reading_from_that_word(self):
         """The user's own message is readable too, from the clicked word."""
         from ui.chat_panel import ChatPanel
@@ -672,6 +712,63 @@ class TestTranslationChat(unittest.TestCase):
                 self.assertEqual(panel._speech_text, "selected phrase")
                 self.assertEqual(
                     worker_factory.call_args.args[0], "selected phrase")
+        finally:
+            panel._stop_speech()
+            panel.close()
+
+    def test_reading_a_latin_user_message_is_not_silenced(self):
+        """An English user bubble must be spoken in an Arabic chat.
+
+        The speech worker drops Latin words when ``read_latin_words`` is off,
+        so reading ``Explain: INVESTIGATION`` produced no audio at all while an
+        Arabic model reply worked.
+        """
+        from ui.chat_panel import ChatPanel
+
+        settings = {
+            "speech_rate": 1.0,
+            "target_language": "ar",
+            "chat_reply_language": "ar",
+            "chat_reply_language_only": True,
+        }
+        panel = ChatPanel(lambda: dict(settings))
+        panel._entries = [
+            ("user", "Explain: INVESTIGATION"),
+            ("assistant", "تعني كلمة التحقيق أن الشرطة تبدأ البحث."),
+            ("user", "اشرح لي المزيد"),
+        ]
+        panel._render()
+        try:
+            document = panel.transcript.document()
+
+            with (
+                mock.patch("ui.chat_panel.speech_available", return_value=True),
+                mock.patch("ui.chat_panel.SpeechWorker") as worker_factory,
+            ):
+                worker = mock.Mock()
+                worker.isRunning.return_value = False
+                worker_factory.return_value = worker
+
+                latin_block = document.findBlockByNumber(1)
+                self.assertEqual(
+                    latin_block.text(), "Explain: INVESTIGATION")
+                panel._on_transcript_background_clicked(
+                    latin_block.position())
+                self.assertTrue(
+                    worker_factory.call_args.kwargs["read_latin_words"])
+
+                panel._stop_speech()
+                arabic_block = None
+                block = document.begin()
+                while block.isValid():
+                    if block.text().strip() == "اشرح لي المزيد":
+                        arabic_block = block
+                    block = block.next()
+                self.assertIsNotNone(arabic_block)
+                panel._on_transcript_background_clicked(
+                    arabic_block.position())
+                self.assertFalse(
+                    worker_factory.call_args.kwargs["read_latin_words"])
         finally:
             panel._stop_speech()
             panel.close()

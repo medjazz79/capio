@@ -51,6 +51,11 @@ from popup.speech_worker import (
 
 log = logging.getLogger("harmony_translator.chat")
 
+# A bubble written with Latin letters (the usual shape of a user question) must
+# stay audible when the reply language is Arabic: with ``read_latin_words``
+# off, the speech worker drops every Latin word and the read is silent.
+_LATIN_LETTER = re.compile(r"[A-Za-z]")
+
 _EXPLANATION_INSTRUCTIONS = {
     "linguistic": (
         "Explain the selected text linguistically. Describe the relevant "
@@ -1109,13 +1114,15 @@ class ChatPanel(QWidget):
         if role not in {"user", "assistant"}:
             return
         clicked_block = cursor.block()
-        if not any(
+        clicked_in_content = any(
             block.position() == clicked_block.position()
             for block in content_blocks
-        ):
-            return
+        )
 
-        if whole_message:
+        # A click on the "You"/"Chat" header or on the blank line around it is
+        # still inside the message area: read the whole message from its first
+        # sentence. Only a click on a word starts from that word.
+        if whole_message or not clicked_in_content:
             readable_blocks = [
                 block for block in content_blocks if block.text().strip()
             ]
@@ -1182,6 +1189,14 @@ class ChatPanel(QWidget):
             if isinstance(configured_voice, str) and configured_voice
             else ARABIC_VOICE
         )
+        read_latin_words = bool(
+            settings.get("speech_read_latin_words", False))
+        if role == "user" and _LATIN_LETTER.search(self._speech_text):
+            # The user's own bubble is written in the language they asked in
+            # (often English) while the chat replies in Arabic. Skipping Latin
+            # words there leaves nothing to synthesize, so the click on a user
+            # message looked dead next to a working model reply.
+            read_latin_words = True
         worker = SpeechWorker(
             self._speech_text,
             self,
@@ -1192,8 +1207,7 @@ class ChatPanel(QWidget):
             target_language=response_language,
             fast=bool(settings.get("fast_mode", True)),
             stream_audio=False,
-            read_latin_words=bool(
-                settings.get("speech_read_latin_words", False)),
+            read_latin_words=read_latin_words,
             engine=engine,
             gemini_api_key=api_key,
             gemini_voice=str(settings.get("gemini_tts_voice") or "Kore"),
