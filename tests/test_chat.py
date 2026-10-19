@@ -730,7 +730,7 @@ class TestTranslationChat(unittest.TestCase):
             "A literal backslash\\\\\u2028continues the same paragraph.",
         )
 
-    def test_english_translation_reflows_wrapped_prose_without_changing_other_languages(self):
+    def test_arabic_and_english_translations_reflow_wrapped_prose(self):
         from PySide6.QtGui import QTextDocument
         from config.settings import DEFAULTS
         from popup.translate_popup import TranslatePopup
@@ -769,6 +769,24 @@ class TestTranslationChat(unittest.TestCase):
             ]
             self.assertGreaterEqual(max(widths), 520)
 
+            arabic_markdown = (
+                "تبدأ هذه الفقرة العربية هنا وتستمر في السطر التالي "
+                "لتوضيح أن النص يجب أن يملأ عرض النافذة عند إعادة التفافه.\n"
+                "وهذا السطر يكمل الفكرة نفسها ولا يمثل فقرة جديدة أو "
+                "فاصلاً مقصوداً بين الجمل."
+            )
+            settings["target_language"] = "ar"
+            popup._render_markdown(arabic_markdown)
+            arabic_block = popup.result.document().begin()
+            self.assertEqual(
+                arabic_block.text(),
+                "تبدأ هذه الفقرة العربية هنا وتستمر في السطر التالي "
+                "لتوضيح أن النص يجب أن يملأ عرض النافذة عند إعادة التفافه. "
+                "وهذا السطر يكمل الفكرة نفسها ولا يمثل فقرة جديدة أو "
+                "فاصلاً مقصوداً بين الجمل.",
+            )
+            self.assertNotIn("\u2028", arabic_block.text())
+
             structured_markdown = (
                 "Intro line continues\n"
                 "### Heading\n"
@@ -793,9 +811,8 @@ class TestTranslationChat(unittest.TestCase):
                 "- first item\n"
                 "- second item\n"
                 "After list continues with another line.\n\n"
-                "Explicit hard break  \n"
-                "next explicit line. "
-                "Explicit escaped break\\\n"
+                "Explicit hard break  \u2028"
+                "next explicit line. Explicit escaped break\\\u2028"
                 "next escaped line.\n\n"
                 "```text\n"
                 "literal\n"
@@ -803,10 +820,25 @@ class TestTranslationChat(unittest.TestCase):
                 "```\n\n",
             )
 
-            settings["target_language"] = "ar"
-            popup._render_markdown(markdown)
+            popup._render_markdown(
+                "سطر عربي مستمر\n"
+                "بعد عنوان\n"
+                "### عنوان\n"
+                "- عنصر أول\n"
+                "- عنصر ثانٍ\n"
+                "\n"
+                "كسر سطر عربي صريح  \n"
+                "يجب أن يبقى فاصلاً."
+            )
+            arabic_blocks = popup.result.document()
+            self.assertEqual(
+                arabic_blocks.begin().text(),
+                "سطر عربي مستمر بعد عنوان",
+            )
             self.assertIn(
-                "\u2028", popup.result.document().begin().text())
+                "\u2028",
+                arabic_blocks.find("كسر سطر عربي صريح").block().text(),
+            )
         finally:
             popup.close()
 
@@ -845,8 +877,8 @@ class TestTranslationChat(unittest.TestCase):
             with self.subTest(kept=kept):
                 self.assertEqual(reflow_wrapped_prose(kept), kept)
 
-    def test_streamed_english_preview_reflows_wrapped_prose(self):
-        """A page-faithful wrapped answer must not preview as short lines."""
+    def test_streamed_english_and_arabic_previews_reflow_wrapped_prose(self):
+        """Page-faithful English and Arabic must not preview as short lines."""
         from config.settings import DEFAULTS
         from popup.translate_popup import TranslatePopup
 
@@ -886,6 +918,23 @@ class TestTranslationChat(unittest.TestCase):
             # One block per paragraph, plus the heading's own block.
             self.assertLessEqual(
                 popup.result.document().blockCount(), 6)
+
+            popup.settings["target_language"] = "ar"
+            popup.result.clear()
+            popup._streamed_partial = ""
+            popup._streamed_displayed = ""
+            arabic = (
+                "هذه فقرة عربية طويلة تبدأ هنا وتستمر على السطر التالي "
+                "لأن النص منقول مع فواصل أسطر المصدر.\n"
+                "يجب أن يظهر النص متصلاً ويلتف حسب عرض نافذة الترجمة."
+            )
+            popup._append_streamed_partial(arabic)
+            self.assertEqual(
+                popup.result.toPlainText(),
+                "هذه فقرة عربية طويلة تبدأ هنا وتستمر على السطر التالي "
+                "لأن النص منقول مع فواصل أسطر المصدر. "
+                "يجب أن يظهر النص متصلاً ويلتف حسب عرض نافذة الترجمة.",
+            )
         finally:
             popup.close()
 
@@ -916,7 +965,7 @@ class TestTranslationChat(unittest.TestCase):
         finally:
             popup.close()
 
-    def test_streamed_preview_keeps_arabic_line_breaks(self):
+    def test_streamed_preview_reflows_arabic_wrapped_prose(self):
         from config.settings import DEFAULTS
         from popup.translate_popup import TranslatePopup
 
@@ -926,7 +975,9 @@ class TestTranslationChat(unittest.TestCase):
         try:
             popup._append_streamed_partial(markdown)
             self.assertEqual(
-                popup.result.toPlainText().strip(), markdown)
+                popup.result.toPlainText().strip(),
+                "السطر الأول من الفقرة يكمل في السطر الثاني.",
+            )
         finally:
             popup.close()
 

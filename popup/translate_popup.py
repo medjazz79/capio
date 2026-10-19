@@ -111,7 +111,7 @@ def reflow_wrapped_prose(markdown: str, *, hold_trailing: bool = False) -> str:
     """Join prose that the model wrapped at the source page's line breaks.
 
     The translation prompt asks the model to keep the source layout, so it
-    sometimes echoes a PDF line break in the middle of an English sentence.
+    sometimes echoes a PDF line break in the middle of a sentence.
     Left alone, each of those newlines becomes a block of its own and the
     paragraph renders as ragged short lines instead of flush right text.
 
@@ -439,7 +439,7 @@ class TranslatePopup(QDialog):
         self.speak_btn.clicked.connect(self._toggle_speech)
 
         # Speed picker: a narrow icon button so the popup keeps its exact size.
-        self._speech_rate = normalize_speed(self.settings.get("speech_rate"))
+        self._speech_rate = self._configured_speech_rate()
         configured_voice = self.settings.get("speech_voice")
         self._speech_voice = (
             configured_voice if isinstance(configured_voice, str) and configured_voice
@@ -779,6 +779,8 @@ class TranslatePopup(QDialog):
     def _set_translation_language(self, kind: str, code: str) -> None:
         key = "source_language" if kind == "source" else "target_language"
         self.settings[key] = code
+        if kind == "target":
+            self._refresh_speech_rate()
         if self._float_language_preferences:
             float_key = (
                 "float_source_language" if kind == "source"
@@ -808,6 +810,7 @@ class TranslatePopup(QDialog):
         """Apply toolbar languages without calling back to the application."""
         self.settings["source_language"] = source_language
         self.settings["target_language"] = target_language
+        self._refresh_speech_rate()
         self._update_language_control("source", source_language)
         self._update_language_control("target", target_language)
         self._retranslate_for_current_languages()
@@ -838,6 +841,45 @@ class TranslatePopup(QDialog):
         if update_local:
             self.settings.update(updates)
         return True
+
+    def _speech_rate_setting_key(self) -> str:
+        chat_panel = getattr(self, "chat_panel", None)
+        use_chat_language = (
+            chat_panel is not None and not chat_panel.isHidden())
+        language_key = (
+            "chat_reply_language" if use_chat_language else "target_language")
+        language = str(self.settings.get(language_key, "ar")).strip()
+        language_code = language.replace("_", "-").split("-", 1)[0].casefold()
+        return (
+            "speech_rate_arabic"
+            if language_code == "ar"
+            else "speech_rate_other"
+        )
+
+    def _configured_speech_rate(self) -> float:
+        key = self._speech_rate_setting_key()
+        return normalize_speed(
+            self.settings.get(key, self.settings.get("speech_rate")))
+
+    def _refresh_speech_rate(self) -> None:
+        self._speech_rate = self._configured_speech_rate()
+        self._player.setPlaybackRate(self._speech_rate)
+        self._speed_slider.blockSignals(True)
+        self._speed_slider.setValue(
+            self._speed_to_slider_value(self._speech_rate))
+        self._speed_slider.blockSignals(False)
+        self._update_speed_display(self._speech_rate)
+        language_name = (
+            "Arabic"
+            if self._speech_rate_setting_key() == "speech_rate_arabic"
+            else "Other languages"
+        )
+        self._speed_title.setText(f"{language_name} reading speed")
+        self._speed_slider.setAccessibleName(
+            f"{language_name} reading speed slider")
+        tooltip = f"{language_name} reading speed: {self._speech_rate:.2f}x"
+        self.speed_btn.setToolTip(tooltip)
+        self.chat_speed_btn.setToolTip(tooltip)
 
     def _start_translation_worker(
         self,
@@ -979,7 +1021,7 @@ class TranslatePopup(QDialog):
         self._streamed_displayed = displayed
 
     def _normalize_streamed_markdown(self, text: str) -> str:
-        """Preview streamed English prose as flowing text, not as raw wraps.
+        """Preview English and Arabic prose as flowing text, not raw wraps.
 
         ``setMarkdown`` is what finally turns the model's page-faithful line
         breaks into paragraphs. Streaming inserts plain text, where every
@@ -993,8 +1035,10 @@ class TranslatePopup(QDialog):
 
     def _reflows_wrapped_prose(self) -> bool:
         """Report whether prose soft breaks are reflowed for this target."""
-        return str(
-            self.settings.get("target_language", "ar")).split("-", 1)[0] == "en"
+        language = str(
+            self.settings.get("target_language", "ar")
+        ).split("-", 1)[0].casefold()
+        return language in ("ar", "en")
 
     def _apply_streamed_font_size(
         self, start_position: int | None = None,
@@ -1140,6 +1184,7 @@ class TranslatePopup(QDialog):
                 settings.get(key) != self.settings.get(key)
                 for key in (
                     "arabic_tashkeel",
+                    "chat_reply_language",
                     "explain_instructions",
                     "explain_mode",
                     "font_size",
@@ -1149,6 +1194,8 @@ class TranslatePopup(QDialog):
                     "source_language",
                     "speech_engine",
                     "speech_rate",
+                    "speech_rate_arabic",
+                    "speech_rate_other",
                     "speech_read_latin_words",
                     "speech_voice",
                     "target_language",
@@ -1380,19 +1427,11 @@ class TranslatePopup(QDialog):
             if isinstance(configured_voice, str) and configured_voice
             else ARABIC_VOICE
         )
-        self._speech_rate = normalize_speed(self.settings.get("speech_rate"))
+        self._refresh_speech_rate()
         self._speech_available = speech_available(
             self._speech_engine,
             str(self.settings.get("gemini_key") or ""),
         )
-        self._player.setPlaybackRate(self._speech_rate)
-        self._speed_slider.blockSignals(True)
-        self._speed_slider.setValue(
-            self._speed_to_slider_value(self._speech_rate))
-        self._speed_slider.blockSignals(False)
-        self._update_speed_display(self._speech_rate)
-        self.speed_btn.setToolTip(
-            f"Reading speed: {self._speech_rate:.2f}x")
         self.speed_btn.setEnabled(self._speech_available)
 
         engine_name = (
@@ -1958,10 +1997,8 @@ class TranslatePopup(QDialog):
         from translators.chain import _remove_nonheading_bold
 
         text = _remove_nonheading_bold(text)
-        target_language = str(
-            self.settings.get("target_language", "ar")).split("-", 1)[0]
         self.result.setMarkdown(self._markdown_with_inline_notation(
-            text, reflow_soft_line_breaks=target_language == "en"))
+            text, reflow_soft_line_breaks=self._reflows_wrapped_prose()))
         self._apply_code_block_style(
             self.result.document(), self.result.font().pointSizeF())
         self._apply_translation_direction()
@@ -2106,6 +2143,7 @@ class TranslatePopup(QDialog):
 
     def _toggle_chat_panel(self, visible: bool) -> None:
         self.chat_panel.setVisible(visible)
+        self._refresh_speech_rate()
         if visible:
             sizes = self.content_splitter.sizes()
             if len(sizes) == 2 and sizes[1] < self.chat_panel.minimumSizeHint().height():
@@ -2288,12 +2326,11 @@ class TranslatePopup(QDialog):
                 r"**\1**",
                 markdown_parts[index],
             )
-            segments = re.split(
-                r"(\n[ \t]*\n+)", markdown_parts[index])
             if reflow_soft_line_breaks:
                 markdown_parts[index] = reflow_wrapped_prose(
                     markdown_parts[index])
-                continue
+            segments = re.split(
+                r"(\n[ \t]*\n+)", markdown_parts[index])
             for part_index in range(0, len(segments), 2):
                 paragraph = segments[part_index]
                 if re.search(
@@ -2607,6 +2644,7 @@ class TranslatePopup(QDialog):
         title = QLabel("Reading speed", panel)
         title.setObjectName("speechSpeedTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._speed_title = title
         layout.addWidget(title)
 
         self._speed_display = QLabel(panel)
@@ -2862,18 +2900,19 @@ class TranslatePopup(QDialog):
             self._speed_slider.blockSignals(False)
         if hasattr(self, "_speed_presets"):
             self._update_speed_display(self._speech_rate)
+        setting_key = self._speech_rate_setting_key()
+        self.settings[setting_key] = self._speech_rate
         self.settings["speech_rate"] = self._speech_rate
         self._player.setPlaybackRate(self._speech_rate)
         try:
             from config.settings import load, save
             persisted = load()
             persisted["speech_rate"] = self._speech_rate
+            persisted[setting_key] = self._speech_rate
             save(persisted)
         except (OSError, TypeError, ValueError):
             logging.exception("Could not save the reading speed")
-        self.speed_btn.setToolTip(f"Reading speed: {self._speech_rate:.2f}x")
-        self.chat_speed_btn.setToolTip(
-            f"Reading speed: {self._speech_rate:.2f}x")
+        self._refresh_speech_rate()
 
     def _load_voices(self) -> None:
         if self._voice_list_worker is not None or self._voice_actions:
@@ -3613,12 +3652,10 @@ class TranslatePopup(QDialog):
             return
         from translators.chain import _remove_nonheading_bold
 
-        target_language = str(
-            self.settings.get("target_language", "ar")).split("-", 1)[0]
         document = QTextDocument()
         document.setMarkdown(self._markdown_with_inline_notation(
             _remove_nonheading_bold(markdown),
-            reflow_soft_line_breaks=target_language == "en",
+            reflow_soft_line_breaks=self._reflows_wrapped_prose(),
         ))
         text = self._speech_text_from_document(document).lstrip()
         if not text or len(text) > SPEECH_PREFETCH_MAX_CHARS:

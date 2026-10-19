@@ -163,6 +163,8 @@ DEFAULTS = {
     "speech_engine": "edge",
     "gemini_tts_voice": "Kore",
     "speech_rate": 1.0,
+    "speech_rate_arabic": 1.0,
+    "speech_rate_other": 1.0,
     "chat_speech_rate": 1.0,
     "speech_voice": "fr-FR-VivienneMultilingualNeural",
     "automatic_speech_voice": False,
@@ -330,6 +332,9 @@ def load() -> dict:
             log.warning("Recovered settings from %s", recovered_path)
     merged = dict(DEFAULTS)
     merged.update({k: v for k, v in data.items() if k in DEFAULTS})
+    for key in ("speech_rate_arabic", "speech_rate_other"):
+        if key not in data:
+            merged[key] = merged["speech_rate"]
     if "color_scheme" not in data:
         merged["color_scheme"] = (
             "light" if merged.get("theme") == "Pure Light"

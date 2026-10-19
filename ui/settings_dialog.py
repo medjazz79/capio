@@ -1973,18 +1973,73 @@ class SettingsDialog(QDialog):
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        self.speech_rate_setting = QDoubleSpinBox()
-        self.speech_rate_setting.setRange(0.25, 2.0)
-        self.speech_rate_setting.setDecimals(2)
-        self.speech_rate_setting.setSingleStep(0.05)
-        self.speech_rate_setting.setSuffix("×")
-        try:
-            configured_rate = float(settings.get("speech_rate", 1.0))
-        except (TypeError, ValueError):
-            configured_rate = 1.0
-        self.speech_rate_setting.setValue(
-            min(2.0, max(0.25, configured_rate)))
-        form.addRow("Playback Speed", self.speech_rate_setting)
+        def make_speech_rate_setting(setting_key: str) -> QDoubleSpinBox:
+            spinbox = QDoubleSpinBox()
+            spinbox.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
+            spinbox.setRange(0.25, 2.0)
+            spinbox.setDecimals(2)
+            spinbox.setSingleStep(0.05)
+            spinbox.setSuffix("×")
+            try:
+                configured_rate = float(settings.get(setting_key, 1.0))
+            except (TypeError, ValueError):
+                configured_rate = 1.0
+            spinbox.setValue(min(2.0, max(0.25, configured_rate)))
+            return spinbox
+
+        def make_speech_rate_row(
+            spinbox: QDoubleSpinBox,
+            name: str,
+            label: str,
+        ) -> QWidget:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            row.addWidget(spinbox, 1)
+            down = QPushButton("−")
+            down.setObjectName(f"{name}Down")
+            down.setFixedSize(48, 42)
+            down.setStyleSheet(
+                f"QPushButton#{name}Down {{ "
+                "padding: 0; font-size: 22px; font-weight: 700; }")
+            down.setToolTip(f"Decrease {label} by 0.05x")
+            down.clicked.connect(spinbox.stepDown)
+            row.addWidget(down)
+            up = QPushButton("+")
+            up.setObjectName(f"{name}Up")
+            up.setFixedSize(48, 42)
+            up.setStyleSheet(
+                f"QPushButton#{name}Up {{ "
+                "padding: 0; font-size: 22px; font-weight: 700; }")
+            up.setToolTip(f"Increase {label} by 0.05x")
+            up.clicked.connect(spinbox.stepUp)
+            row.addWidget(up)
+            holder = QWidget()
+            holder.setLayout(row)
+            setattr(self, f"{name}_down", down)
+            setattr(self, f"{name}_up", up)
+            return holder
+
+        self.speech_rate_arabic_setting = make_speech_rate_setting(
+            "speech_rate_arabic")
+        self.speech_rate_other_setting = make_speech_rate_setting(
+            "speech_rate_other")
+        self.speech_rate_setting = self.speech_rate_other_setting
+        form.addRow(
+            "Arabic Reading Speed",
+            make_speech_rate_row(
+                self.speech_rate_arabic_setting,
+                "speech_rate_arabic",
+                "Arabic reading speed",
+            ),
+        )
+        form.addRow(
+            "Other Languages Reading Speed",
+            make_speech_rate_row(
+                self.speech_rate_other_setting,
+                "speech_rate_other",
+                "other-languages reading speed",
+            ),
+        )
 
         self._edge_speech_voice = str(
             settings.get("speech_voice") or
@@ -4656,7 +4711,9 @@ class SettingsDialog(QDialog):
             ),
             "speech_engine": self.speech_engine.currentData(),
             "gemini_tts_voice": self.gemini_tts_voice.currentData(),
-            "speech_rate": self.speech_rate_setting.value(),
+            "speech_rate": self.speech_rate_other_setting.value(),
+            "speech_rate_arabic": self.speech_rate_arabic_setting.value(),
+            "speech_rate_other": self.speech_rate_other_setting.value(),
             "speech_voice": self._edge_speech_voice,
             "font_size": self.font_size.value(),
             "line_spacing_px": self.line_spacing.value(),

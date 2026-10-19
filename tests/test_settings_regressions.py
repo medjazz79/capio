@@ -118,5 +118,24 @@ class TestSettingsTogglePreservation(unittest.TestCase):
         )
 
 
+class TestSpeechRateMigration(unittest.TestCase):
+    def test_legacy_rate_initializes_both_language_rates(self):
+        from config import settings as settings_module
+
+        with tempfile.TemporaryDirectory(
+            prefix="harmony-speech-rate-migration-"
+        ) as directory:
+            path = pathlib.Path(directory) / "settings.json"
+            path.write_text(
+                json.dumps({"speech_rate": 0.75}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(settings_module, "SETTINGS_PATH", path):
+                settings = settings_module.load()
+
+        self.assertEqual(settings["speech_rate_arabic"], 0.75)
+        self.assertEqual(settings["speech_rate_other"], 0.75)
+
+
 if __name__ == "__main__":
     unittest.main()

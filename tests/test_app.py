@@ -1035,12 +1035,28 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         dialog.speech_engine.setCurrentIndex(
             dialog.speech_engine.findData("gemini"))
         dialog.speech_rate_setting.setValue(0.85)
+        for down, up in (
+            (dialog.speech_rate_arabic_down, dialog.speech_rate_arabic_up),
+            (dialog.speech_rate_other_down, dialog.speech_rate_other_up),
+        ):
+            self.assertEqual(down.text(), "−")
+            self.assertEqual(up.text(), "+")
+            self.assertEqual(down.size().width(), 48)
+            self.assertEqual(down.size().height(), 42)
+            self.assertEqual(up.size(), down.size())
+        dialog.speech_rate_arabic_setting.setValue(1.0)
+        dialog.speech_rate_arabic_up.click()
+        self.assertAlmostEqual(dialog.speech_rate_arabic_setting.value(), 1.05)
+        dialog.speech_rate_arabic_down.click()
+        self.assertAlmostEqual(dialog.speech_rate_arabic_setting.value(), 1.0)
         dialog._edge_speech_voice = "ar-SA-ZariyahNeural"
         dialog.gemini_tts_voice.setCurrentIndex(
             dialog.gemini_tts_voice.findData("Zephyr"))
         values = dialog.values()
         self.assertEqual(values["speech_engine"], "gemini")
         self.assertEqual(values["speech_rate"], 0.85)
+        self.assertEqual(values["speech_rate_arabic"], 1.0)
+        self.assertEqual(values["speech_rate_other"], 0.85)
         self.assertEqual(values["speech_voice"], "ar-SA-ZariyahNeural")
         self.assertEqual(values["gemini_tts_voice"], "Zephyr")
         self.assertFalse(dialog.edge_speech_voice.isEnabled())
@@ -7993,6 +8009,7 @@ class TestReaderZoom(_GuiCase):
                 "gemini_key": "configured-key",
                 "gemini_tts_voice": "Zephyr",
                 "speech_rate": 1.25,
+                "speech_rate_arabic": 1.25,
             })
             popup.refresh_display(updated)
             self.assertEqual(popup._speech_engine, "gemini")
@@ -8827,6 +8844,8 @@ class TestReaderZoom(_GuiCase):
                 pop._speed_presets[1.25].click()
                 self.assertEqual(pop._speech_rate, 1.25)
                 self.assertEqual(pop.settings["speech_rate"], 1.25)
+                self.assertEqual(pop.settings["speech_rate_arabic"], 1.25)
+                self.assertEqual(pop.settings["speech_rate_other"], 1.0)
                 pop._speed_presets[0.0].click()
                 self.assertEqual(pop._speech_rate, 0.25)
                 self.assertEqual(pop._player.playbackRate(), 0.25)
@@ -8849,6 +8868,8 @@ class TestReaderZoom(_GuiCase):
                 restart.assert_not_called()
                 self.assertEqual(pop._player.playbackRate(), 1.25)
                 self.assertEqual(pop.settings["speech_rate"], 1.25)
+                self.assertEqual(pop.settings["speech_rate_arabic"], 1.25)
+                self.assertEqual(pop.settings["speech_rate_other"], 1.0)
             finally:
                 pop.close()
 
@@ -8856,7 +8877,7 @@ class TestReaderZoom(_GuiCase):
         from unittest import mock
         from popup.translate_popup import TranslatePopup
         s = dict(DEFAULTS)
-        s["speech_rate"] = 0.5
+        s["speech_rate_arabic"] = 0.5
         with mock_chain_translate(return_value=("t", "X")):
             pop = TranslatePopup(s, source_text="hello")
             try:
@@ -8872,6 +8893,62 @@ class TestReaderZoom(_GuiCase):
                     pop._speed_to_slider_value(0.5),
                 )
                 self.assertEqual(pop._speed_display.text(), "0.50x")
+            finally:
+                pop.close()
+
+    def test_reading_speed_is_selected_and_saved_per_language(self):
+        from unittest import mock
+        from popup.translate_popup import TranslatePopup
+
+        settings = dict(
+            DEFAULTS,
+            target_language="ar",
+            speech_rate_arabic=0.65,
+            speech_rate_other=1.35,
+        )
+        with mock_chain_translate(return_value=("t", "X")):
+            pop = TranslatePopup(settings, source_text="hello")
+            try:
+                self.assertEqual(pop._speech_rate, 0.65)
+                self.assertEqual(
+                    pop._speed_title.text(), "Arabic reading speed")
+
+                pop.settings["chat_reply_language"] = "fr"
+                pop._toggle_chat_panel(True)
+                self.assertEqual(pop._speech_rate, 1.35)
+                pop._toggle_chat_panel(False)
+                self.assertEqual(pop._speech_rate, 0.65)
+
+                pop.sync_languages("en", "fr")
+                self.assertEqual(pop._speech_rate, 1.35)
+                self.assertEqual(
+                    pop._speed_title.text(), "Other languages reading speed")
+                self.assertEqual(
+                    pop._speed_slider.value(),
+                    pop._speed_to_slider_value(1.35),
+                )
+
+                with (
+                    mock.patch(
+                        "config.settings.load",
+                        return_value=dict(
+                            DEFAULTS,
+                            speech_rate_arabic=0.65,
+                        ),
+                    ),
+                    mock.patch("config.settings.save") as save,
+                ):
+                    pop._set_speech_rate(1.1)
+
+                self.assertEqual(pop.settings["speech_rate_other"], 1.1)
+                self.assertEqual(pop.settings["speech_rate_arabic"], 0.65)
+                self.assertEqual(pop.settings["speech_rate"], 1.1)
+                saved = save.call_args.args[0]
+                self.assertEqual(saved["speech_rate_other"], 1.1)
+                self.assertEqual(saved["speech_rate_arabic"], 0.65)
+
+                pop.sync_languages("en", "ar")
+                self.assertEqual(pop._speech_rate, 0.65)
             finally:
                 pop.close()
 
@@ -10285,7 +10362,7 @@ class TestMemoryZoom(_GuiCase):
             finally:
                 popup.close()
 
-    def test_markdown_rendering_preserves_streamed_line_breaks_and_paragraph_gaps(self):
+    def test_markdown_rendering_reflows_soft_breaks_and_keeps_paragraph_gaps(self):
         from popup.translate_popup import TranslatePopup
 
         with mock_chain_translate(return_value=("translation", "Test")):
@@ -10300,7 +10377,7 @@ class TestMemoryZoom(_GuiCase):
                 self.assertEqual(document.blockCount(), 1)
                 self.assertEqual(
                     document.toPlainText(),
-                    "First paragraph.\nSecond line.",
+                    "First paragraph. Second line.",
                 )
                 self.assertEqual(
                     document.begin().blockFormat().bottomMargin(), 0)
