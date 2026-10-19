@@ -4465,6 +4465,26 @@ class TestChain(unittest.TestCase):
         self.assertEqual(
             len(seen), len(chain.chunk_text(source, limit=chain.MAX_CHUNK)))
 
+    def test_full_page_translation_keeps_opening_block_in_same_request(self):
+        from config.settings import DEFAULTS
+
+        opening = (
+            "of a woman's heels clicking back and forth.\n"
+            "He heard a crash on the floor."
+        )
+        remainder = "BODY IN THE BATHTUB\n\nThe next paragraph follows."
+        source = f"{opening}\n\n{remainder}"
+        settings = dict(DEFAULTS, _full_page_translation=True)
+
+        self.assertEqual(
+            chain._translation_chunks(source, settings),
+            [source],
+        )
+        self.assertIn(
+            "opening paragraph may continue from the previous page",
+            chain._translation_instructions(settings),
+        )
+
     def test_keyless_opencode_model_is_attempted(self):
         """space-bunny-free answers with no Authorization header at all, so the
         chain must reach for it and must not fall through to a free service."""
@@ -5066,6 +5086,68 @@ class TestPdfUtils(unittest.TestCase):
             self.assertEqual(page_number, "12")
         finally:
             doc.close()
+
+    def test_page_body_text_keeps_small_prose_near_top_of_page(self):
+        import pymupdf
+        from reader import pdf_utils
+
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text(
+            (36, 42), "Running chapter title", fontname="tiit",
+            fontsize=8,
+        )
+        page.insert_text(
+            (36, 100),
+            "The preceding paragraph continues above the next heading.",
+            fontsize=9,
+        )
+        page.insert_text(
+            (36, 150), "BODY IN THE BATH", fontname="hebo",
+            fontsize=16,
+        )
+        page.insert_text(
+            (36, 190), "The remaining body text follows below.",
+            fontsize=11,
+        )
+        try:
+            body, _page_number = pdf_utils.page_body_text(page)
+            self.assertNotIn("Running chapter title", body)
+            self.assertIn("preceding paragraph continues", body)
+            self.assertIn("BODY IN THE BATH", body)
+            self.assertIn("remaining body text", body)
+        finally:
+            doc.close()
+
+    def test_page_body_text_reconstructs_spaces_from_pdf_words(self):
+        from unittest import mock
+        import pymupdf
+
+        spans = [{"text": "andthenhe wentbackto sleep.", "size": 11, "flags": 0}]
+        blocks = [{
+            "number": 0,
+            "lines": [{"bbox": (40, 100, 300, 112), "spans": spans}],
+        }]
+        words = [
+            (40, 100, 60, 112, "and", 0, 0, 0),
+            (63, 100, 88, 112, "then", 0, 0, 1),
+            (91, 100, 103, 112, "he", 0, 0, 2),
+            (106, 100, 130, 112, "went", 0, 0, 3),
+            (133, 100, 155, 112, "back", 0, 0, 4),
+            (158, 100, 166, 112, "to", 0, 0, 5),
+            (169, 100, 185, 112, "sleep.", 0, 0, 6),
+        ]
+        page = mock.Mock()
+        page.rect = pymupdf.Rect(0, 0, 504, 720)
+        page.rotation = 0
+        page.get_text.side_effect = lambda kind: (
+            {"blocks": blocks} if kind == "dict" else words
+        )
+
+        body, page_number = pdf_utils.page_body_text(page)
+
+        self.assertEqual(body, "and then he went back to sleep.")
+        self.assertIsNone(page_number)
 
     def test_extract_in_rect(self):
         import pymupdf
@@ -8914,9 +8996,11 @@ class TestReaderZoom(_GuiCase):
                     pop._speed_title.text(), "Arabic reading speed")
 
                 pop.settings["chat_reply_language"] = "fr"
+                pop.settings["chat_reply_language_only"] = True
                 pop._toggle_chat_panel(True)
                 self.assertEqual(pop._speech_rate, 1.35)
                 pop._toggle_chat_panel(False)
+                pop.settings["chat_reply_language_only"] = False
                 self.assertEqual(pop._speech_rate, 0.65)
 
                 pop.sync_languages("en", "fr")
@@ -8992,7 +9076,7 @@ class TestReaderZoom(_GuiCase):
             "gemini-3.5-flash-lite",
         )
         text, tip = self._badge_after(badge)
-        self.assertTrue(text.startswith("\u26a0 Partial fallback"))
+        self.assertTrue(text.startswith("\u26a0 gemini-3.5-flash-lite"))
         self.assertIn("6/8", text)
         self.assertLess(len(text), 45)
         self.assertIn("translated 6 of 8 chunks", tip)
@@ -9000,7 +9084,8 @@ class TestReaderZoom(_GuiCase):
 
     def test_popup_badge_does_not_hide_missing_engine_name(self):
         text, tip = self._badge_after("\u26a0   (not your model)")
-        self.assertTrue(text.startswith("\u26a0 Fallback"))
+        self.assertIn("fallback", text)
+        self.assertIn("gemini-3.5-flash-lite", text)
         self.assertIn("did not translate any chunks", tip)
 
     def test_popup_badge_shows_failed_model_when_fallback_engine_is_missing(self):

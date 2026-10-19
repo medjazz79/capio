@@ -846,9 +846,15 @@ class TranslatePopup(QDialog):
         chat_panel = getattr(self, "chat_panel", None)
         use_chat_language = (
             chat_panel is not None and not chat_panel.isHidden())
-        language_key = (
-            "chat_reply_language" if use_chat_language else "target_language")
-        language = str(self.settings.get(language_key, "ar")).strip()
+        target_language = str(self.settings.get("target_language", "ar"))
+        language = (
+            str(
+                self.settings.get("chat_reply_language", target_language)
+                if self.settings.get("chat_reply_language_only", False)
+                else target_language
+            )
+            if use_chat_language else target_language
+        ).strip()
         language_code = language.replace("_", "-").split("-", 1)[0].casefold()
         return (
             "speech_rate_arabic"
@@ -1787,6 +1793,13 @@ class TranslatePopup(QDialog):
         )
         if chunk_summary:
             engine = chunk_summary.group(1).strip() or "Translation fallback"
+            from config.settings import resolve_model
+
+            selected_model = resolve_model(self.settings)
+            model_label = (
+                selected_model if len(selected_model) <= 27
+                else f"{selected_model[:24]}..."
+            )
             counts = re.fullmatch(
                 r"\((\d+)/(\d+) chunks by your model\)",
                 chunk_summary.group(2),
@@ -1794,16 +1807,18 @@ class TranslatePopup(QDialog):
             if counts:
                 used, total = counts.groups()
                 self.badge.setText(
-                    f"⚠ Partial fallback · {used}/{total} · {secs:.1f}s")
+                    f"⚠ {model_label} · {used}/{total} · {secs:.1f}s")
                 self.badge.setToolTip(
                     f"The selected model translated {used} of {total} chunks."
+                    f"\nSelected model: {selected_model}."
                     f"\nMost common engine: {engine}.\n{badge.strip()}"
                 )
             else:
                 self.badge.setText(
-                    f"⚠ Fallback · not your model · {secs:.1f}s")
+                    f"⚠ {model_label} · fallback · {secs:.1f}s")
                 self.badge.setToolTip(
                     f"The selected model did not translate any chunks."
+                    f"\nSelected model: {selected_model}."
                     f"\nMost common engine: {engine}.\n{badge.strip()}"
                 )
             self.badge.setProperty("warning", True)

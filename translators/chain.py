@@ -564,11 +564,9 @@ def _split_long(para: str, limit: int) -> list[str]:
 
 
 def _translation_chunks(text: str, settings: dict) -> list[str]:
-    limit = (
-        FULL_PAGE_CHUNK
-        if settings.get("_full_page_translation")
-        else MAX_CHUNK
-    )
+    limit = MAX_CHUNK
+    if settings.get("_full_page_translation"):
+        limit = FULL_PAGE_CHUNK
     return chunk_text(text, limit=limit)
 
 
@@ -1179,6 +1177,17 @@ def _stream_single_gemini(chunk: str, s: dict):
 
 def _translation_instructions(settings: dict, model: str = "") -> str:
     instructions = str(settings.get("model_instructions", "") or "").strip()
+    if settings.get("_full_page_translation"):
+        instructions = "\n\n".join(
+            part for part in (
+                instructions,
+                "This is a complete page translation. Translate every "
+                "provided line in order. The opening paragraph may continue "
+                "from the previous page; it is body text, not a running "
+                "header, and must not be omitted even when it starts "
+                "mid-sentence or appears before a heading.",
+            ) if part
+        )
     if settings.get("target_language", "ar") == "ar":
         if settings.get("arabic_tashkeel", False):
             tashkeel_instruction = (

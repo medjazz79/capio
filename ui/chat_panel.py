@@ -182,8 +182,8 @@ class ChatPanel(QWidget):
         self._speech_text = ""
         self._speech_active = False
         self._speech_paused = False
-        self._speech_rate = normalize_speed(
-            self._settings_provider().get("chat_speech_rate"))
+        self._speech_rate = self._configured_speech_rate(
+            self._settings_provider())
         self._speech_highlight_background = QColor("#26354A")
         self._speech_highlight_foreground = QColor("#FFFFFF")
 
@@ -722,16 +722,64 @@ class ChatPanel(QWidget):
                 self.speed_button.rect().bottomLeft()))
 
     def _update_speed_controls(self, speed: float) -> None:
-        self._speed_display.setText(f"Reading speed: {speed:.2f}x")
+        language_name = (
+            "Arabic"
+            if self._speech_rate_setting_key(self._settings_provider())
+            == "speech_rate_arabic"
+            else "Other languages"
+        )
+        self._speed_display.setText(
+            f"{language_name} reading speed: {speed:.2f}x")
         self.speed_button.setText(f"{speed:.1f}x")
-        self.speed_button.setToolTip(f"Reading speed: {speed:.2f}x")
+        self.speed_button.setToolTip(
+            f"{language_name} reading speed: {speed:.2f}x")
+
+    @staticmethod
+    def _speech_rate_setting_key(settings: dict) -> str:
+        target_language = str(settings.get("target_language", "ar"))
+        response_language = str(
+            settings.get("chat_reply_language", target_language)
+            if settings.get("chat_reply_language_only", False)
+            else target_language
+        )
+        language_code = (
+            response_language.replace("_", "-").split("-", 1)[0].casefold())
+        return (
+            "speech_rate_arabic"
+            if language_code == "ar"
+            else "speech_rate_other"
+        )
+
+    @classmethod
+    def _configured_speech_rate(cls, settings: dict) -> float:
+        key = cls._speech_rate_setting_key(settings)
+        return normalize_speed(
+            settings.get(
+                key,
+                settings.get(
+                    "speech_rate", settings.get("chat_speech_rate", 1.0))))
+
+    def refresh_speech_settings(self) -> None:
+        """Apply the shared Arabic/other-language speed settings."""
+        settings = self._settings_provider()
+        self._speech_rate = self._configured_speech_rate(settings)
+        if hasattr(self, "_player"):
+            self._player.setPlaybackRate(self._speech_rate)
+        if hasattr(self, "_speed_slider"):
+            self._speed_slider.blockSignals(True)
+            self._speed_slider.setValue(round(self._speech_rate * 100))
+            self._speed_slider.blockSignals(False)
+            self._update_speed_controls(self._speech_rate)
 
     def _set_speech_rate(self, value: int) -> None:
         self._speech_rate = normalize_speed(value / 100)
         self._player.setPlaybackRate(self._speech_rate)
         self._update_speed_controls(self._speech_rate)
         self._fit_chat_action_buttons()
-        self._settings_provider()["chat_speech_rate"] = self._speech_rate
+        settings = self._settings_provider()
+        setting_key = self._speech_rate_setting_key(settings)
+        settings[setting_key] = self._speech_rate
+        settings["chat_speech_rate"] = self._speech_rate
         self._speech_rate_save_timer.start()
 
     def _save_speech_rate(self) -> None:
@@ -739,6 +787,9 @@ class ChatPanel(QWidget):
 
         try:
             persisted = load()
+            setting_key = self._speech_rate_setting_key(
+                self._settings_provider())
+            persisted[setting_key] = self._speech_rate
             persisted["chat_speech_rate"] = self._speech_rate
             save(persisted)
         except (OSError, TypeError, ValueError):
@@ -1033,6 +1084,7 @@ class ChatPanel(QWidget):
         self, position: int, *, whole_message: bool = False,
     ) -> None:
         settings = dict(self._settings_provider())
+        self.refresh_speech_settings()
         engine = str(settings.get("speech_engine", "edge"))
         api_key = str(settings.get("gemini_key") or "")
         if not speech_available(engine, api_key):
@@ -1107,6 +1159,12 @@ class ChatPanel(QWidget):
         self._highlight_speech_range(word_start, word_end)
         self._sync_speech_controls()
         self._player.setPlaybackRate(self._speech_rate)
+        target_language = str(settings.get("target_language", "ar"))
+        response_language = str(
+            settings.get("chat_reply_language", target_language)
+            if settings.get("chat_reply_language_only", False)
+            else target_language
+        )
 
         configured_voice = settings.get("speech_voice")
         voice = (
@@ -1121,7 +1179,7 @@ class ChatPanel(QWidget):
             voice=voice,
             automatic_voice=bool(
                 settings.get("automatic_speech_voice", False)),
-            target_language=str(settings.get("target_language", "ar")),
+            target_language=response_language,
             fast=bool(settings.get("fast_mode", True)),
             stream_audio=False,
             read_latin_words=bool(

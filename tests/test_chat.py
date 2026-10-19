@@ -365,7 +365,7 @@ class TestTranslationChat(unittest.TestCase):
             panel.close()
             app.setStyleSheet(previous_stylesheet)
 
-    def test_chat_and_translation_reading_speeds_are_independent(self):
+    def test_chat_uses_shared_language_specific_reading_speeds(self):
         import tempfile
         from pathlib import Path
         from config import settings as settings_module
@@ -377,27 +377,45 @@ class TestTranslationChat(unittest.TestCase):
                 settings_module, "SETTINGS_PATH", settings_path
             ):
                 settings = settings_module.load()
-                settings["speech_rate"] = 0.8
+                settings["speech_rate_arabic"] = 0.8
+                settings["speech_rate_other"] = 1.1
                 settings_module.save(settings)
                 settings = settings_module.load()
                 panel = ChatPanel(lambda: settings)
                 try:
-                    self.assertEqual(panel._speech_rate, 1.0)
+                    self.assertEqual(panel._speech_rate, 0.8)
+                    self.assertEqual(
+                        panel._speed_slider.value(), 80)
                     panel._set_speech_rate(145)
                     panel._speech_rate_save_timer.stop()
                     panel._save_speech_rate()
+
+                    self.assertEqual(settings["speech_rate_arabic"], 1.45)
+                    self.assertEqual(settings["speech_rate_other"], 1.1)
+
+                    settings["target_language"] = "fr"
+                    panel.refresh_speech_settings()
+                    self.assertEqual(panel._speech_rate, 1.1)
+                    self.assertEqual(panel._speed_slider.value(), 110)
+
+                    settings["chat_reply_language_only"] = True
+                    settings["chat_reply_language"] = "ar-SA"
+                    panel.refresh_speech_settings()
+                    self.assertEqual(panel._speech_rate, 1.45)
                 finally:
                     panel.close()
 
                 persisted = settings_module.load()
-                self.assertEqual(persisted["speech_rate"], 0.8)
                 self.assertEqual(persisted["chat_speech_rate"], 1.45)
+                self.assertEqual(persisted["speech_rate_arabic"], 1.45)
+                self.assertEqual(persisted["speech_rate_other"], 1.1)
 
-                persisted["speech_rate"] = 1.2
+                persisted["target_language"] = "fr"
+                persisted["chat_reply_language_only"] = False
                 settings_module.save(persisted)
                 reopened = ChatPanel(lambda: settings_module.load())
                 try:
-                    self.assertEqual(reopened._speech_rate, 1.45)
+                    self.assertEqual(reopened._speech_rate, 1.1)
                 finally:
                     reopened.close()
 

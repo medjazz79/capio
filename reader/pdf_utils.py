@@ -9,6 +9,7 @@ from PySide6.QtGui import QImage
 
 MIN_SCAN_IMAGE_COVERAGE = 0.5
 MAX_SCAN_TEXT_WORDS = 80
+RUNNING_HEADER_MAX_PAGE_FRACTION = 0.10
 
 
 def open_doc(path: str) -> pymupdf.Document:
@@ -168,20 +169,35 @@ def page_body_text(page: pymupdf.Page) -> tuple[str, str | None]:
     has_text = False
     body_sizes: list[float] = []
     blocks = page.get_text("dict").get("blocks", [])
-    for block in blocks:
-        for line in block.get("lines", []):
+    words_by_line: dict[tuple[int, int], list[tuple]] = {}
+    for word in page.get_text("words"):
+        words_by_line.setdefault((int(word[5]), int(word[6])), []).append(word)
+
+    def line_text(block_number: int, line_number: int, spans: list[dict]) -> str:
+        words = words_by_line.get((block_number, line_number), [])
+        if words:
+            ordered = sorted(words, key=lambda word: word[7])
+            return " ".join(str(word[4]) for word in ordered).strip()
+        return "".join(str(span.get("text", "")) for span in spans).strip()
+
+    for block_index, block in enumerate(blocks):
+        block_number = int(block.get("number", block_index))
+        for line_number, line in enumerate(block.get("lines", [])):
             spans = [
                 span for span in line.get("spans", [])
                 if str(span.get("text", "")).strip()
             ]
-            text = "".join(str(span.get("text", "")) for span in spans).strip()
+            text = line_text(block_number, line_number, spans)
             if not text:
                 continue
             has_text = True
             rect = pymupdf.Rect(line["bbox"])
             if page.rotation:
                 rect *= page.rotation_matrix
-            if (rect.y0 + rect.y1) / 2 >= page_height * 0.16:
+            if (
+                (rect.y0 + rect.y1) / 2
+                >= page_height * RUNNING_HEADER_MAX_PAGE_FRACTION
+            ):
                 body_sizes.extend(
                     float(span.get("size", 0))
                     for span in spans
@@ -195,14 +211,15 @@ def page_body_text(page: pymupdf.Page) -> tuple[str, str | None]:
     typical_size = body_sizes[len(body_sizes) // 2] if body_sizes else 0.0
     page_number: str | None = None
     kept_blocks: list[str] = []
-    for block in blocks:
+    for block_index, block in enumerate(blocks):
+        block_number = int(block.get("number", block_index))
         kept_lines: list[str] = []
-        for line in block.get("lines", []):
+        for line_number, line in enumerate(block.get("lines", [])):
             spans = [
                 span for span in line.get("spans", [])
                 if str(span.get("text", "")).strip()
             ]
-            text = "".join(str(span.get("text", "")) for span in spans).strip()
+            text = line_text(block_number, line_number, spans)
             if not text:
                 continue
             rect = pymupdf.Rect(line["bbox"])
@@ -210,7 +227,7 @@ def page_body_text(page: pymupdf.Page) -> tuple[str, str | None]:
                 rect *= page.rotation_matrix
             center_y = (rect.y0 + rect.y1) / 2
             at_page_edge = (
-                center_y <= page_height * 0.16
+                center_y <= page_height * RUNNING_HEADER_MAX_PAGE_FRACTION
                 or center_y >= page_height * 0.88
             )
             if at_page_edge and re.fullmatch(r"\d{1,4}", text):
@@ -218,7 +235,9 @@ def page_body_text(page: pymupdf.Page) -> tuple[str, str | None]:
                     page_number = text
                 continue
 
-            is_top_margin = center_y <= page_height * 0.16
+            is_top_margin = (
+                center_y <= page_height * RUNNING_HEADER_MAX_PAGE_FRACTION
+            )
             is_italic = any(int(span.get("flags", 0)) & 2 for span in spans)
             sizes = [
                 float(span.get("size", 0))

@@ -2966,8 +2966,10 @@ class MainWindow(QMainWindow):
         "translation_font_arabic", "translation_font_latin", "arabic_tashkeel",
         "line_spacing_px", "translation_side_margin_px",
         "translation_top_bottom_margin_px", "source_language",
-        "target_language", "explain_mode", "explain_instructions",
-        "speech_engine", "speech_rate", "speech_voice", "gemini_tts_voice",
+        "target_language", "chat_reply_language", "chat_reply_language_only",
+        "explain_mode", "explain_instructions",
+        "speech_engine", "speech_rate", "speech_rate_arabic",
+        "speech_rate_other", "speech_voice", "gemini_tts_voice",
         "speech_read_latin_words", "automatic_speech_voice", "gemini_key",
     )
 
@@ -3022,6 +3024,8 @@ class MainWindow(QMainWindow):
             # without changing anything that affects them.
             previous = dict(self.settings)
             self.settings = dlg.values()
+            if self._chat_panel is not None:
+                self._chat_panel.refresh_speech_settings()
             self._sync_language_combos()
             save(self.settings)
             waiting_page = self._automatic_page_waiting_for_prefetch
@@ -3566,6 +3570,8 @@ class MainWindow(QMainWindow):
             if cur != self.settings:
                 old = self.settings
                 self.settings = cur
+                if self._chat_panel is not None:
+                    self._chat_panel.refresh_speech_settings()
                 self._sync_language_combos()
                 self._sync_selection_mode_button()
                 self._refresh_engine_label()
