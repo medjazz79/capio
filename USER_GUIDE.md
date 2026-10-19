@@ -184,8 +184,9 @@ Works on **both** kinds of PDFs:
   Changes preview immediately in the reader, chat, and open translations.
   **Reset wheel** restores one control for the selected element; **Reset all**
   restores all elements to the selected theme's original colors. Use
-  **Save as…** to name a personal theme, then **Save Changes** to keep it;
-  **Cancel** restores the previous theme.
+  **Save as…** to name a personal theme, then **Save Changes** to keep it.
+  The new theme saves the colors currently shown and keeps them when switching
+  between Dark and Light color schemes. **Cancel** restores the previous theme.
 - No bars around the pages — messages flash briefly in the window title.
 ## Window layout
 

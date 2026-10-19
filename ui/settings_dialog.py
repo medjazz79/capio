@@ -2171,6 +2171,12 @@ class SettingsDialog(QDialog):
         if source_variants is None:
             source_variants = THEME_VARIANTS.get(
                 source_name, THEME_VARIANTS["Dark Slate"])
+        scheme = resolved_color_scheme(
+            self._settings.get("color_scheme", "system"))
+        selected_palette = source_variants.get(scheme)
+        if not isinstance(selected_palette, dict):
+            selected_palette = theme_colors(source_name, scheme)
+        selected_palette = dict(selected_palette)
         name, accepted = QInputDialog.getText(
             self, "Save personal theme", "Theme name:")
         name = name.strip()[:40]
@@ -2194,8 +2200,8 @@ class SettingsDialog(QDialog):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         variants[name] = {
-            key: dict(palette)
-            for key, palette in source_variants.items()
+            variant: dict(selected_palette)
+            for variant in ("dark", "light")
         }
         self._settings["user_themes"] = register_user_themes(variants)
         self._settings["theme"] = name
@@ -2204,9 +2210,7 @@ class SettingsDialog(QDialog):
         self.header_theme_combo.setCurrentIndex(
             self.header_theme_combo.findData(name))
         self._refresh_personal_theme_controls()
-        scheme = resolved_color_scheme(
-            self._settings.get("color_scheme", "system"))
-        self._begin_theme_grade(name, scheme, variants[name][scheme])
+        self._begin_theme_grade(name, scheme, selected_palette)
         self._apply_theme_style()
         self._emit_preview_settings()
 

@@ -613,6 +613,74 @@ class TestThemePresets(unittest.TestCase):
                     dialog.close()
                     register_user_themes({})
 
+    def test_save_as_keeps_the_selected_palette_for_both_color_schemes(self):
+        from config import settings as settings_module
+        from config.settings import DEFAULTS
+        from ui.settings_dialog import SettingsDialog
+        from ui.theme import register_user_themes
+
+        register_user_themes({})
+        dialog = SettingsDialog(dict(
+            DEFAULTS, color_scheme="dark", user_themes={}))
+        try:
+            dialog._ensure_personal_theme()
+            dialog.color_scheme_combo.setCurrentIndex(
+                dialog.color_scheme_combo.findData("light"))
+            dialog._theme_group_checkboxes["background"].setChecked(True)
+            dialog._on_theme_grade_changed("offset", master=0.25)
+            dialog._theme_preview_timer.stop()
+            selected_palette = dict(
+                dialog._settings["user_themes"]["My Theme"]["light"])
+
+            with mock.patch(
+                "ui.settings_dialog.QInputDialog.getText",
+                return_value=("Forest Medium", True),
+            ):
+                dialog._save_personal_theme_as()
+            medium = dialog._settings["user_themes"]["Forest Medium"]
+            self.assertEqual(medium["dark"], selected_palette)
+            self.assertEqual(medium["light"], selected_palette)
+
+            dialog.header_theme_combo.setCurrentIndex(
+                dialog.header_theme_combo.findData("Everforest"))
+            dialog._theme_group_checkboxes["background"].setChecked(True)
+            dialog._on_theme_grade_changed("offset", master=-0.25)
+            dialog._theme_preview_timer.stop()
+            selected_dark_palette = dict(
+                dialog._settings["user_themes"]["My Theme 2"]["light"])
+            with mock.patch(
+                "ui.settings_dialog.QInputDialog.getText",
+                return_value=("Forest Dark", True),
+            ):
+                dialog._save_personal_theme_as()
+            dark = dialog._settings["user_themes"]["Forest Dark"]
+
+            self.assertEqual(dark["dark"], selected_dark_palette)
+            self.assertEqual(dark["light"], selected_dark_palette)
+            self.assertNotEqual(
+                medium["dark"],
+                dark["dark"],
+            )
+            with tempfile.TemporaryDirectory() as temp_dir:
+                settings_path = Path(temp_dir) / "settings.json"
+                with mock.patch.object(
+                    settings_module, "SETTINGS_PATH", settings_path
+                ):
+                    settings_module.save(dialog.values())
+                    persisted = settings_module.load()["user_themes"]
+            self.assertEqual(
+                persisted["Forest Medium"]["dark"], selected_palette)
+            self.assertEqual(
+                persisted["Forest Medium"]["light"], selected_palette)
+            self.assertEqual(
+                persisted["Forest Dark"]["dark"], selected_dark_palette)
+            self.assertEqual(
+                persisted["Forest Dark"]["light"], selected_dark_palette)
+        finally:
+            dialog._theme_preview_timer.stop()
+            dialog.close()
+            register_user_themes({})
+
     def test_theme_grade_flush_avoids_reapplying_full_settings_stylesheet(self):
         from config.settings import DEFAULTS
         from ui.settings_dialog import PAGE_MY_THEME, SettingsDialog
