@@ -37,7 +37,7 @@ from PySide6.QtCore import QEvent, QPoint, QRect, QUrl, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QContextMenuEvent, QDesktopServices, QFont, QFontMetricsF,
     QTextBlockFormat, QTextCharFormat,
-    QTextCursor, QTextDocument, QTextFormat, QTextOption,
+    QTextCursor, QTextDocument, QTextFormat,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (

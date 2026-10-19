@@ -57,7 +57,7 @@ from config.app_log import log_path, setup_logging  # noqa: E402  (needs sys.pat
 
 _fault_log_file = None
 from PySide6.QtCore import (
-    QByteArray, QElapsedTimer, QEvent, QObject, QPoint, QRect, QTimer, QUrl,
+    QByteArray, QElapsedTimer, QEvent, QObject, QRect, QTimer, QUrl,
     Qt, Signal,
 )
 from PySide6.QtGui import (
@@ -65,19 +65,19 @@ from PySide6.QtGui import (
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QDockWidget, QFileDialog, QFormLayout, QFrame,
+    QApplication, QComboBox, QDialog, QDockWidget, QFileDialog, QFrame,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QInputDialog, QPushButton, QPlainTextEdit, QTabWidget, QTextEdit, QToolBar,
+    QInputDialog, QPushButton, QTabWidget, QTextEdit, QToolBar,
     QToolButton, QVBoxLayout, QSizePolicy,
     QWidget, QSpinBox,
 )
 
 from config.settings import (
-    DEFAULT_MODEL, SettingsLoadError, load, resolve_model, save,
+    SettingsLoadError, load, resolve_model, save,
 )
 from popup.translate_popup import TranslatePopup
 from popup.worker import PageTranslationWorker, TranslateWorker
-from reader import pdf_utils
+from reader import continuous, pdf_utils
 from reader.bookview import BookView
 from reader.document_import import SUPPORTED_EXTENSIONS, SUPPORTED_FILE_FILTER
 from reader.continuous import ContinuousReader  # noqa: F401 (used in tests)
@@ -1656,9 +1656,27 @@ class MainWindow(QMainWindow):
         book.close_doc()
         self.tabs.removeTab(index)
         book.deleteLater()
+        self._release_document_memory()
         self._update_empty()
         self._sync_book_ui()
         self._save_session_soon()
+
+    def _release_document_memory(self) -> None:
+        """Give MuPDF's process-wide arena back once no book is left open.
+
+        MuPDF never returns its store on its own: eight open/close cycles of a
+        31 MB book left ~300 MB resident with nothing held on the Python side
+        (tests/test_reader_fixes.py::TestDocumentStoreRelease). It is skipped
+        in two cases, both about not freeing memory still in use: a book is
+        still open (its cached fonts would be dropped for nothing), or a raster
+        worker is still running -- the store is shared and that worker is an
+        in-process QThread, and MuPDF is not thread-safe.
+        """
+        if next(self._iter_books(), None) is not None:
+            return
+        if continuous.renders_in_flight():
+            return
+        pdf_utils.shrink_document_store()
 
     def _close_books(self, books: list[BookView], action: str) -> None:
         targets = [
@@ -3611,7 +3629,13 @@ class MainWindow(QMainWindow):
                         if popup.isVisible():
                             popup.refresh_display(cur)
         except Exception:
-            pass
+            # This poll runs every 1.5 s. Swallowing the error here meant a
+            # settings file that could no longer be read looked exactly like a
+            # window that simply stopped following it. Report the first failure
+            # (once) so the log says why, without filling it twice a second.
+            if not getattr(self, "_settings_reload_error_logged", False):
+                self._settings_reload_error_logged = True
+                logging.exception("Could not reload settings from disk")
 
     def _refresh_engine_label(self):
         model = resolve_model(self.settings)

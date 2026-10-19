@@ -12,8 +12,7 @@ import pymupdf
 from PySide6.QtCore import QEvent, QPoint, QRect, QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QTextCursor, QTransform
 from PySide6.QtWidgets import (
-    QHBoxLayout, QSplitter, QStackedWidget, QTextEdit, QToolButton,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QSplitter, QStackedWidget, QTextEdit, QToolButton, QWidget,
 )
 
 from config.app_log import get_logger

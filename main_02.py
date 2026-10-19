@@ -59,7 +59,7 @@ from PySide6.QtGui import (
     QPainterPath, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QApplication, QDialog, QLabel, QMenu, QMessageBox, QPushButton,
+    QApplication, QDialog, QMenu, QMessageBox, QPushButton,
     QSystemTrayIcon, QVBoxLayout,
 )
 

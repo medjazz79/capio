@@ -4541,7 +4541,7 @@ class SettingsDialog(QDialog):
 
     def _refresh_zen_models(self) -> None:
         from translators import gemini as gemini_api
-        from translators import opencode_cli, opencode_compat, opencode_zen
+        from translators import opencode_cli, opencode_compat
         chosen = self._current_model()
         self.z_refresh.setEnabled(False)
         self._cli_model_error = None

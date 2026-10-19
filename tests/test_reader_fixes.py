@@ -1326,5 +1326,151 @@ class TestBookViewCloseDoc(unittest.TestCase):
             book.close()
 
 
+class TestDocumentStoreRelease(unittest.TestCase):
+    """Hand MuPDF's arena back to the OS once the last book is closed.
+
+    MuPDF keeps fonts, content streams and decoded images in one process-wide
+    arena that it never returns to Windows. Measured on the user's own file
+    (31 MB, 552 pages): eight open/close cycles took the process from 135 MB to
+    415 MB resident while Python held nothing -- `tracemalloc` reported 0.42 MB
+    retained and no widgets leaked once deferred deletes were drained -- and
+    `pymupdf.TOOLS.store_shrink(100)` put it back to 46.7 MB in 6 ms, with no
+    cost on the next open. The release is skipped while another book is open or
+    a raster worker is running: the store is process-wide and that worker is an
+    in-process QThread, so shrinking it under a live raster would free memory
+    still in use (MuPDF is not thread-safe).
+    """
+
+    def setUp(self):
+        self.app = _app()
+        import tempfile
+
+        import pymupdf
+
+        self._tmp = tempfile.mkdtemp(prefix="ht_store_")
+        self.paths = []
+        for name in ("one.pdf", "two.pdf"):
+            path = os.path.join(self._tmp, name)
+            doc = pymupdf.open()
+            for _ in range(2):
+                doc.new_page()
+            doc.save(path)
+            doc.close()
+            self.paths.append(path)
+
+    def tearDown(self):
+        for path in self.paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        try:
+            os.rmdir(self._tmp)
+        except OSError:
+            pass
+
+    # --- the PyMuPDF hook -------------------------------------------------
+
+    def test_releasing_the_store_asks_for_the_whole_arena(self):
+        """Fails if the percent stops being 100: a partial release still leaves
+        hundreds of megabytes resident, which is the whole point."""
+        from types import SimpleNamespace
+
+        from reader import pdf_utils
+
+        asked: list[int] = []
+        fake_tools = SimpleNamespace(store_shrink=asked.append)
+        with mock.patch.object(pdf_utils.pymupdf, "TOOLS", fake_tools):
+            self.assertTrue(pdf_utils.shrink_document_store())
+        self.assertEqual(
+            asked, [100], "MuPDF was not asked to release the whole arena")
+
+    def test_a_pymupdf_without_the_hook_does_not_raise(self):
+        """Older builds expose no `TOOLS.store_shrink`; closing a book must not
+        start failing because of that."""
+        from types import SimpleNamespace
+
+        from reader import pdf_utils
+
+        with mock.patch.object(pdf_utils.pymupdf, "TOOLS", SimpleNamespace()):
+            self.assertFalse(pdf_utils.shrink_document_store())
+
+    def test_the_installed_pymupdf_accepts_the_request(self):
+        from reader import pdf_utils
+
+        self.assertTrue(
+            pdf_utils.shrink_document_store(),
+            "this PyMuPDF build rejected store_shrink(100)")
+
+    # --- the release gate in main.py --------------------------------------
+
+    def _window_recording_releases(self):
+        import main
+        from reader import pdf_utils
+
+        window = main.MainWindow()
+        window.show()
+        self.app.processEvents()
+        self.addCleanup(window.close)
+        # A window built after another test may restore that test's session and
+        # arrive with tabs already open. Start from an empty window so the
+        # assertions are about closing `self.paths` only.
+        for restored in list(window._iter_books()):
+            window._remove_book_tab(restored)
+        self.app.processEvents()
+
+        releases: list[bool] = []
+
+        def record() -> bool:
+            releases.append(True)
+            return True
+
+        patcher = mock.patch.object(pdf_utils, "shrink_document_store", record)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return window, releases
+
+    def test_closing_the_last_book_hands_the_arena_back(self):
+        window, releases = self._window_recording_releases()
+        window.open_paths([self.paths[0]])
+        self.app.processEvents()
+        self.assertEqual(sum(1 for _ in window._iter_books()), 1)
+
+        window._remove_book_tab(window.tabs.currentWidget())
+
+        self.assertEqual(
+            len(releases), 1,
+            "closing the last book left MuPDF's arena resident")
+
+    def test_a_book_still_open_keeps_the_arena(self):
+        """Shrinking under another open book would drop its cached data for
+        nothing; the user's rule is 'when the last book closes'."""
+        window, releases = self._window_recording_releases()
+        window.open_paths([self.paths[0]])
+        window.open_paths([self.paths[1]])
+        self.app.processEvents()
+        books = list(window._iter_books())
+        self.assertEqual(len(books), 2, "two documents were not both open")
+
+        window._remove_book_tab(books[0])
+
+        self.assertEqual(releases, [])
+
+    def test_a_running_raster_keeps_the_arena(self):
+        """The raster worker is an in-process QThread and the store is
+        process-wide; freeing it mid-render is the crash we must avoid."""
+        from reader import continuous
+
+        window, releases = self._window_recording_releases()
+        window.open_paths([self.paths[0]])
+        self.app.processEvents()
+
+        with mock.patch.object(continuous, "renders_in_flight", lambda: True):
+            window._remove_book_tab(window.tabs.currentWidget())
+
+        self.assertEqual(
+            releases, [], "the arena was shrunk under a live raster worker")
+
+
 if __name__ == "__main__":
     unittest.main()

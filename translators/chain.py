@@ -1360,30 +1360,6 @@ def _stream_single_router(chunk: str, s: dict):
 
 
 _TOKEN_SUFFIX_MARK = "  ·  "
-_TOKEN_SUFFIX_TAIL = " tok ("
-
-
-def _split_token_suffix(badge: str) -> tuple[str, dict]:
-    """Peel the `  ·  N tok (...)` tail off a badge, returning core + totals.
-
-    A page is split into chunks and each is its own request, so the badge
-    arriving here carries only one chunk's share. They are added up before
-    anything is displayed.
-    """
-    marker = badge.find(_TOKEN_SUFFIX_TAIL)
-    if marker < 0:
-        return badge, {}
-    tail = badge[marker:]
-    close = tail.rfind(")")
-    if close < 0:
-        return badge, {}
-    head, numbers = badge[:marker], tail[marker + len(_TOKEN_SUFFIX_MARK):close]
-    totals: dict = {}
-    for field in ("in", "out", "reasoning", "cached"):
-        found = re.search(rf"([\d,]+) {field}\b", numbers)
-        if found:
-            totals[field] = int(found.group(1).replace(",", ""))
-    return head, totals
 
 
 def _flush_usage() -> None:

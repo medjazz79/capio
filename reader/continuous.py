@@ -62,6 +62,24 @@ def _park_render_worker(worker) -> None:
                       exc_info=True)
 
 
+def renders_in_flight() -> bool:
+    """True while a raster worker is still running.
+
+    Callers release process-wide native memory (MuPDF's store) and must not do
+    that under a live raster: the worker is an in-process QThread, and MuPDF is
+    not thread-safe. A worker parked by `_stop_render_worker` is not "gone"
+    until its thread has really finished, so this asks the same list.
+    """
+    _sweep_render_workers()
+    for worker in list(_PARKED_RENDER_WORKERS):
+        try:
+            if worker.isRunning():
+                return True
+        except RuntimeError:
+            continue        # its C++ object is already gone: nothing running
+    return False
+
+
 class PageLabel(QLabel):
     selected = Signal(int, QRect)  # page_index, rect in label pixels
     contextRequested = Signal(int, QPoint)
