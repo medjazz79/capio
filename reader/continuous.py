@@ -71,7 +71,6 @@ class PageLabel(QLabel):
         self.page_index = page_index
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self.setToolTip("Drag with the LEFT mouse button over any sentence to translate it")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("QLabel { background: white; border: 1px solid #d5dee9; }")
         self._origin = QPoint()
