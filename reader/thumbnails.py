@@ -135,10 +135,11 @@ class _ThumbnailPositionDelegate(QStyledItemDelegate):
             marker_y = round(
                 icon_rect.top() + progress * (icon_rect.height() - 1))
             marker = icon_rect.adjusted(2, 0, -2, 0)
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#7f1d1d"))
-            painter.drawRect(marker.left(), marker_y - 2, marker.width(), 5)
+            painter.drawRect(marker.left(), marker_y - 3, marker.width(), 7)
             painter.setBrush(QColor("#ef4444"))
-            painter.drawRect(marker.left(), marker_y - 1, marker.width(), 3)
+            painter.drawRect(marker.left(), marker_y - 2, marker.width(), 5)
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(self._border_color)

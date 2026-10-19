@@ -1020,7 +1020,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         self.assertEqual(
             [button.text() for button in dialog._nav_buttons],
             ["Custom Providers", "API Keys", "Appearance",
-             "Performance", "Application", "Read Aloud / TTS", "My Theme"],
+             "Performance", "Application", "Read Aloud / TTS"],
         )
         self.assertTrue(dialog._page_keys[0].isAncestorOf(dialog.z_model))
         self.assertTrue(
@@ -7061,6 +7061,19 @@ class TestReaderZoom(_GuiCase):
                 option,
                 panel.list,
             )
+            red_rows = {
+                y
+                for y in range(icon_rect.top(), icon_rect.bottom() + 1)
+                if any(
+                    (color := rendered.pixelColor(x, y)).red() > 220
+                    and color.green() < 100
+                    and color.blue() < 100
+                    for x in range(icon_rect.left(), icon_rect.right() + 1)
+                )
+            }
+            self.assertEqual(
+                len(red_rows), 5,
+                "the position marker should be visibly thicker than a 3 px line")
             cyan_pixels = sum(
                 1 for y in range(icon_rect.top(), icon_rect.bottom() + 1)
                 for x in range(icon_rect.left(), icon_rect.right() + 1)

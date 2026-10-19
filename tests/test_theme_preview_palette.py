@@ -52,7 +52,6 @@ class PreviewPaletteDoesNotSurviveSaveTest(unittest.TestCase):
         from config.settings import load
 
         preview = dict(load())
-        preview["_grade_editing"] = False
         self.window._preview_theme_from_settings(preview, restoring)
         self.app.processEvents()
 

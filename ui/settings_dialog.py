@@ -16,12 +16,12 @@ import threading
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIntValidator, QPainter
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
     QDoubleSpinBox, QInputDialog, QLineEdit, QMenu, QPushButton, QPlainTextEdit, QSizePolicy,
-    QSlider, QSpinBox, QSplitter, QStackedWidget,
+    QSpinBox, QSplitter, QStackedWidget,
     QScrollArea, QStyle, QStyleOptionButton, QStylePainter,
     QStyledItemDelegate, QStyleOptionViewItem, QTextEdit, QToolButton, QVBoxLayout,
-    QMessageBox, QRadioButton, QWidget,
+    QMessageBox, QWidget,
 )
 
 from config.app_log import get_logger
@@ -37,12 +37,9 @@ from config.settings import (
 )
 from translators.registry import detect_flm_base
 from ui.theme import (
-    THEMES, THEME_COLOR_KEYS, THEME_GROUPS, THEME_VARIANTS, apply_color_curve,
-    apply_color_grading, register_user_themes, resolved_color_scheme,
+    THEMES, THEME_COLOR_KEYS,
     settings_stylesheet, theme_colors,
 )
-from ui.theme_editor import ColorBalanceWheel, ToneCurveEditor
-
 log = get_logger("settings")
 
 _IMAGE_CAPABILITY_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -83,7 +80,6 @@ PAGE_APPEARANCE = 2
 PAGE_PERFORMANCE = 3
 PAGE_GENERAL = 4
 PAGE_TTS = 5
-PAGE_MY_THEME = 6
 
 
 class _ModelPickerDelegate(QStyledItemDelegate):
@@ -504,30 +500,12 @@ class SettingsDialog(QDialog):
         self._syncing = False
         self._settings = dict(settings)
         self._initial_settings = dict(settings)
-        self._settings["user_themes"] = register_user_themes(
-            self._settings.get("user_themes"))
-        self._theme_grade_names = ("lift", "gamma", "gain", "offset")
-        self._theme_grade_state = {
-            name: (0.0, 0.0, 0.0) for name in self._theme_grade_names
-        }
-        self._theme_color_groups = {
-            label.lower(): roles for label, roles in THEME_GROUPS
-        }
-        self._active_theme_color_group = "accent"
-        self._theme_grade_states = {
-            group: {
-                name: (0.0, 0.0, 0.0)
-                for name in self._theme_grade_names
-            }
-            for group in self._theme_color_groups
-        }
-        self._theme_curve_states = {
-            group: [(0.0, 0.0), (1.0, 1.0)]
-            for group in self._theme_color_groups
-        }
-        self._theme_grade_base: dict[str, str] | None = None
-        self._theme_grade_theme: str | None = None
-        self._theme_grade_scheme: str | None = None
+        for key in ("user_themes", "theme_schemes", "theme_grades"):
+            self._settings.pop(key, None)
+            self._initial_settings.pop(key, None)
+        if self._settings.get("theme") not in THEMES:
+            self._settings["theme"] = "Dark Slate"
+            self._initial_settings["theme"] = "Dark Slate"
         self._theme_preview_styles_active = False
         self._theme_preview_page_stylesheet = ""
         self._theme_preview_header_stylesheet = ""
@@ -562,12 +540,6 @@ class SettingsDialog(QDialog):
         self._size_save_timer.setSingleShot(True)
         self._size_save_timer.setInterval(400)
         self._size_save_timer.timeout.connect(self._save_dialog_geometry)
-        self._theme_preview_timer = QTimer(self)
-        self._theme_preview_timer.setSingleShot(True)
-        self._theme_preview_timer.setInterval(16)
-        self._theme_preview_timer.timeout.connect(
-            self._flush_theme_grade_preview)
-
         # ── Root layout ──
         root = QVBoxLayout(self)
         root.setSizeConstraint(QVBoxLayout.SizeConstraint.SetNoConstraint)
@@ -613,7 +585,6 @@ class SettingsDialog(QDialog):
         self._translation_group = self._build_engine_group()
         self._custom_providers_group = self._build_custom_providers_group()
         self._appearance_group = self._build_appearance_group()
-        self._my_theme_group = self._build_my_theme_group()
         self._general_group = self._build_general_group()
         self._tts_group = self._build_tts_group()
 
@@ -624,7 +595,6 @@ class SettingsDialog(QDialog):
         self._page_keys.append(self._wrap_scroll(self._performance_group))
         self._page_keys.append(self._wrap_scroll(self._general_group))
         self._page_keys.append(self._wrap_scroll(self._tts_group))
-        self._page_keys.append(self._wrap_scroll(self._my_theme_group))
         for pg in self._page_keys:
             self._stack.addWidget(pg)
 
@@ -648,7 +618,7 @@ class SettingsDialog(QDialog):
         self._compat_tabs.setParent(self)
         self._compat_tabs.setVisible(False)
         self._compat_tabs.setMaximumSize(0, 0)
-        for _name in ["API Keys", "Custom Providers", "Performance", "Application", "Shortcuts", "Read Aloud / TTS", "My Theme"]:
+        for _name in ["API Keys", "Custom Providers", "Performance", "Application", "Shortcuts", "Read Aloud / TTS"]:
             self._compat_tabs.addTab(QWidget(), _name)
 
         # Connect sidebar -> stack
@@ -766,7 +736,6 @@ class SettingsDialog(QDialog):
             ("Performance", "Speed, streaming & effort", PAGE_PERFORMANCE),
             ("Application", "Behavior, shortcuts & storage", PAGE_GENERAL),
             ("Read Aloud / TTS", "Engine, speed & speech behavior", PAGE_TTS),
-            ("My Theme", "Create, preview & save your colors", PAGE_MY_THEME),
         ]
         for title, subtitle, page_index in items:
             btn = _NavButton(title, subtitle, nav_panel)
@@ -932,10 +901,6 @@ class SettingsDialog(QDialog):
             self._settings["color_scheme"] = "light"
             self.color_scheme_combo.setCurrentIndex(
                 self.color_scheme_combo.findData("light"))
-        scheme = resolved_color_scheme(
-            self._settings.get("color_scheme", "system"))
-        self._begin_theme_grade(theme, scheme)
-        self._refresh_personal_theme_controls()
         self._apply_theme_style()
         self._emit_preview_settings()
 
@@ -948,11 +913,6 @@ class SettingsDialog(QDialog):
             self._settings["theme"] = "Dark Slate"
             self.header_theme_combo.setCurrentIndex(
                 self.header_theme_combo.findData("Dark Slate"))
-        self._begin_theme_grade(
-            self._settings.get("theme", "Dark Slate"),
-            resolved_color_scheme(scheme),
-        )
-        self._update_theme_editor_sample()
         self._apply_theme_style()
         self._emit_preview_settings()
 
@@ -995,6 +955,10 @@ class SettingsDialog(QDialog):
             if widget is None:
                 continue
             if widget_name == "_stack":
+                # Every page is cleared, not just the visible one: this also
+                # flips _theme_preview_styles_active off, and page navigation
+                # only restyles while that flag is on. Skipping a page would
+                # strand it with the previous theme's stylesheet.
                 for page in getattr(self, "_page_keys", ()):
                     page.setStyleSheet("")
             else:
@@ -1270,7 +1234,7 @@ class SettingsDialog(QDialog):
 
             live_settings = self.values()
             baseline = self._initial_settings
-            ignored = ("theme", "user_themes")
+            ignored = ("theme",)
             changed = {
                 key: value
                 for key, value in live_settings.items()
@@ -1302,9 +1266,6 @@ class SettingsDialog(QDialog):
                 "Enter a custom reading duration in minutes.",
             )
             return
-        if self._theme_preview_timer.isActive():
-            self._theme_preview_timer.stop()
-            self._flush_theme_grade_preview()
         try:
             from config.settings import save
 
@@ -1710,560 +1671,9 @@ class SettingsDialog(QDialog):
         lay.addWidget(_hint_frame("Font and spacing changes preview live — open translations update without saving.", "default"))
         return outer
 
-    def _build_my_theme_group(self) -> QWidget:
-        outer = QWidget()
-        lay = QVBoxLayout(outer)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(16)
-        lay.addWidget(self._section_header(
-            "PERSONALIZE",
-            "My Theme",
-            "Choose one color element, then grade it with all four wheels.",
-        ))
-
-        theme_card = QGroupBox("MY SAVED THEMES")
-        theme_layout = QHBoxLayout(theme_card)
-        self.my_theme_combo = QComboBox()
-        self.my_theme_combo.setMinimumWidth(220)
-        self.my_theme_combo.currentTextChanged.connect(
-            self._on_my_theme_selected)
-        theme_layout.addWidget(self.my_theme_combo, 1)
-        self.save_theme_button = QPushButton("Save as…")
-        self.save_theme_button.clicked.connect(self._save_personal_theme_as)
-        theme_layout.addWidget(self.save_theme_button)
-        self.delete_theme_button = QPushButton("Delete")
-        self.delete_theme_button.clicked.connect(self._delete_personal_theme)
-        theme_layout.addWidget(self.delete_theme_button)
-        lay.addWidget(theme_card)
-
-        editor_card = QGroupBox("PRIMARY COLOR WHEELS")
-        editor_layout = QVBoxLayout(editor_card)
-        editor_header = QHBoxLayout()
-        editor_header.addWidget(QLabel(
-            "Select one element below. Every wheel then affects only that "
-            "element; use Y to change luminance."))
-        editor_header.addStretch(1)
-        self.reset_all_theme_wheels_button = QPushButton("Reset all")
-        self.reset_all_theme_wheels_button.clicked.connect(
-            self._reset_all_theme_grades)
-        editor_header.addWidget(self.reset_all_theme_wheels_button)
-        editor_layout.addLayout(editor_header)
-
-        groups_layout = QGridLayout()
-        groups_layout.addWidget(QLabel("Element:"), 0, 0)
-        self._theme_group_checkboxes: dict[str, QRadioButton] = {}
-        self._theme_group_button_group = QButtonGroup(self)
-        self._theme_group_button_group.setExclusive(True)
-        for group, label in (
-            ("background", "Background"),
-            ("border", "Border"),
-            ("text", "Text"),
-            ("accent", "Accent"),
-            ("status", "Status"),
-        ):
-            checkbox = QRadioButton(label)
-            checkbox.setToolTip({
-                "background": (
-                    "Window, toolbar, panel, canvas, surface, and surface-hover colors."
-                ),
-                "border": "Border and scrollbar colors.",
-                "text": "Main and muted text colors.",
-                "accent": (
-                    "Accent, hover, highlight, and selection colors."
-                ),
-                "status": "Success and warning indicator colors.",
-            }[group])
-            self._theme_group_button_group.addButton(checkbox)
-            checkbox.toggled.connect(
-                lambda checked, selected=group:
-                    self._select_theme_color_group(selected, checked))
-            position = len(self._theme_group_checkboxes)
-            groups_layout.addWidget(
-                checkbox, 1 + position // 4, position % 4)
-            self._theme_group_checkboxes[group] = checkbox
-        editor_layout.addLayout(groups_layout)
-
-        wheels_layout = QGridLayout()
-        wheels_layout.setHorizontalSpacing(18)
-        wheels_layout.setVerticalSpacing(12)
-        wheels_layout.setColumnStretch(0, 1)
-        wheels_layout.setColumnStretch(1, 1)
-        wheels_layout.setRowStretch(0, 1)
-        wheels_layout.setRowStretch(1, 1)
-        self._theme_wheels_layout = wheels_layout
-        self._theme_grade_wheels: dict[str, ColorBalanceWheel] = {}
-        self._theme_grade_sliders: dict[str, QSlider] = {}
-        self._theme_grade_value_labels: dict[str, QLabel] = {}
-        for index, (name, tonal_range) in enumerate((
-            ("lift", "Shadows"),
-            ("gamma", "Midtones"),
-            ("gain", "Highlights"),
-            ("offset", "Entire palette"),
-        )):
-            wheel_column = QVBoxLayout()
-            wheel_column.setSpacing(4)
-            heading = QHBoxLayout()
-            title = QLabel(name.title())
-            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            title.setStyleSheet("font-weight: 700;")
-            title.setToolTip(f"{name.title()} adjusts {tonal_range.lower()}.")
-            heading.addWidget(title, 1)
-            reset_button = QToolButton()
-            reset_button.setText("↺")
-            reset_button.setToolTip(f"Reset {name.title()}")
-            reset_button.setAccessibleName(f"Reset {name.title()} wheel")
-            reset_button.clicked.connect(
-                lambda _checked=False, selected=name:
-                    self._reset_theme_grade(selected))
-            heading.addWidget(reset_button)
-            wheel_column.addLayout(heading)
-
-            wheel = ColorBalanceWheel()
-            wheel.setToolTip(
-                f"{name.title()} · {tonal_range}. Drag from the center "
-                "toward a hue to add that color.")
-            wheel.balanceChanged.connect(
-                lambda x, y, selected=name:
-                    self._on_theme_grade_changed(
-                        selected, balance=(x, y)))
-            wheel_column.addWidget(
-                wheel, 1)
-            self._theme_grade_wheels[name] = wheel
-
-            master_row = QHBoxLayout()
-            master_label = QLabel("Y")
-            master_label.setToolTip(
-                "Master luminance adjustment for this tonal range.")
-            master_row.addWidget(master_label)
-            slider = QSlider(Qt.Orientation.Horizontal)
-            slider.setRange(-100, 100)
-            slider.setValue(0)
-            slider.setTracking(True)
-            slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-            slider.setTickInterval(50)
-            slider.setToolTip(
-                f"{name.title()} master luminance (Y), from darker to brighter.")
-            slider.valueChanged.connect(
-                lambda value, selected=name:
-                    self._on_theme_grade_changed(
-                        selected, master=value / 100))
-            master_row.addWidget(slider, 1)
-            value_label = QLabel("0.00")
-            value_label.setMinimumWidth(38)
-            value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-            master_row.addWidget(value_label)
-            wheel_column.addLayout(master_row)
-            self._theme_grade_sliders[name] = slider
-            self._theme_grade_value_labels[name] = value_label
-            wheels_layout.addLayout(
-                wheel_column, index // 2, index % 2)
-        editor_layout.addLayout(wheels_layout)
-
-        curve_header = QHBoxLayout()
-        curve_header.addWidget(QLabel("CURVE · SELECTED ELEMENT"))
-        curve_header.addStretch(1)
-        reset_curve_button = QToolButton()
-        reset_curve_button.setText("Reset curve")
-        reset_curve_button.setToolTip(
-            "Return the selected element's curve to a neutral diagonal.")
-        reset_curve_button.clicked.connect(self._reset_theme_curve)
-        curve_header.addWidget(reset_curve_button)
-        editor_layout.addLayout(curve_header)
-        self._theme_curve_editor = ToneCurveEditor()
-        self._theme_curve_editor.setToolTip(
-            "Drag points to adjust the RGB tone curve. Click to add a point; "
-            "right-click a point to remove it.")
-        self._theme_curve_editor.pointsChanged.connect(
-            self._on_theme_curve_changed)
-        editor_layout.addWidget(self._theme_curve_editor)
-
-        lay.addWidget(editor_card)
-        self._theme_group_checkboxes["accent"].setChecked(True)
-
-        preview_card = QGroupBox("LIVE PREVIEW")
-        preview_layout = QHBoxLayout(preview_card)
-        self.theme_preview_sample = QLabel(
-            "The quick brown fox\nA book passage preview")
-        self.theme_preview_sample.setMinimumHeight(72)
-        self.theme_preview_sample.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preview_layout.addWidget(self.theme_preview_sample, 1)
-        self.theme_preview_button = QPushButton("Example button")
-        preview_layout.addWidget(self.theme_preview_button)
-        lay.addWidget(preview_card)
-        lay.addWidget(_hint_frame(
-            "Your changes update the reader, chat, and open translations "
-            "immediately. Use Save Changes below to keep the theme; Cancel "
-            "restores the previous appearance.",
-            "default",
-        ))
-        lay.addStretch(1)
-        self._begin_theme_grade(
-            self._settings.get("theme", "Dark Slate"),
-            resolved_color_scheme(
-                self._settings.get("color_scheme", "system")),
-        )
-        self._refresh_personal_theme_controls()
-        return outer
-
-    def _refresh_personal_theme_controls(self) -> None:
-        current_theme = self._settings.get("theme", "Dark Slate")
-        self.header_theme_combo.blockSignals(True)
-        self.header_theme_combo.clear()
-        for name in THEMES:
-            self.header_theme_combo.addItem(name, name)
-        self.header_theme_combo.setCurrentIndex(
-            max(0, self.header_theme_combo.findData(current_theme)))
-        self.header_theme_combo.blockSignals(False)
-        self.my_theme_combo.blockSignals(True)
-        self.my_theme_combo.clear()
-        for name in register_user_themes(
-            self._settings.get("user_themes")
-        ):
-            self.my_theme_combo.addItem(name)
-        self.my_theme_combo.setCurrentText(
-            current_theme if current_theme in self._settings.get(
-                "user_themes", {}) else "")
-        self.my_theme_combo.blockSignals(False)
-        is_custom = current_theme in self._settings.get("user_themes", {})
-        self.delete_theme_button.setEnabled(is_custom)
-        self._update_theme_editor_sample()
-
-    def _begin_theme_grade(
-        self,
-        theme: str,
-        scheme: str,
-        palette: dict[str, str] | None = None,
-    ) -> None:
-        if (
-            palette is None
-            and self._theme_grade_theme == theme
-            and self._theme_grade_scheme == scheme
-            and self._theme_grade_base is not None
-        ):
-            return
-        self._theme_grade_theme = theme
-        self._theme_grade_scheme = scheme
-        self._theme_grade_base = dict(
-            palette if palette is not None else theme_colors(theme, scheme))
-        self._theme_grade_states = {
-            group: {
-                name: (0.0, 0.0, 0.0)
-                for name in self._theme_grade_names
-            }
-            for group in self._theme_color_groups
-        }
-        self._theme_curve_states = {
-            group: [(0.0, 0.0), (1.0, 1.0)]
-            for group in self._theme_color_groups
-        }
-        self._active_theme_color_group = "accent"
-        self._theme_grade_state = self._theme_grade_states["accent"]
-        for group, checkbox in self._theme_group_checkboxes.items():
-            checkbox.blockSignals(True)
-            checkbox.setChecked(group == "accent")
-            checkbox.blockSignals(False)
-        self._load_theme_grade_controls()
-
-    def _select_theme_color_group(self, group: str, checked: bool) -> None:
-        if not checked:
-            return
-        self._active_theme_color_group = group
-        self._theme_grade_state = self._theme_grade_states[group]
-        self._load_theme_grade_controls()
-
-    def _load_theme_grade_controls(self) -> None:
-        state = self._theme_grade_states[self._active_theme_color_group]
-        for name in self._theme_grade_names:
-            x, y, master = state[name]
-            wheel = self._theme_grade_wheels.get(name)
-            if wheel is not None:
-                wheel.blockSignals(True)
-                wheel.setBalance(x, y)
-                wheel.blockSignals(False)
-            slider = self._theme_grade_sliders.get(name)
-            if slider is not None:
-                slider.blockSignals(True)
-                slider.setValue(round(master * 100))
-                slider.blockSignals(False)
-            label = self._theme_grade_value_labels.get(name)
-            if label is not None:
-                label.setText(f"{master:+.2f}")
-        self._theme_curve_editor.blockSignals(True)
-        self._theme_curve_editor.setPoints(
-            self._theme_curve_states[self._active_theme_color_group])
-        self._theme_curve_editor.blockSignals(False)
-        self._theme_curve_editor.setCurveColor(
-            self._theme_colors().get("accent", "#DCE6FC"))
-
-    def _on_theme_grade_changed(
-        self,
-        name: str,
-        *,
-        balance: tuple[float, float] | None = None,
-        master: float | None = None,
-    ) -> None:
-        theme = self._ensure_personal_theme()
-        scheme = resolved_color_scheme(
-            self._settings.get("color_scheme", "system"))
-        variants = self._settings.get("user_themes") or {}
-        if (
-            self._theme_grade_theme != theme
-            or self._theme_grade_scheme != scheme
-            or self._theme_grade_base is None
-        ):
-            self._begin_theme_grade(theme, scheme, variants[theme][scheme])
-
-        group = self._active_theme_color_group
-        state = self._theme_grade_states[group]
-        x, y, current_master = state[name]
-        if balance is not None:
-            x, y = balance
-        if master is not None:
-            current_master = master
-            self._theme_grade_value_labels[name].setText(
-                f"{master:+.2f}")
-        state[name] = (x, y, current_master)
-        palette = self._graded_theme_palette()
-        updated_variants = dict(variants)
-        updated_variants[theme] = dict(
-            updated_variants[theme], **{scheme: palette})
-        self._settings["user_themes"] = register_user_themes(
-            updated_variants)
-        if not self._theme_preview_timer.isActive():
-            self._theme_preview_timer.start()
-
-    def _reset_theme_grade(self, name: str) -> None:
-        wheel = self._theme_grade_wheels[name]
-        slider = self._theme_grade_sliders[name]
-        wheel.blockSignals(True)
-        wheel.setBalance(0, 0)
-        wheel.blockSignals(False)
-        slider.blockSignals(True)
-        slider.setValue(0)
-        slider.blockSignals(False)
-        self._theme_grade_value_labels[name].setText("0.00")
-        self._theme_grade_states[self._active_theme_color_group][name] = (
-            0.0, 0.0, 0.0)
-        self._theme_grade_state = self._theme_grade_states[
-            self._active_theme_color_group]
-        self._reapply_theme_grade()
-
-    def _reset_all_theme_grades(self) -> None:
-        self._theme_grade_states = {
-            group: {
-                name: (0.0, 0.0, 0.0)
-                for name in self._theme_grade_names
-            }
-            for group in self._theme_color_groups
-        }
-        self._theme_curve_states = {
-            group: [(0.0, 0.0), (1.0, 1.0)]
-            for group in self._theme_color_groups
-        }
-        self._theme_grade_state = self._theme_grade_states[
-            self._active_theme_color_group]
-        self._load_theme_grade_controls()
-        self._reapply_theme_grade()
-
-    def _on_theme_curve_changed(self, points) -> None:
-        theme = self._ensure_personal_theme()
-        scheme = resolved_color_scheme(
-            self._settings.get("color_scheme", "system"))
-        variants = self._settings.get("user_themes") or {}
-        if (
-            self._theme_grade_theme != theme
-            or self._theme_grade_scheme != scheme
-            or self._theme_grade_base is None
-        ):
-            self._begin_theme_grade(theme, scheme, variants[theme][scheme])
-        self._theme_curve_states[self._active_theme_color_group] = list(points)
-        self._reapply_theme_grade()
-
-    def _reset_theme_curve(self) -> None:
-        self._theme_curve_editor.reset()
-
-    def _graded_theme_palette(self) -> dict[str, str]:
-        if self._theme_grade_base is None:
-            return {}
-        palette = dict(self._theme_grade_base)
-        for group, keys in self._theme_color_groups.items():
-            group_palette = {
-                key: self._theme_grade_base[key]
-                for key in keys
-                if key in self._theme_grade_base
-            }
-            palette.update(apply_color_grading(
-                group_palette, self._theme_grade_states[group]))
-            palette.update(apply_color_curve(
-                {key: palette[key] for key in keys if key in palette},
-                tuple(self._theme_curve_states[group]),
-            ))
-        return palette
-
-    def _reapply_theme_grade(self) -> None:
-        theme = self._settings.get("theme", "Dark Slate")
-        scheme = resolved_color_scheme(
-            self._settings.get("color_scheme", "system"))
-        if self._theme_grade_base is None:
-            return
-        palette = self._graded_theme_palette()
-        variants = dict(self._settings.get("user_themes") or {})
-        variants[theme] = dict(
-            variants[theme], **{scheme: palette})
-        self._settings["user_themes"] = register_user_themes(variants)
-        if not self._theme_preview_timer.isActive():
-            self._theme_preview_timer.start()
-
-    def _ensure_personal_theme(self) -> str:
-        theme = self._settings.get("theme", "Dark Slate")
-        user_themes = dict(self._settings.get("user_themes") or {})
-        if theme in user_themes:
-            return theme
-        base_variants = THEME_VARIANTS.get(
-            theme, THEME_VARIANTS["Dark Slate"])
-        base_name = "My Theme"
-        name = base_name
-        suffix = 2
-        while name in THEMES or name in user_themes:
-            name = f"{base_name} {suffix}"
-            suffix += 1
-        user_themes[name] = {
-            scheme: dict(base_variants[scheme])
-            for scheme in ("dark", "light")
-        }
-        self._settings["user_themes"] = register_user_themes(user_themes)
-        self._settings["theme"] = name
-        scheme = resolved_color_scheme(
-            self._settings.get("color_scheme", "system"))
-        self._theme_grade_theme = name
-        self._theme_grade_scheme = scheme
-        self._theme_grade_base = dict(user_themes[name][scheme])
-        self.header_theme_combo.addItem(name, name)
-        self.header_theme_combo.blockSignals(True)
-        self.header_theme_combo.setCurrentIndex(
-            self.header_theme_combo.findData(name))
-        self.header_theme_combo.blockSignals(False)
-        self._refresh_personal_theme_controls()
-        return name
-
-    def _flush_theme_grade_preview(self) -> None:
-        self._refresh_live_theme_inline_styles(self._theme_colors())
-        self._update_theme_editor_sample()
-        self._emit_preview_settings(grade_editing=True)
-
-    def _on_my_theme_selected(self, name: str) -> None:
-        if not name or name not in self._settings.get("user_themes", {}):
-            return
-        self._settings["theme"] = name
-        self.header_theme_combo.setCurrentIndex(
-            self.header_theme_combo.findData(name))
-        scheme = resolved_color_scheme(
-            self._settings.get("color_scheme", "system"))
-        self._begin_theme_grade(name, scheme)
-        self._update_theme_editor_sample()
-        self._apply_theme_style()
-        self._emit_preview_settings()
-
-    def _save_personal_theme_as(self) -> None:
-        source_name = self._settings.get("theme", "Dark Slate")
-        user_themes = self._settings.get("user_themes") or {}
-        source_variants = user_themes.get(source_name)
-        if source_variants is None:
-            source_variants = THEME_VARIANTS.get(
-                source_name, THEME_VARIANTS["Dark Slate"])
-        scheme = resolved_color_scheme(
-            self._settings.get("color_scheme", "system"))
-        selected_palette = source_variants.get(scheme)
-        if not isinstance(selected_palette, dict):
-            selected_palette = theme_colors(source_name, scheme)
-        selected_palette = dict(selected_palette)
-        name, accepted = QInputDialog.getText(
-            self, "Save personal theme", "Theme name:")
-        name = name.strip()[:40]
-        if not accepted or not name:
-            return
-        if name in THEMES and name not in self._settings.get("user_themes", {}):
-            QMessageBox.warning(
-                self, "Theme name already used",
-                "Choose a name that is not used by a built-in theme.",
-            )
-            return
-        variants = dict(self._settings.get("user_themes") or {})
-        if name in variants and name != source_name:
-            answer = QMessageBox.question(
-                self,
-                "Replace saved theme?",
-                f"A personal theme named “{name}” already exists. Replace it?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-        variants[name] = {
-            variant: dict(selected_palette)
-            for variant in ("dark", "light")
-        }
-        self._settings["user_themes"] = register_user_themes(variants)
-        self._settings["theme"] = name
-        if self.header_theme_combo.findData(name) < 0:
-            self.header_theme_combo.addItem(name, name)
-        self.header_theme_combo.setCurrentIndex(
-            self.header_theme_combo.findData(name))
-        self._refresh_personal_theme_controls()
-        self._begin_theme_grade(name, scheme, selected_palette)
-        self._apply_theme_style()
-        self._emit_preview_settings()
-
-    def _delete_personal_theme(self) -> None:
-        name = self._settings.get("theme", "")
-        variants = dict(self._settings.get("user_themes") or {})
-        if name not in variants:
-            return
-        answer = QMessageBox.question(
-            self,
-            "Delete saved theme?",
-            f"Delete “{name}”?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        del variants[name]
-        self._settings["user_themes"] = register_user_themes(variants)
-        self._settings["theme"] = "Dark Slate"
-        self.header_theme_combo.setCurrentIndex(
-            self.header_theme_combo.findData("Dark Slate"))
-        self._begin_theme_grade(
-            "Dark Slate",
-            resolved_color_scheme(
-                self._settings.get("color_scheme", "system")),
-        )
-        self._refresh_personal_theme_controls()
-        self._apply_theme_style()
-        self._emit_preview_settings()
-
-    def _update_theme_editor_sample(self) -> None:
-        if not hasattr(self, "theme_preview_sample"):
-            return
-        colors = self._theme_colors()
-        self._theme_curve_editor.setCurveColor(
-            colors.get("accent", "#DCE6FC"))
-        self.theme_preview_sample.setStyleSheet(
-            f"background: {colors['surface']}; color: {colors['text']}; "
-            f"border: 1px solid {colors['border']}; border-radius: 8px; "
-            "padding: 8px;"
-        )
-        self.theme_preview_button.setStyleSheet(
-            f"background: {colors['accent']}; color: {colors['text']}; "
-            f"border: 1px solid {colors['accent_light']}; "
-            "border-radius: 8px; padding: 8px 16px;"
-        )
-
-    def _emit_preview_settings(self, *, grade_editing: bool = False) -> None:
+    def _emit_preview_settings(self) -> None:
         try:
             preview = self.values()
-            if grade_editing:
-                preview["_grade_editing"] = True
             self.previewSettingsChanged.emit(preview, False)
         except (AttributeError, TypeError, ValueError):
             log.exception("Could not build live theme preview settings")
@@ -4965,7 +4375,6 @@ class SettingsDialog(QDialog):
 
     def reject(self) -> None:
         self._size_save_timer.stop()
-        self._theme_preview_timer.stop()
         self._save_dialog_geometry()
         self._settings["theme"] = self._initial_settings.get(
             "theme", "Dark Slate")
@@ -4973,13 +4382,6 @@ class SettingsDialog(QDialog):
             "color_scheme", "system")
         self._settings["pdf_canvas_theme_background"] = (
             self._initial_settings.get("pdf_canvas_theme_background", False))
-        self._settings["user_themes"] = register_user_themes(
-            self._initial_settings.get("user_themes"))
-        self._begin_theme_grade(
-            self._settings["theme"],
-            resolved_color_scheme(self._settings["color_scheme"]),
-        )
-        self._refresh_personal_theme_controls()
         self._apply_theme_style()
         try:
             self.previewSettingsChanged.emit(
@@ -5220,8 +4622,6 @@ class SettingsDialog(QDialog):
         out.update({
             "theme": self._settings.get("theme", "Dark Slate"),
             "color_scheme": self._settings.get("color_scheme", "system"),
-            "user_themes": register_user_themes(
-                self._settings.get("user_themes")),
             "pdf_canvas_theme_background":
                 self.pdf_canvas_theme_check.isChecked(),
             "model": self._current_model(),

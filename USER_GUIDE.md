@@ -163,30 +163,12 @@ Works on **both** kinds of PDFs:
   to zoom its pages.
 - Books open progressively; thumbnails are populated only when the pages
   panel is shown, reducing work during PDF loading.
-- Choose a built-in or saved personal theme from the toolbar; the selection is
-  remembered.
+- Choose a built-in theme from the toolbar; the selection is remembered.
   Under **Settings → Appearance**, set **Color scheme** to **Follow system**,
   **Dark**, or **Light**. Enable **Match background around PDF pages to theme**
   to color the area around and between pages with the active theme; page content
   stays unchanged. The floating translator follows the same theme and
   color-scheme setting.
-- Under **Settings → My Theme**, use the **Lift**, **Gamma**, and **Gain**
-  wheels to adjust shadows, midtones, and highlights; **Offset** adjusts the
-  whole tonal range. First check exactly one color group—**Background**,
-  **Border**, **Text**, **Accent**, or **Status**—and all four wheels then
-  affect only that group's colors. Accent includes selection; Status includes
-  success and warning. Move a
-  wheel's puck to choose a tint and its distance from
-  the center to set the strength. Each wheel's **Y** slider adjusts brightness.
-  The **Curve** graph adjusts the selected group's master RGB tone curve:
-  drag a point to reshape it, click the graph to add a point, or right-click a
-  point to remove it. **Reset curve** returns that group to the neutral diagonal.
-  Changes preview immediately in the reader, chat, and open translations.
-  **Reset wheel** restores one control for the selected element; **Reset all**
-  restores all elements to the selected theme's original colors. Use
-  **Save as…** to name a personal theme, then **Save Changes** to keep it.
-  The new theme saves the colors currently shown and keeps them when switching
-  between Dark and Light color schemes. **Cancel** restores the previous theme.
 - No bars around the pages — messages flash briefly in the window title.
 ## Window layout
 

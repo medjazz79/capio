@@ -2954,14 +2954,15 @@ class MainWindow(QMainWindow):
     # stylesheet re-styles every widget in every window, so it must only run
     # when the skin itself actually moved.
     _APP_SKIN_KEYS = (
-        "theme", "color_scheme", "pdf_canvas_theme_background", "user_themes",
+        "theme", "color_scheme", "pdf_canvas_theme_background",
     )
 
     # Settings a visible translation popup draws or reads out. Re-rendering a
     # popup rebuilds its whole Markdown document, which is far too costly to
     # repeat every time the dialog is closed.
     _POPUP_DISPLAY_KEYS = (
-        "theme", "color_scheme", "user_themes", "font_size", "translation_font",
+        "theme", "color_scheme",
+        "font_size", "translation_font",
         "translation_font_arabic", "translation_font_latin", "arabic_tashkeel",
         "line_spacing_px", "translation_side_margin_px",
         "translation_top_bottom_margin_px", "source_language",
@@ -3079,12 +3080,7 @@ class MainWindow(QMainWindow):
     def _preview_theme_from_settings(
         self, preview: dict, restoring: bool,
     ) -> None:
-        from ui.theme import register_user_themes
-
-        grade_editing = bool(preview.get("_grade_editing", False))
         self._theme_preview_active = not restoring
-        self.settings["user_themes"] = register_user_themes(
-            preview.get("user_themes"))
         for key in ("theme", "color_scheme", "pdf_canvas_theme_background"):
             if key in preview:
                 self.settings[key] = preview[key]
@@ -3096,32 +3092,10 @@ class MainWindow(QMainWindow):
             self._apply_theme_skin(theme)
         else:
             self._theme_preview_requires_full_apply = True
-            if grade_editing:
-                self._apply_theme_grade_preview_fast(theme)
-            else:
-                self._apply_theme_preview_fast(theme)
-        if set(self._theme_actions) != set(THEMES):
-            for name, action in list(self._theme_actions.items()):
-                if name not in THEMES:
-                    self.theme_menu.removeAction(action)
-                    action.deleteLater()
-                    del self._theme_actions[name]
-            for name in THEMES:
-                if name in self._theme_actions:
-                    continue
-                action = self.theme_menu.addAction(name)
-                action.setCheckable(True)
-                action.triggered.connect(
-                    lambda _checked=False, selected=name:
-                        self._on_theme_changed(selected))
-                self._theme_actions[name] = action
+            self._apply_theme_preview_fast(theme)
         self._sync_theme_button(theme)
         self._theme_preview_requires_popup_refresh = True
-        if not grade_editing:
-            self._queue_theme_preview_refresh()
-
-    def _apply_theme_grade_preview_fast(self, theme: str) -> None:
-        self._apply_theme_preview_fast(theme)
+        self._queue_theme_preview_refresh()
 
     def _apply_theme_preview_fast(self, theme: str) -> None:
         """Update visible theme surfaces without repolishing every app widget."""
@@ -3579,17 +3553,11 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_theme_preview_active", False):
             return settings
 
-        from ui.theme import register_user_themes
-
         merged = dict(settings)
-        preview_keys = (
-            "theme", "color_scheme", "pdf_canvas_theme_background",
-        )
+        preview_keys = ("theme", "color_scheme", "pdf_canvas_theme_background")
         for key in preview_keys:
             if key in self.settings:
                 merged[key] = self.settings[key]
-        merged["user_themes"] = register_user_themes(
-            self.settings.get("user_themes"))
         return merged
 
     def _reload_settings(self):

@@ -81,18 +81,17 @@ class TestSettingsTogglePreservation(unittest.TestCase):
             encoding="utf-8",
         )
         self.dialog = SettingsDialog(settings_module.load())
-        self.addCleanup(self.dialog._theme_preview_timer.stop)
         self.addCleanup(self.dialog.close)
 
     def _read(self):
         return json.loads(self.settings_path.read_text(encoding="utf-8"))
 
-    def test_color_group_choice_does_not_write_settings(self):
+    def test_theme_choice_does_not_write_settings_before_save(self):
         before = self.settings_path.read_bytes()
-        group = self.dialog._theme_group_checkboxes["background"]
-        group.setChecked(True)
-        self.dialog._theme_preview_timer.stop()
+        self.dialog.header_theme_combo.setCurrentIndex(
+            self.dialog.header_theme_combo.findData("Amoled"))
         self.assertEqual(self.settings_path.read_bytes(), before)
+        self.assertEqual(self.dialog.values()["theme"], "Amoled")
         self.assertEqual(
             self.settings_module.load()["custom_providers"][0]["id"],
             "mine",
