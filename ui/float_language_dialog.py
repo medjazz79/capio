@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 )
 
 from translators.prompt import LANGUAGE_CHOICES
+from ui.theme import settings_stylesheet
 
 FLOAT_SOURCE_CHOICES = (("Auto", "auto"), *LANGUAGE_CHOICES)
 
@@ -17,6 +18,12 @@ class FloatLanguageDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Floating Translator Languages")
         self.setMinimumWidth(300)
+        # Same shared skin as the reader's dialogs, so the language picker
+        # never appears as a bright native window over a dark bubble.
+        self.setStyleSheet(settings_stylesheet(
+            str(settings.get("theme", "Dark Slate")),
+            str(settings.get("color_scheme", "system")),
+        ))
 
         layout = QVBoxLayout(self)
         form = QFormLayout()

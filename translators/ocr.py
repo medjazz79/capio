@@ -7,6 +7,22 @@ from ocr_providers.base import OcrResult
 LATIN_LANGS = ("en", "it", "fr", "de", "es")
 RU_LANGS = ("ru", "en")
 
+# Reader and floating translator share one source-language -> OCR hint map.
+OCR_LANGUAGE_HINTS = {
+    "ar": ("ar",),
+    "fr": ("fr", "en"),
+    "en": ("en",),
+    "ru": ("ru", "en"),
+    "it": ("it", "en"),
+    "es": ("es", "en"),
+    "de": ("de", "en"),
+}
+
+
+def languages_for(source_language: str) -> tuple[str, ...] | None:
+    """OCR hints for a chosen source language (None lets the engine auto-detect)."""
+    return OCR_LANGUAGE_HINTS.get(source_language)
+
 
 def is_available() -> bool:
     return manager.get_provider() is not None

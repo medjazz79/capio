@@ -730,25 +730,11 @@ class FloatButton(QDialog):
             self._sync_theme_actions()
         if theme_changed or scheme_changed:
             self._apply_float_theme()
-        if (cur.get("font_size") != old.get("font_size")
-                or cur.get("translation_font") != old.get("translation_font")
-                or cur.get("translation_font_arabic")
-                != old.get("translation_font_arabic")
-                or cur.get("translation_font_latin")
-                != old.get("translation_font_latin")
-                or cur.get("arabic_tashkeel")
-                != old.get("arabic_tashkeel")
-                or cur.get("line_spacing_px") != old.get("line_spacing_px")
-                or cur.get("translation_side_margin_px")
-                != old.get("translation_side_margin_px")
-                or theme_changed
-                or scheme_changed
-                or cur.get("explain_mode") != old.get("explain_mode")
-                or cur.get("explain_instructions")
-                != old.get("explain_instructions")):
-            for popup in self.popups:
-                if popup.isVisible():
-                    popup.refresh_display(self._popup_settings())
+        # Let the popup decide which keys affect it: it knows the full shared
+        # set (fonts, speech, margins, providers) and returns early cheaply.
+        for popup in self.popups:
+            if popup.isVisible():
+                popup.refresh_display(self._popup_settings())
 
     def _on_system_color_scheme_changed(self, _scheme=None) -> None:
         if self.settings.get("color_scheme", "system") != "system":
@@ -1008,11 +994,13 @@ class FloatButton(QDialog):
         self._reload_settings()
         if self.settings.get("selection_mode", "ocr") == "image":
             clean = pil_image
+            ocr_langs = None
             _log("image: sending selected pixels directly to the selected model")
         else:
-            from translators import ocr
-            _log(f"ocr: available={ocr.is_available()}")
-            if not ocr.is_available():
+            from translators import ocr as ocr_module
+
+            _log(f"ocr: available={ocr_module.is_available()}")
+            if not ocr_module.is_available():
                 QMessageBox.warning(
                     self,
                     "OCR is unavailable",
@@ -1022,7 +1010,9 @@ class FloatButton(QDialog):
                     "to Image in the floating translator menu.",
                 )
                 return False
-            clean = ocr.prepare_image(pil_image)
+            clean = ocr_module.prepare_image(pil_image)
+            ocr_langs = ocr_module.languages_for(
+                str(self.settings.get("float_source_language", "auto")))
             _log("ocr: reading…")
         self.popups = [p for p in self.popups if p.isVisible()]
         for p in self.popups:
@@ -1030,7 +1020,7 @@ class FloatButton(QDialog):
                 p.close()
         from popup.translate_popup import TranslatePopup
         popup = TranslatePopup(self._popup_settings(), pil_image=clean,
-                               ocr_langs=None, parent=None,
+                               ocr_langs=ocr_langs, parent=None,
                                floating_language_controls=True,
                                float_language_preferences=True,
                                language_change_callback=self._save_float_languages)
@@ -1121,10 +1111,11 @@ class FloatButton(QDialog):
             for theme, action in action_set.items():
                 action.setChecked(theme == active)
 
-    def _apply_float_theme(self) -> None:
-        theme = self.settings.get("theme", "Dark Slate")
+    def _apply_float_theme(self, settings: dict | None = None) -> None:
+        settings = self.settings if settings is None else settings
+        theme = settings.get("theme", "Dark Slate")
         colors = theme_colors(
-            theme, self.settings.get("color_scheme", "system"))
+            theme, settings.get("color_scheme", "system"))
         self.btn.setStyleSheet(
             "QPushButton { "
             f"background-color: {colors['accent']}; "
@@ -1147,6 +1138,17 @@ class FloatButton(QDialog):
                 f"background-color: {colors['selection']}; }}"
                 "QMenu::item:checked { "
                 f"color: {colors['accent_light']}; }}"
+                "QMessageBox { "
+                f"background-color: {colors['panel']}; }}"
+                "QMessageBox QLabel { "
+                f"color: {colors['text']}; }}"
+                "QMessageBox QPushButton { "
+                f"background-color: {colors['surface']}; "
+                f"color: {colors['text']}; "
+                f"border: 1px solid {colors['border']}; "
+                "border-radius: 6px; padding: 6px 16px; }"
+                "QMessageBox QPushButton:hover { "
+                f"background-color: {colors['selection']}; }}"
             )
 
     def _set_theme(self, theme: str) -> None:
@@ -1252,6 +1254,7 @@ class FloatButton(QDialog):
     def _open_settings(self) -> None:
         from ui.settings_dialog import SettingsDialog
         dlg = SettingsDialog(self.settings, self)
+        dlg.previewSettingsChanged.connect(self._preview_float_theme)
         if dlg.exec():
             previous = self.settings
             updated = dlg.values()
@@ -1276,6 +1279,16 @@ class FloatButton(QDialog):
                 if popup.isVisible():
                     popup.refresh_display(self._popup_settings())
 
+    def _preview_float_theme(
+        self, preview: dict, _restoring: bool = False,
+    ) -> None:
+        """Follow the Settings dialog's live preview without saving anything."""
+        settings = dict(self.settings)
+        for key in ("theme", "color_scheme"):
+            if key in preview:
+                settings[key] = preview[key]
+        self._apply_float_theme(settings)
+
     def _open_float_languages(self) -> None:
         from ui.float_language_dialog import FloatLanguageDialog
 
@@ -1287,6 +1300,10 @@ class FloatButton(QDialog):
     def _save_float_languages(
         self, source_language: str, target_language: str, _popup=None,
     ) -> None:
+        previous = (
+            self.settings.get("float_source_language", "auto"),
+            self.settings.get("float_target_language", "ar"),
+        )
         self.settings["float_source_language"] = source_language
         self.settings["float_target_language"] = target_language
         try:
@@ -1299,6 +1316,15 @@ class FloatButton(QDialog):
                 "The language choices could not be saved. Check that the "
                 "settings file is writable, then try again.",
             )
+            return
+        if previous == (source_language, target_language):
+            return
+        # The preference is shared: open popups follow it (the one that made
+        # the change already retranslated itself).
+        for popup in self.popups:
+            if popup is _popup or not popup.isVisible():
+                continue
+            popup.sync_languages(source_language, target_language)
 
     def _quit(self) -> None:
         """Real quit: pinned popups used to keep an invisible process alive."""
@@ -1322,10 +1348,18 @@ class FloatButton(QDialog):
         self.deleteLater()
 
 
+def _prune_shared_speech_cache() -> None:
+    """Drop stale speech clips from the cache the reader also uses."""
+    from popup.speech_worker import _prune_cache
+
+    _prune_cache()
+
+
 def main():
     setup_logging(stream=True)
     from translators import usage
     usage.start_session()
+    _prune_shared_speech_cache()
     app = QApplication(sys.argv)
     app.setApplicationName("Capio")
     app.setWindowIcon(_floating_app_icon())

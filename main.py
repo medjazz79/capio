@@ -2884,21 +2884,12 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _ocr_languages_for(source_language: str) -> tuple[str, ...] | None:
-        if source_language == "auto":
-            return None
-        language_map = {
-            "ar": ("ar",),
-            "fr": ("fr", "en"),
-            "en": ("en",),
-            "ru": ("ru", "en"),
-            "it": ("it", "en"),
-            "es": ("es", "en"),
-            "de": ("de", "en"),
-        }
-        try:
-            return language_map[source_language]
-        except KeyError:
+        from translators.ocr import languages_for
+
+        hints = languages_for(source_language)
+        if hints is None and source_language != "auto":
             raise ValueError(f"Unsupported OCR source language: {source_language}")
+        return hints
 
     def _show_popup(self, text: str | None = None, pil_image=None,
                     ocr_langs=("ru", "en"), book: BookView | None = None,
