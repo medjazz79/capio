@@ -415,6 +415,7 @@ class ChatPanel(QWidget):
         style_colors = dict(
             colors,
             selection_text=selection_text,
+            chat_font_size=f"{self._chat_font_size:g}",
         )
         for scrollbar in self.findChildren(QScrollBar):
             if scrollbar.orientation() == Qt.Orientation.Horizontal:
@@ -540,6 +541,7 @@ class ChatPanel(QWidget):
                 border: 1px solid %(border)s;
                 border-radius: 8px;
                 padding: 10px;
+                font-size: %(chat_font_size)spt;
                 background-color: %(surface)s;
                 selection-background-color: %(selection)s;
                 selection-color: %(selection_text)s;
@@ -560,6 +562,7 @@ class ChatPanel(QWidget):
                 border: 1px solid %(border)s;
                 border-radius: 8px;
                 padding: 8px;
+                font-size: %(chat_font_size)spt;
                 background-color: %(surface)s;
                 selection-background-color: %(selection)s;
                 selection-color: %(selection_text)s;

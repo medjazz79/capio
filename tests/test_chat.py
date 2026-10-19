@@ -342,6 +342,29 @@ class TestTranslationChat(unittest.TestCase):
                 finally:
                     restored_panel.close()
 
+    def test_chat_font_size_survives_application_theme_stylesheet(self):
+        from ui.chat_panel import ChatPanel
+        from ui.theme import theme_colors
+
+        app = self.app
+        previous_stylesheet = app.styleSheet()
+        settings = {"chat_font_size": 19.0}
+        panel = ChatPanel(lambda: settings)
+        try:
+            panel._set_chat_font_size(19.0)
+            panel._font_size_save_timer.stop()
+            app.setStyleSheet(
+                "QTextEdit, QPlainTextEdit { font-size: 15px; }")
+            panel.apply_theme(theme_colors("Dark Slate", "dark"))
+            app.processEvents()
+
+            self.assertEqual(panel.transcript.font().pointSizeF(), 19.0)
+            self.assertEqual(panel.input.font().pointSizeF(), 19.0)
+        finally:
+            panel._font_size_save_timer.stop()
+            panel.close()
+            app.setStyleSheet(previous_stylesheet)
+
     def test_chat_and_translation_reading_speeds_are_independent(self):
         import tempfile
         from pathlib import Path
