@@ -159,6 +159,7 @@ DEFAULTS = {
     "arabic_tashkeel": False,
     "theme": "Dark Slate",
     "color_scheme": "system",
+    "user_themes": {},
     "pdf_canvas_theme_background": False,
     "speech_engine": "edge",
     "gemini_tts_voice": "Kore",
@@ -330,6 +331,8 @@ def load() -> dict:
             log.warning("Recovered settings from %s", recovered_path)
     merged = dict(DEFAULTS)
     merged.update({k: v for k, v in data.items() if k in DEFAULTS})
+    from ui.theme import register_user_themes
+    merged["user_themes"] = register_user_themes(merged.get("user_themes"))
     if "color_scheme" not in data:
         merged["color_scheme"] = (
             "light" if merged.get("theme") == "Pure Light"

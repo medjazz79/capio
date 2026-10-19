@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QScrollBar,
     QSizePolicy,
     QSplitter,
     QSlider,
@@ -415,7 +416,43 @@ class ChatPanel(QWidget):
             colors,
             selection_text=selection_text,
         )
-        self.chat_actions_scroll.setStyleSheet("""
+        for scrollbar in self.findChildren(QScrollBar):
+            if scrollbar.orientation() == Qt.Orientation.Horizontal:
+                is_actions_bar = (
+                    scrollbar is self.chat_actions_scroll.horizontalScrollBar()
+                )
+                thickness = 4 if is_actions_bar else 10
+                radius = 2 if is_actions_bar else 5
+                minimum_handle = 18 if is_actions_bar else 24
+                geometry = (
+                    f"height: {thickness}px; "
+                    f"min-width: {minimum_handle}px;"
+                )
+                orientation = "horizontal"
+            else:
+                thickness = 10
+                radius = 5
+                minimum_handle = 24
+                geometry = (
+                    f"width: {thickness}px; "
+                    f"min-height: {minimum_handle}px;"
+                )
+                orientation = "vertical"
+            scrollbar_style = (
+                f"QScrollBar:{orientation} {{ {geometry} "
+                "background: transparent; margin: 0; }"
+                f"QScrollBar::handle:{orientation} {{ "
+                f"background: {colors['scroll']}; "
+                f"border-radius: {radius}px; }}"
+                f"QScrollBar::handle:{orientation}:hover {{ "
+                f"background: {colors['scroll_hover']}; }}"
+                f"QScrollBar::add-line:{orientation}, "
+                f"QScrollBar::sub-line:{orientation} {{ "
+                f"{'width' if orientation == 'horizontal' else 'height'}: 0; }}"
+            )
+            if scrollbar.styleSheet() != scrollbar_style:
+                scrollbar.setStyleSheet(scrollbar_style)
+        actions_style = """
             QScrollArea#chatActionsScroll {
                 background-color: transparent;
                 border: none;
@@ -430,15 +467,20 @@ class ChatPanel(QWidget):
                 margin: 0;
             }
             QScrollBar::handle:horizontal {
-                background: %(border)s;
+                background: %(scroll)s;
                 border-radius: 2px;
                 min-width: 18px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: %(scroll_hover)s;
             }
             QScrollBar::add-line:horizontal,
             QScrollBar::sub-line:horizontal {
                 width: 0;
             }
-        """ % colors)
+        """ % colors
+        if self.chat_actions_scroll.styleSheet() != actions_style:
+            self.chat_actions_scroll.setStyleSheet(actions_style)
         button_style = """
             QPushButton#chatReadAloud,
             QPushButton#chatStopSpeech,
@@ -484,7 +526,7 @@ class ChatPanel(QWidget):
                 border: 1px solid %(border)s;
             }
         """ % style_colors
-        self.setStyleSheet("""
+        panel_style = """
             QWidget#standaloneChatPanel {
                 background-color: %(window)s;
                 color: %(text)s;
@@ -503,7 +545,11 @@ class ChatPanel(QWidget):
                 selection-color: %(selection_text)s;
             }
             QSplitter#standaloneChatSplitter::handle:vertical {
-                background-color: %(border)s;
+                /* Transparent: this is the thick bar that sat between the
+                   action buttons and the composer. It stays a grab area -
+                   the margin is unchanged - and the hover tint still shows
+                   it can be dragged. */
+                background-color: transparent;
                 margin: 2px 0;
             }
             QSplitter#standaloneChatSplitter::handle:vertical:hover {
@@ -518,12 +564,14 @@ class ChatPanel(QWidget):
                 selection-background-color: %(selection)s;
                 selection-color: %(selection_text)s;
             }
-        """ % style_colors)
+        """ % style_colors
+        if self.styleSheet() != panel_style:
+            self.setStyleSheet(panel_style)
         for button in self._chat_action_buttons + (self.send_button,):
-            button.setFlat(True)
-            button.setStyleSheet(button_style)
-        self._fit_chat_action_buttons()
-        self._apply_chat_font_size()
+            if not button.isFlat():
+                button.setFlat(True)
+            if button.styleSheet() != button_style:
+                button.setStyleSheet(button_style)
 
     def eventFilter(self, watched, event) -> bool:
         if (

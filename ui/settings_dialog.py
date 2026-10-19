@@ -16,12 +16,12 @@ import threading
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIntValidator, QPainter
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QDoubleSpinBox, QInputDialog, QLineEdit, QMenu, QPushButton, QPlainTextEdit, QSizePolicy,
-    QSpinBox, QSplitter, QStackedWidget,
+    QSlider, QSpinBox, QSplitter, QStackedWidget,
     QScrollArea, QStyle, QStyleOptionButton, QStylePainter,
     QStyledItemDelegate, QStyleOptionViewItem, QTextEdit, QToolButton, QVBoxLayout,
-    QMessageBox, QWidget,
+    QMessageBox, QRadioButton, QWidget,
 )
 
 from config.app_log import get_logger
@@ -36,7 +36,12 @@ from config.settings import (
     MIN_TRANSLATION_TOP_BOTTOM_MARGIN_PX, SETTINGS_PATH, resolve_model,
 )
 from translators.registry import detect_flm_base
-from ui.theme import THEMES, settings_stylesheet, theme_colors
+from ui.theme import (
+    THEMES, THEME_COLOR_KEYS, THEME_GROUPS, THEME_VARIANTS, apply_color_curve,
+    apply_color_grading, register_user_themes, resolved_color_scheme,
+    settings_stylesheet, theme_colors,
+)
+from ui.theme_editor import ColorBalanceWheel, ToneCurveEditor
 
 log = get_logger("settings")
 
@@ -78,6 +83,7 @@ PAGE_APPEARANCE = 2
 PAGE_PERFORMANCE = 3
 PAGE_GENERAL = 4
 PAGE_TTS = 5
+PAGE_MY_THEME = 6
 
 
 class _ModelPickerDelegate(QStyledItemDelegate):
@@ -470,6 +476,7 @@ class _SafeModelComboBox(QComboBox):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SettingsDialog(QDialog):
+    previewSettingsChanged = Signal(dict, bool)
     probeDone = Signal(list)
     verifyDone = Signal()
     autoModelsFetched = Signal(str, str, str, list, object, object)
@@ -496,14 +503,51 @@ class SettingsDialog(QDialog):
         self._cli_model_error: str | None = None
         self._syncing = False
         self._settings = dict(settings)
+        self._initial_settings = dict(settings)
+        self._settings["user_themes"] = register_user_themes(
+            self._settings.get("user_themes"))
+        self._theme_grade_names = ("lift", "gamma", "gain", "offset")
+        self._theme_grade_state = {
+            name: (0.0, 0.0, 0.0) for name in self._theme_grade_names
+        }
+        self._theme_color_groups = {
+            label.lower(): roles for label, roles in THEME_GROUPS
+        }
+        self._active_theme_color_group = "accent"
+        self._theme_grade_states = {
+            group: {
+                name: (0.0, 0.0, 0.0)
+                for name in self._theme_grade_names
+            }
+            for group in self._theme_color_groups
+        }
+        self._theme_curve_states = {
+            group: [(0.0, 0.0), (1.0, 1.0)]
+            for group in self._theme_color_groups
+        }
+        self._theme_grade_base: dict[str, str] | None = None
+        self._theme_grade_theme: str | None = None
+        self._theme_grade_scheme: str | None = None
+        self._theme_preview_styles_active = False
+        self._theme_preview_page_stylesheet = ""
+        self._theme_preview_header_stylesheet = ""
+        self._theme_preview_sidebar_stylesheet = ""
+        self._theme_preview_content_stylesheet = ""
+        self._theme_preview_footer_stylesheet = ""
+        self._theme_role_widget_cache: tuple[QWidget, ...] | None = None
         self._auto_fetch_timers: dict[str, QTimer] = {}
         self._auto_fetch_in_progress: set[str] = set()
         self._auto_fetch_last: dict[str, tuple[str, str]] = {}
         self._settings.setdefault("color_scheme", "system")
+        self._styled_theme_key: tuple[str, str] | None = None
         self.setStyleSheet(settings_stylesheet(
             self._settings.get("theme", "Dark Slate"),
             self._settings.get("color_scheme", "system"),
         ))
+        self._styled_theme_key = (
+            self._settings.get("theme", "Dark Slate"),
+            self._settings.get("color_scheme", "system"),
+        )
         self.probeDone.connect(self._on_probe_done)
         self.verifyDone.connect(self._on_verify_done)
         self.autoModelsFetched.connect(self._on_auto_fetch_done)
@@ -518,6 +562,11 @@ class SettingsDialog(QDialog):
         self._size_save_timer.setSingleShot(True)
         self._size_save_timer.setInterval(400)
         self._size_save_timer.timeout.connect(self._save_dialog_geometry)
+        self._theme_preview_timer = QTimer(self)
+        self._theme_preview_timer.setSingleShot(True)
+        self._theme_preview_timer.setInterval(16)
+        self._theme_preview_timer.timeout.connect(
+            self._flush_theme_grade_preview)
 
         # ── Root layout ──
         root = QVBoxLayout(self)
@@ -526,7 +575,8 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
 
         # ── Header ──
-        root.addWidget(self._build_header())
+        self._settings_header = self._build_header()
+        root.addWidget(self._settings_header)
 
         # ── Body: sidebar + stacked content ──
         body = QWidget()
@@ -542,11 +592,13 @@ class SettingsDialog(QDialog):
 
         # Sidebar
         sidebar = self._build_sidebar()
+        self._settings_sidebar = sidebar
         sidebar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         self._body_splitter.addWidget(sidebar)
 
         # Content area
         content_frame = QFrame()
+        self._settings_content = content_frame
         content_frame.setObjectName("contentArea")
         content_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         content_layout = QVBoxLayout(content_frame)
@@ -554,12 +606,14 @@ class SettingsDialog(QDialog):
         content_layout.setSpacing(0)
 
         self._stack = QStackedWidget()
+        self._stack.currentChanged.connect(self._on_settings_page_changed)
         # Build order matters: the model picker reads keys + fast_check.
         self._keys_group = self._build_keys_group()
         self._performance_group = self._build_performance_group()
         self._translation_group = self._build_engine_group()
         self._custom_providers_group = self._build_custom_providers_group()
         self._appearance_group = self._build_appearance_group()
+        self._my_theme_group = self._build_my_theme_group()
         self._general_group = self._build_general_group()
         self._tts_group = self._build_tts_group()
 
@@ -570,6 +624,7 @@ class SettingsDialog(QDialog):
         self._page_keys.append(self._wrap_scroll(self._performance_group))
         self._page_keys.append(self._wrap_scroll(self._general_group))
         self._page_keys.append(self._wrap_scroll(self._tts_group))
+        self._page_keys.append(self._wrap_scroll(self._my_theme_group))
         for pg in self._page_keys:
             self._stack.addWidget(pg)
 
@@ -582,7 +637,8 @@ class SettingsDialog(QDialog):
         root.addWidget(body, 1)
 
         # ── Footer ──
-        root.addWidget(self._build_footer())
+        self._settings_footer = self._build_footer()
+        root.addWidget(self._settings_footer)
 
         # ── Hidden compatibility QTabWidget for legacy tests (findChild QTabWidget) ──
         from PySide6.QtWidgets import QTabWidget as _QTabWidget
@@ -592,7 +648,7 @@ class SettingsDialog(QDialog):
         self._compat_tabs.setParent(self)
         self._compat_tabs.setVisible(False)
         self._compat_tabs.setMaximumSize(0, 0)
-        for _name in ["API Keys", "Custom Providers", "Performance", "Application", "Shortcuts", "Read Aloud / TTS"]:
+        for _name in ["API Keys", "Custom Providers", "Performance", "Application", "Shortcuts", "Read Aloud / TTS", "My Theme"]:
             self._compat_tabs.addTab(QWidget(), _name)
 
         # Connect sidebar -> stack
@@ -634,7 +690,9 @@ class SettingsDialog(QDialog):
         self._update_key_states()
         self._restore_dialog_geometry()
         for checkbox in self.findChildren(QCheckBox):
-            checkbox.toggled.connect(self._persist_toggled_settings)
+            if not checkbox.property("skipPersistentToggle"):
+                checkbox.toggled.connect(self._persist_toggled_settings)
+        self._theme_role_widget_cache = self._build_theme_role_widget_cache()
 
     # ── Chrome builders ──────────────────────────────────────────────────────
 
@@ -662,6 +720,8 @@ class SettingsDialog(QDialog):
 
         # Theme quick switcher in header (mirrors main window)
         theme_lbl = QLabel("Theme")
+        theme_lbl.setObjectName("settingsThemeLabel")
+        theme_lbl.setProperty("theme_color_role", "muted")
         theme_lbl.setStyleSheet(f"color: {colors['muted']}; font-size: 14px; font-weight: 700;")
         lay.addWidget(theme_lbl)
         self.header_theme_combo = QComboBox()
@@ -706,6 +766,7 @@ class SettingsDialog(QDialog):
             ("Performance", "Speed, streaming & effort", PAGE_PERFORMANCE),
             ("Application", "Behavior, shortcuts & storage", PAGE_GENERAL),
             ("Read Aloud / TTS", "Engine, speed & speech behavior", PAGE_TTS),
+            ("My Theme", "Create, preview & save your colors", PAGE_MY_THEME),
         ]
         for title, subtitle, page_index in items:
             btn = _NavButton(title, subtitle, nav_panel)
@@ -747,6 +808,8 @@ class SettingsDialog(QDialog):
 
         # Sidebar footer: version + storage path hint
         foot = QLabel(f"Config: {SETTINGS_PATH.name}")
+        foot.setObjectName("settingsConfigPath")
+        foot.setProperty("theme_color_role", "muted")
         foot.setWordWrap(True)
         foot.setStyleSheet(f"color: {self._theme_colors()['muted']}; font-size: 12px; background: transparent; border: none;")
         lay.addWidget(foot)
@@ -812,12 +875,18 @@ class SettingsDialog(QDialog):
         lay.setContentsMargins(2, 0, 2, 4)
         lay.setSpacing(4)
         eb = QLabel(eyebrow)
+        eb.setObjectName("sectionEyebrow")
+        eb.setProperty("theme_color_role", "accent_light")
         eb.setStyleSheet(f"color: {colors['accent_light']}; font-size: 12px; font-weight: 800; letter-spacing: 1px; background: transparent; border: none;")
         lay.addWidget(eb)
         t = QLabel(title)
+        t.setObjectName("sectionTitle")
+        t.setProperty("theme_color_role", "text")
         t.setStyleSheet(f"color: {colors['text']}; font-size: 21px; font-weight: 800; background: transparent; border: none;")
         lay.addWidget(t)
         d = QLabel(description)
+        d.setObjectName("sectionDescription")
+        d.setProperty("theme_color_role", "muted")
         d.setWordWrap(True)
         d.setStyleSheet(f"color: {colors['muted']}; font-size: 14px; font-weight: 500; line-height: 1.4; background: transparent; border: none;")
         lay.addWidget(d)
@@ -863,7 +932,12 @@ class SettingsDialog(QDialog):
             self._settings["color_scheme"] = "light"
             self.color_scheme_combo.setCurrentIndex(
                 self.color_scheme_combo.findData("light"))
+        scheme = resolved_color_scheme(
+            self._settings.get("color_scheme", "system"))
+        self._begin_theme_grade(theme, scheme)
+        self._refresh_personal_theme_controls()
         self._apply_theme_style()
+        self._emit_preview_settings()
 
     def _on_color_scheme_changed(self, _idx: int) -> None:
         scheme = self.color_scheme_combo.currentData()
@@ -874,12 +948,25 @@ class SettingsDialog(QDialog):
             self._settings["theme"] = "Dark Slate"
             self.header_theme_combo.setCurrentIndex(
                 self.header_theme_combo.findData("Dark Slate"))
+        self._begin_theme_grade(
+            self._settings.get("theme", "Dark Slate"),
+            resolved_color_scheme(scheme),
+        )
+        self._update_theme_editor_sample()
         self._apply_theme_style()
+        self._emit_preview_settings()
 
     def _apply_theme_style(self) -> None:
         theme = self._settings.get("theme", "Dark Slate")
         scheme = self._settings.get("color_scheme", "system")
+        key = (theme, scheme)
+        if self._styled_theme_key == key:
+            return
+        self._styled_theme_key = key
+        self._clear_live_theme_styles()
         self.setStyleSheet(settings_stylesheet(theme, scheme))
+        if hasattr(self, "_settings_header"):
+            self._refresh_live_theme_inline_styles(self._theme_colors())
         try:
             colors = self._theme_colors()
             # model_instructions uses inline surface/border colors
@@ -893,8 +980,243 @@ class SettingsDialog(QDialog):
         except Exception:
             pass
 
+    def _clear_live_theme_styles(self) -> None:
+        self._theme_preview_styles_active = False
+        self._theme_preview_page_stylesheet = ""
+        self._theme_preview_header_stylesheet = ""
+        self._theme_preview_sidebar_stylesheet = ""
+        self._theme_preview_content_stylesheet = ""
+        self._theme_preview_footer_stylesheet = ""
+        for widget_name in (
+            "_stack", "_settings_header", "_settings_sidebar",
+            "_settings_content", "_settings_footer",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            if widget_name == "_stack":
+                for page in getattr(self, "_page_keys", ()):
+                    page.setStyleSheet("")
+            else:
+                widget.setStyleSheet("")
+
+    def _on_settings_page_changed(self, _index: int) -> None:
+        if getattr(self, "_theme_preview_styles_active", False):
+            self._apply_live_theme_styles()
+
+    def _apply_live_theme_styles(self) -> None:
+        if not hasattr(self, "_settings_header"):
+            return
+        self._theme_preview_styles_active = True
+        theme = self._settings.get("theme", "Dark Slate")
+        scheme = self._settings.get("color_scheme", "system")
+        colors = self._theme_colors()
+
+        page = self._stack.currentWidget()
+        page_stylesheet = settings_stylesheet(theme, scheme)
+        if (
+            page is not None
+            and page.styleSheet() != page_stylesheet
+        ):
+            page.setStyleSheet(page_stylesheet)
+            self._theme_preview_page_stylesheet = page_stylesheet
+
+        content_stylesheet = (
+            "QFrame#contentArea { "
+            f"background-color: {colors['window']}; }}"
+        )
+        if content_stylesheet != self._theme_preview_content_stylesheet:
+            self._settings_content.setStyleSheet(content_stylesheet)
+            self._theme_preview_content_stylesheet = content_stylesheet
+
+        header_stylesheet = (
+            "QFrame#settingsHeader { "
+            f"background-color: {colors['toolbar']}; "
+            f"border-bottom: 1px solid {colors['border']}; }}"
+            "QLabel#headerTitle { "
+            f"color: {colors['text']}; }}"
+            "QLabel#headerSubtitle { "
+            f"color: {colors['muted']}; }}"
+            "QComboBox { "
+            f"background-color: {colors['surface']}; "
+            f"color: {colors['text']}; "
+            f"border: 1px solid {colors['border']}; }}"
+        )
+        if header_stylesheet != self._theme_preview_header_stylesheet:
+            self._settings_header.setStyleSheet(header_stylesheet)
+            self._theme_preview_header_stylesheet = header_stylesheet
+
+        sidebar_stylesheet = (
+            "QFrame#sidebar { "
+            f"background-color: {colors['panel']}; "
+            f"border-right: 1px solid {colors['border']}; }}"
+            "QLabel#sidebarSection { "
+            f"color: {colors['muted']}; }}"
+            "QPushButton[nav=\"true\"] { "
+            f"color: {colors['muted']}; }}"
+            "QPushButton[nav=\"true\"]:checked { "
+            f"background-color: {colors['selection']}; "
+            f"color: {colors['text']}; "
+            f"border-color: {colors['accent_light']}; }}"
+        )
+        if sidebar_stylesheet != self._theme_preview_sidebar_stylesheet:
+            self._settings_sidebar.setStyleSheet(sidebar_stylesheet)
+            self._theme_preview_sidebar_stylesheet = sidebar_stylesheet
+
+        footer_stylesheet = (
+            "QFrame#footer { "
+            f"background-color: {colors['toolbar']}; "
+            f"border-top: 1px solid {colors['border']}; }}"
+            "QPushButton#primaryBtn { "
+            f"background-color: {colors['accent']}; "
+            f"color: {colors['text']}; "
+            f"border-color: {colors['accent']}; }}"
+            "QPushButton#ghostBtn { "
+            f"background-color: {colors['surface']}; "
+            f"color: {colors['text']}; "
+            f"border-color: {colors['border']}; }}"
+        )
+        if footer_stylesheet != self._theme_preview_footer_stylesheet:
+            self._settings_footer.setStyleSheet(footer_stylesheet)
+            self._theme_preview_footer_stylesheet = footer_stylesheet
+
+        self._refresh_live_theme_inline_styles(colors)
+
+    def _refresh_live_theme_inline_styles(
+        self, colors: dict[str, str],
+    ) -> None:
+        if self._theme_role_widget_cache is None:
+            self._theme_role_widget_cache = (
+                self._build_theme_role_widget_cache())
+        for widget in self._theme_role_widget_cache:
+            role_properties = (
+                widget.property("theme_color_role"),
+                widget.property("theme_background_role"),
+                widget.property("theme_border_role"),
+            )
+            if not any(role in colors for role in role_properties):
+                continue
+            style = widget.styleSheet()
+            updated = style
+            for property_name, role_property, pattern in (
+                (
+                    "color", "theme_color_role",
+                    r"(?<![-\w])color\s*:\s*[^;]+;",
+                ),
+                (
+                    "background-color", "theme_background_role",
+                    r"(?<![-\w])background(?:-color)?\s*:\s*[^;]+;",
+                ),
+                (
+                    "border-color", "theme_border_role",
+                    r"(?<![-\w])border-color\s*:\s*[^;]+;",
+                ),
+            ):
+                role = widget.property(role_property)
+                if role not in colors:
+                    continue
+                updated, count = re.subn(
+                    pattern,
+                    f"{property_name}: {colors[role]};",
+                    updated,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                if not count and property_name == "background-color":
+                    updated, _ = re.subn(
+                        r"(?<![-\w])background\s*:\s*[^;]+;",
+                        f"background: {colors[role]};",
+                        updated,
+                        count=1,
+                        flags=re.IGNORECASE,
+                    )
+                if not count and property_name == "border-color":
+                    updated, _ = re.subn(
+                        r"(?<![-\w])border\s*:\s*([^;]*?)\s+"
+                        r"(?:#[0-9a-f]{3,8}|[a-z]+)\s*;",
+                        lambda match: (
+                            f"border: {match.group(1)} {colors[role]};"),
+                        updated,
+                        count=1,
+                        flags=re.IGNORECASE,
+                    )
+            if updated != style:
+                widget.setStyleSheet(updated)
+
+        if (
+            self._stack.currentIndex() == PAGE_GENERAL
+            and hasattr(self, "model_instructions")
+        ):
+            model_style = (
+                "QPlainTextEdit {"
+                f"background-color: {colors['surface']};"
+                f"color: {colors['text']};"
+                f"border: 1px solid {colors['border']};"
+                "border-radius: 10px; padding: 8px; }"
+            )
+            if self.model_instructions.styleSheet() != model_style:
+                self.model_instructions.setStyleSheet(model_style)
+
+        if self._stack.currentIndex() == PAGE_PROVIDERS:
+            empty_provider = self.findChild(
+                QLabel, "customProvidersEmpty")
+        else:
+            empty_provider = None
+        if empty_provider is not None:
+            empty_style = (
+                f"font-size: 15px; color: {colors['muted']}; "
+                f"background: {colors['surface']}; "
+                f"border: 1px dashed {colors['accent_light']}; "
+                "border-radius: 12px; padding: 14px;"
+            )
+            if empty_provider.styleSheet() != empty_style:
+                empty_provider.setStyleSheet(empty_style)
+
+        cards = (
+            self._custom_cards
+            if self._stack.currentIndex() == PAGE_PROVIDERS else ()
+        )
+        for card in cards:
+            stripe = card.findChild(QFrame, "providerAccentStripe")
+            stripe_color = (
+                stripe.property("provider_stripe_color")
+                if stripe is not None else None
+            )
+            if isinstance(stripe_color, str):
+                card_style = self._custom_provider_card_stylesheet(
+                    colors, stripe_color)
+                if card.styleSheet() != card_style:
+                    card.setStyleSheet(card_style)
+            for panel in card.findChildren(QFrame, "providerCapabilities"):
+                panel_style = (
+                    f"QFrame#providerCapabilities {{ "
+                    f"background: {colors['surface']}; "
+                    f"border: 1px solid {colors['border']}; "
+                    "border-radius: 10px; }"
+                    "QFrame#providerCapabilities QLabel { "
+                    "background: transparent; border: none; }"
+                )
+                if panel.styleSheet() != panel_style:
+                    panel.setStyleSheet(panel_style)
+
     def _update_sidebar_badge(self) -> None:
         """Retained as a no-op for existing status-update call sites."""
+
+    def _invalidate_theme_role_widget_cache(self) -> None:
+        self._theme_role_widget_cache = None
+
+    def _build_theme_role_widget_cache(self) -> tuple[QWidget, ...]:
+        return tuple(
+            widget
+            for widget in self.findChildren(QWidget)
+            if any(
+                widget.property(role_name) in THEME_COLOR_KEYS
+                for role_name in (
+                    "theme_color_role", "theme_background_role",
+                    "theme_border_role",
+                )
+            )
+        )
 
     # ── Geometry persistence ─────────────────────────────────────────────────
 
@@ -944,14 +1266,26 @@ class SettingsDialog(QDialog):
 
     def _persist_toggled_settings(self, _checked: bool = False) -> None:
         try:
-            from config.settings import save
+            from config.settings import load, save
 
             live_settings = self.values()
-            save(live_settings)
-            self._settings.update(live_settings)
+            baseline = self._initial_settings
+            ignored = ("theme", "user_themes")
+            changed = {
+                key: value
+                for key, value in live_settings.items()
+                if key in baseline
+                and key not in ignored
+                and value != baseline[key]
+            }
+            if changed:
+                persisted_settings = load()
+                persisted_settings.update(changed)
+                save(persisted_settings)
+            self._settings.update(changed)
             parent_settings = getattr(self.parent(), "settings", None)
             if isinstance(parent_settings, dict):
-                parent_settings.update(live_settings)
+                parent_settings.update(changed)
         except (OSError, TypeError, ValueError):
             log.exception("Could not save settings after a toggle")
 
@@ -968,6 +1302,9 @@ class SettingsDialog(QDialog):
                 "Enter a custom reading duration in minutes.",
             )
             return
+        if self._theme_preview_timer.isActive():
+            self._theme_preview_timer.stop()
+            self._flush_theme_grade_preview()
         try:
             from config.settings import save
 
@@ -1373,6 +1710,563 @@ class SettingsDialog(QDialog):
         lay.addWidget(_hint_frame("Font and spacing changes preview live — open translations update without saving.", "default"))
         return outer
 
+    def _build_my_theme_group(self) -> QWidget:
+        outer = QWidget()
+        lay = QVBoxLayout(outer)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(16)
+        lay.addWidget(self._section_header(
+            "PERSONALIZE",
+            "My Theme",
+            "Choose one color element, then grade it with all four wheels.",
+        ))
+
+        theme_card = QGroupBox("MY SAVED THEMES")
+        theme_layout = QHBoxLayout(theme_card)
+        self.my_theme_combo = QComboBox()
+        self.my_theme_combo.setMinimumWidth(220)
+        self.my_theme_combo.currentTextChanged.connect(
+            self._on_my_theme_selected)
+        theme_layout.addWidget(self.my_theme_combo, 1)
+        self.save_theme_button = QPushButton("Save as…")
+        self.save_theme_button.clicked.connect(self._save_personal_theme_as)
+        theme_layout.addWidget(self.save_theme_button)
+        self.delete_theme_button = QPushButton("Delete")
+        self.delete_theme_button.clicked.connect(self._delete_personal_theme)
+        theme_layout.addWidget(self.delete_theme_button)
+        lay.addWidget(theme_card)
+
+        editor_card = QGroupBox("PRIMARY COLOR WHEELS")
+        editor_layout = QVBoxLayout(editor_card)
+        editor_header = QHBoxLayout()
+        editor_header.addWidget(QLabel(
+            "Select one element below. Every wheel then affects only that "
+            "element; use Y to change luminance."))
+        editor_header.addStretch(1)
+        self.reset_all_theme_wheels_button = QPushButton("Reset all")
+        self.reset_all_theme_wheels_button.clicked.connect(
+            self._reset_all_theme_grades)
+        editor_header.addWidget(self.reset_all_theme_wheels_button)
+        editor_layout.addLayout(editor_header)
+
+        groups_layout = QGridLayout()
+        groups_layout.addWidget(QLabel("Element:"), 0, 0)
+        self._theme_group_checkboxes: dict[str, QRadioButton] = {}
+        self._theme_group_button_group = QButtonGroup(self)
+        self._theme_group_button_group.setExclusive(True)
+        for group, label in (
+            ("background", "Background"),
+            ("border", "Border"),
+            ("text", "Text"),
+            ("accent", "Accent"),
+            ("status", "Status"),
+        ):
+            checkbox = QRadioButton(label)
+            checkbox.setToolTip({
+                "background": (
+                    "Window, toolbar, panel, canvas, surface, and surface-hover colors."
+                ),
+                "border": "Border and scrollbar colors.",
+                "text": "Main and muted text colors.",
+                "accent": (
+                    "Accent, hover, highlight, and selection colors."
+                ),
+                "status": "Success and warning indicator colors.",
+            }[group])
+            self._theme_group_button_group.addButton(checkbox)
+            checkbox.toggled.connect(
+                lambda checked, selected=group:
+                    self._select_theme_color_group(selected, checked))
+            position = len(self._theme_group_checkboxes)
+            groups_layout.addWidget(
+                checkbox, 1 + position // 4, position % 4)
+            self._theme_group_checkboxes[group] = checkbox
+        editor_layout.addLayout(groups_layout)
+
+        wheels_layout = QGridLayout()
+        wheels_layout.setHorizontalSpacing(18)
+        wheels_layout.setVerticalSpacing(12)
+        wheels_layout.setColumnStretch(0, 1)
+        wheels_layout.setColumnStretch(1, 1)
+        wheels_layout.setRowStretch(0, 1)
+        wheels_layout.setRowStretch(1, 1)
+        self._theme_wheels_layout = wheels_layout
+        self._theme_grade_wheels: dict[str, ColorBalanceWheel] = {}
+        self._theme_grade_sliders: dict[str, QSlider] = {}
+        self._theme_grade_value_labels: dict[str, QLabel] = {}
+        for index, (name, tonal_range) in enumerate((
+            ("lift", "Shadows"),
+            ("gamma", "Midtones"),
+            ("gain", "Highlights"),
+            ("offset", "Entire palette"),
+        )):
+            wheel_column = QVBoxLayout()
+            wheel_column.setSpacing(4)
+            heading = QHBoxLayout()
+            title = QLabel(name.title())
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            title.setStyleSheet("font-weight: 700;")
+            title.setToolTip(f"{name.title()} adjusts {tonal_range.lower()}.")
+            heading.addWidget(title, 1)
+            reset_button = QToolButton()
+            reset_button.setText("↺")
+            reset_button.setToolTip(f"Reset {name.title()}")
+            reset_button.setAccessibleName(f"Reset {name.title()} wheel")
+            reset_button.clicked.connect(
+                lambda _checked=False, selected=name:
+                    self._reset_theme_grade(selected))
+            heading.addWidget(reset_button)
+            wheel_column.addLayout(heading)
+
+            wheel = ColorBalanceWheel()
+            wheel.setToolTip(
+                f"{name.title()} · {tonal_range}. Drag from the center "
+                "toward a hue to add that color.")
+            wheel.balanceChanged.connect(
+                lambda x, y, selected=name:
+                    self._on_theme_grade_changed(
+                        selected, balance=(x, y)))
+            wheel_column.addWidget(
+                wheel, 1)
+            self._theme_grade_wheels[name] = wheel
+
+            master_row = QHBoxLayout()
+            master_label = QLabel("Y")
+            master_label.setToolTip(
+                "Master luminance adjustment for this tonal range.")
+            master_row.addWidget(master_label)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(-100, 100)
+            slider.setValue(0)
+            slider.setTracking(True)
+            slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+            slider.setTickInterval(50)
+            slider.setToolTip(
+                f"{name.title()} master luminance (Y), from darker to brighter.")
+            slider.valueChanged.connect(
+                lambda value, selected=name:
+                    self._on_theme_grade_changed(
+                        selected, master=value / 100))
+            master_row.addWidget(slider, 1)
+            value_label = QLabel("0.00")
+            value_label.setMinimumWidth(38)
+            value_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+            master_row.addWidget(value_label)
+            wheel_column.addLayout(master_row)
+            self._theme_grade_sliders[name] = slider
+            self._theme_grade_value_labels[name] = value_label
+            wheels_layout.addLayout(
+                wheel_column, index // 2, index % 2)
+        editor_layout.addLayout(wheels_layout)
+
+        curve_header = QHBoxLayout()
+        curve_header.addWidget(QLabel("CURVE · SELECTED ELEMENT"))
+        curve_header.addStretch(1)
+        reset_curve_button = QToolButton()
+        reset_curve_button.setText("Reset curve")
+        reset_curve_button.setToolTip(
+            "Return the selected element's curve to a neutral diagonal.")
+        reset_curve_button.clicked.connect(self._reset_theme_curve)
+        curve_header.addWidget(reset_curve_button)
+        editor_layout.addLayout(curve_header)
+        self._theme_curve_editor = ToneCurveEditor()
+        self._theme_curve_editor.setToolTip(
+            "Drag points to adjust the RGB tone curve. Click to add a point; "
+            "right-click a point to remove it.")
+        self._theme_curve_editor.pointsChanged.connect(
+            self._on_theme_curve_changed)
+        editor_layout.addWidget(self._theme_curve_editor)
+
+        lay.addWidget(editor_card)
+        self._theme_group_checkboxes["accent"].setChecked(True)
+
+        preview_card = QGroupBox("LIVE PREVIEW")
+        preview_layout = QHBoxLayout(preview_card)
+        self.theme_preview_sample = QLabel(
+            "The quick brown fox\nA book passage preview")
+        self.theme_preview_sample.setMinimumHeight(72)
+        self.theme_preview_sample.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_layout.addWidget(self.theme_preview_sample, 1)
+        self.theme_preview_button = QPushButton("Example button")
+        preview_layout.addWidget(self.theme_preview_button)
+        lay.addWidget(preview_card)
+        lay.addWidget(_hint_frame(
+            "Your changes update the reader, chat, and open translations "
+            "immediately. Use Save Changes below to keep the theme; Cancel "
+            "restores the previous appearance.",
+            "default",
+        ))
+        lay.addStretch(1)
+        self._begin_theme_grade(
+            self._settings.get("theme", "Dark Slate"),
+            resolved_color_scheme(
+                self._settings.get("color_scheme", "system")),
+        )
+        self._refresh_personal_theme_controls()
+        return outer
+
+    def _refresh_personal_theme_controls(self) -> None:
+        current_theme = self._settings.get("theme", "Dark Slate")
+        self.header_theme_combo.blockSignals(True)
+        self.header_theme_combo.clear()
+        for name in THEMES:
+            self.header_theme_combo.addItem(name, name)
+        self.header_theme_combo.setCurrentIndex(
+            max(0, self.header_theme_combo.findData(current_theme)))
+        self.header_theme_combo.blockSignals(False)
+        self.my_theme_combo.blockSignals(True)
+        self.my_theme_combo.clear()
+        for name in register_user_themes(
+            self._settings.get("user_themes")
+        ):
+            self.my_theme_combo.addItem(name)
+        self.my_theme_combo.setCurrentText(
+            current_theme if current_theme in self._settings.get(
+                "user_themes", {}) else "")
+        self.my_theme_combo.blockSignals(False)
+        is_custom = current_theme in self._settings.get("user_themes", {})
+        self.delete_theme_button.setEnabled(is_custom)
+        self._update_theme_editor_sample()
+
+    def _begin_theme_grade(
+        self,
+        theme: str,
+        scheme: str,
+        palette: dict[str, str] | None = None,
+    ) -> None:
+        if (
+            palette is None
+            and self._theme_grade_theme == theme
+            and self._theme_grade_scheme == scheme
+            and self._theme_grade_base is not None
+        ):
+            return
+        self._theme_grade_theme = theme
+        self._theme_grade_scheme = scheme
+        self._theme_grade_base = dict(
+            palette if palette is not None else theme_colors(theme, scheme))
+        self._theme_grade_states = {
+            group: {
+                name: (0.0, 0.0, 0.0)
+                for name in self._theme_grade_names
+            }
+            for group in self._theme_color_groups
+        }
+        self._theme_curve_states = {
+            group: [(0.0, 0.0), (1.0, 1.0)]
+            for group in self._theme_color_groups
+        }
+        self._active_theme_color_group = "accent"
+        self._theme_grade_state = self._theme_grade_states["accent"]
+        for group, checkbox in self._theme_group_checkboxes.items():
+            checkbox.blockSignals(True)
+            checkbox.setChecked(group == "accent")
+            checkbox.blockSignals(False)
+        self._load_theme_grade_controls()
+
+    def _select_theme_color_group(self, group: str, checked: bool) -> None:
+        if not checked:
+            return
+        self._active_theme_color_group = group
+        self._theme_grade_state = self._theme_grade_states[group]
+        self._load_theme_grade_controls()
+
+    def _load_theme_grade_controls(self) -> None:
+        state = self._theme_grade_states[self._active_theme_color_group]
+        for name in self._theme_grade_names:
+            x, y, master = state[name]
+            wheel = self._theme_grade_wheels.get(name)
+            if wheel is not None:
+                wheel.blockSignals(True)
+                wheel.setBalance(x, y)
+                wheel.blockSignals(False)
+            slider = self._theme_grade_sliders.get(name)
+            if slider is not None:
+                slider.blockSignals(True)
+                slider.setValue(round(master * 100))
+                slider.blockSignals(False)
+            label = self._theme_grade_value_labels.get(name)
+            if label is not None:
+                label.setText(f"{master:+.2f}")
+        self._theme_curve_editor.blockSignals(True)
+        self._theme_curve_editor.setPoints(
+            self._theme_curve_states[self._active_theme_color_group])
+        self._theme_curve_editor.blockSignals(False)
+        self._theme_curve_editor.setCurveColor(
+            self._theme_colors().get("accent", "#DCE6FC"))
+
+    def _on_theme_grade_changed(
+        self,
+        name: str,
+        *,
+        balance: tuple[float, float] | None = None,
+        master: float | None = None,
+    ) -> None:
+        theme = self._ensure_personal_theme()
+        scheme = resolved_color_scheme(
+            self._settings.get("color_scheme", "system"))
+        variants = self._settings.get("user_themes") or {}
+        if (
+            self._theme_grade_theme != theme
+            or self._theme_grade_scheme != scheme
+            or self._theme_grade_base is None
+        ):
+            self._begin_theme_grade(theme, scheme, variants[theme][scheme])
+
+        group = self._active_theme_color_group
+        state = self._theme_grade_states[group]
+        x, y, current_master = state[name]
+        if balance is not None:
+            x, y = balance
+        if master is not None:
+            current_master = master
+            self._theme_grade_value_labels[name].setText(
+                f"{master:+.2f}")
+        state[name] = (x, y, current_master)
+        palette = self._graded_theme_palette()
+        updated_variants = dict(variants)
+        updated_variants[theme] = dict(
+            updated_variants[theme], **{scheme: palette})
+        self._settings["user_themes"] = register_user_themes(
+            updated_variants)
+        if not self._theme_preview_timer.isActive():
+            self._theme_preview_timer.start()
+
+    def _reset_theme_grade(self, name: str) -> None:
+        wheel = self._theme_grade_wheels[name]
+        slider = self._theme_grade_sliders[name]
+        wheel.blockSignals(True)
+        wheel.setBalance(0, 0)
+        wheel.blockSignals(False)
+        slider.blockSignals(True)
+        slider.setValue(0)
+        slider.blockSignals(False)
+        self._theme_grade_value_labels[name].setText("0.00")
+        self._theme_grade_states[self._active_theme_color_group][name] = (
+            0.0, 0.0, 0.0)
+        self._theme_grade_state = self._theme_grade_states[
+            self._active_theme_color_group]
+        self._reapply_theme_grade()
+
+    def _reset_all_theme_grades(self) -> None:
+        self._theme_grade_states = {
+            group: {
+                name: (0.0, 0.0, 0.0)
+                for name in self._theme_grade_names
+            }
+            for group in self._theme_color_groups
+        }
+        self._theme_curve_states = {
+            group: [(0.0, 0.0), (1.0, 1.0)]
+            for group in self._theme_color_groups
+        }
+        self._theme_grade_state = self._theme_grade_states[
+            self._active_theme_color_group]
+        self._load_theme_grade_controls()
+        self._reapply_theme_grade()
+
+    def _on_theme_curve_changed(self, points) -> None:
+        theme = self._ensure_personal_theme()
+        scheme = resolved_color_scheme(
+            self._settings.get("color_scheme", "system"))
+        variants = self._settings.get("user_themes") or {}
+        if (
+            self._theme_grade_theme != theme
+            or self._theme_grade_scheme != scheme
+            or self._theme_grade_base is None
+        ):
+            self._begin_theme_grade(theme, scheme, variants[theme][scheme])
+        self._theme_curve_states[self._active_theme_color_group] = list(points)
+        self._reapply_theme_grade()
+
+    def _reset_theme_curve(self) -> None:
+        self._theme_curve_editor.reset()
+
+    def _graded_theme_palette(self) -> dict[str, str]:
+        if self._theme_grade_base is None:
+            return {}
+        palette = dict(self._theme_grade_base)
+        for group, keys in self._theme_color_groups.items():
+            group_palette = {
+                key: self._theme_grade_base[key]
+                for key in keys
+                if key in self._theme_grade_base
+            }
+            palette.update(apply_color_grading(
+                group_palette, self._theme_grade_states[group]))
+            palette.update(apply_color_curve(
+                {key: palette[key] for key in keys if key in palette},
+                tuple(self._theme_curve_states[group]),
+            ))
+        return palette
+
+    def _reapply_theme_grade(self) -> None:
+        theme = self._settings.get("theme", "Dark Slate")
+        scheme = resolved_color_scheme(
+            self._settings.get("color_scheme", "system"))
+        if self._theme_grade_base is None:
+            return
+        palette = self._graded_theme_palette()
+        variants = dict(self._settings.get("user_themes") or {})
+        variants[theme] = dict(
+            variants[theme], **{scheme: palette})
+        self._settings["user_themes"] = register_user_themes(variants)
+        if not self._theme_preview_timer.isActive():
+            self._theme_preview_timer.start()
+
+    def _ensure_personal_theme(self) -> str:
+        theme = self._settings.get("theme", "Dark Slate")
+        user_themes = dict(self._settings.get("user_themes") or {})
+        if theme in user_themes:
+            return theme
+        base_variants = THEME_VARIANTS.get(
+            theme, THEME_VARIANTS["Dark Slate"])
+        base_name = "My Theme"
+        name = base_name
+        suffix = 2
+        while name in THEMES or name in user_themes:
+            name = f"{base_name} {suffix}"
+            suffix += 1
+        user_themes[name] = {
+            scheme: dict(base_variants[scheme])
+            for scheme in ("dark", "light")
+        }
+        self._settings["user_themes"] = register_user_themes(user_themes)
+        self._settings["theme"] = name
+        scheme = resolved_color_scheme(
+            self._settings.get("color_scheme", "system"))
+        self._theme_grade_theme = name
+        self._theme_grade_scheme = scheme
+        self._theme_grade_base = dict(user_themes[name][scheme])
+        self.header_theme_combo.addItem(name, name)
+        self.header_theme_combo.blockSignals(True)
+        self.header_theme_combo.setCurrentIndex(
+            self.header_theme_combo.findData(name))
+        self.header_theme_combo.blockSignals(False)
+        self._refresh_personal_theme_controls()
+        return name
+
+    def _flush_theme_grade_preview(self) -> None:
+        self._refresh_live_theme_inline_styles(self._theme_colors())
+        self._update_theme_editor_sample()
+        self._emit_preview_settings(grade_editing=True)
+
+    def _on_my_theme_selected(self, name: str) -> None:
+        if not name or name not in self._settings.get("user_themes", {}):
+            return
+        self._settings["theme"] = name
+        self.header_theme_combo.setCurrentIndex(
+            self.header_theme_combo.findData(name))
+        scheme = resolved_color_scheme(
+            self._settings.get("color_scheme", "system"))
+        self._begin_theme_grade(name, scheme)
+        self._update_theme_editor_sample()
+        self._apply_theme_style()
+        self._emit_preview_settings()
+
+    def _save_personal_theme_as(self) -> None:
+        source_name = self._settings.get("theme", "Dark Slate")
+        user_themes = self._settings.get("user_themes") or {}
+        source_variants = user_themes.get(source_name)
+        if source_variants is None:
+            source_variants = THEME_VARIANTS.get(
+                source_name, THEME_VARIANTS["Dark Slate"])
+        name, accepted = QInputDialog.getText(
+            self, "Save personal theme", "Theme name:")
+        name = name.strip()[:40]
+        if not accepted or not name:
+            return
+        if name in THEMES and name not in self._settings.get("user_themes", {}):
+            QMessageBox.warning(
+                self, "Theme name already used",
+                "Choose a name that is not used by a built-in theme.",
+            )
+            return
+        variants = dict(self._settings.get("user_themes") or {})
+        if name in variants and name != source_name:
+            answer = QMessageBox.question(
+                self,
+                "Replace saved theme?",
+                f"A personal theme named “{name}” already exists. Replace it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        variants[name] = {
+            key: dict(palette)
+            for key, palette in source_variants.items()
+        }
+        self._settings["user_themes"] = register_user_themes(variants)
+        self._settings["theme"] = name
+        if self.header_theme_combo.findData(name) < 0:
+            self.header_theme_combo.addItem(name, name)
+        self.header_theme_combo.setCurrentIndex(
+            self.header_theme_combo.findData(name))
+        self._refresh_personal_theme_controls()
+        scheme = resolved_color_scheme(
+            self._settings.get("color_scheme", "system"))
+        self._begin_theme_grade(name, scheme, variants[name][scheme])
+        self._apply_theme_style()
+        self._emit_preview_settings()
+
+    def _delete_personal_theme(self) -> None:
+        name = self._settings.get("theme", "")
+        variants = dict(self._settings.get("user_themes") or {})
+        if name not in variants:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete saved theme?",
+            f"Delete “{name}”?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        del variants[name]
+        self._settings["user_themes"] = register_user_themes(variants)
+        self._settings["theme"] = "Dark Slate"
+        self.header_theme_combo.setCurrentIndex(
+            self.header_theme_combo.findData("Dark Slate"))
+        self._begin_theme_grade(
+            "Dark Slate",
+            resolved_color_scheme(
+                self._settings.get("color_scheme", "system")),
+        )
+        self._refresh_personal_theme_controls()
+        self._apply_theme_style()
+        self._emit_preview_settings()
+
+    def _update_theme_editor_sample(self) -> None:
+        if not hasattr(self, "theme_preview_sample"):
+            return
+        colors = self._theme_colors()
+        self._theme_curve_editor.setCurveColor(
+            colors.get("accent", "#DCE6FC"))
+        self.theme_preview_sample.setStyleSheet(
+            f"background: {colors['surface']}; color: {colors['text']}; "
+            f"border: 1px solid {colors['border']}; border-radius: 8px; "
+            "padding: 8px;"
+        )
+        self.theme_preview_button.setStyleSheet(
+            f"background: {colors['accent']}; color: {colors['text']}; "
+            f"border: 1px solid {colors['accent_light']}; "
+            "border-radius: 8px; padding: 8px 16px;"
+        )
+
+    def _emit_preview_settings(self, *, grade_editing: bool = False) -> None:
+        try:
+            preview = self.values()
+            if grade_editing:
+                preview["_grade_editing"] = True
+            self.previewSettingsChanged.emit(preview, False)
+        except (AttributeError, TypeError, ValueError):
+            log.exception("Could not build live theme preview settings")
+
+    def set_preview_baseline(self, settings: dict) -> None:
+        self._initial_settings = dict(settings)
+
     def _build_performance_group(self) -> QWidget:
         outer = QWidget()
         lay = QVBoxLayout(outer)
@@ -1565,6 +2459,7 @@ class SettingsDialog(QDialog):
         instructions_layout.setSpacing(8)
         instructions_title = QLabel("AI MODEL INSTRUCTIONS")
         instructions_title.setObjectName("modelInstructionsTitle")
+        instructions_title.setProperty("theme_color_role", "muted")
         instructions_title.setStyleSheet(
             f"color: {self._theme_colors()['muted']}; font-size: 14px; "
             "font-weight: 700; letter-spacing: 0.6px; "
@@ -1652,6 +2547,7 @@ class SettingsDialog(QDialog):
         self.speech_engine_notice = QLabel()
         self.speech_engine_notice.setWordWrap(True)
         self.speech_engine_notice.setObjectName("speechEngineNotice")
+        self.speech_engine_notice.setProperty("theme_color_role", "muted")
         self.speech_engine_notice.setStyleSheet(
             f"color: {self._theme_colors()['muted']}; background: transparent; "
             "border: none;")
@@ -2157,6 +3053,7 @@ class SettingsDialog(QDialog):
         title_row.setSpacing(8)
         eyebrow = QLabel("EXTEND")
         eyebrow.setObjectName("customProvidersEyebrow")
+        eyebrow.setProperty("theme_color_role", "accent_light")
         eyebrow.setStyleSheet(
             f"color: {colors['accent_light']}; font-size: 12px; "
             "font-weight: 800; letter-spacing: 1px; background: transparent;"
@@ -2164,6 +3061,7 @@ class SettingsDialog(QDialog):
         title_row.addWidget(eyebrow)
         title = QLabel("Custom Providers")
         title.setObjectName("customProvidersTitle")
+        title.setProperty("theme_color_role", "text")
         title.setStyleSheet(
             f"color: {colors['text']}; font-size: 21px; font-weight: 800; "
             "background: transparent;"
@@ -2228,6 +3126,7 @@ class SettingsDialog(QDialog):
         return outer
 
     def _rebuild_custom_cards(self) -> None:
+        self._invalidate_theme_role_widget_cache()
         while self._custom_container.count():
             item = self._custom_container.takeAt(0)
             w = item.widget()
@@ -2237,6 +3136,7 @@ class SettingsDialog(QDialog):
         providers = self._settings.get("custom_providers") or []
         if not providers:
             empty = QLabel("No providers yet. Add one to connect your API endpoint.")
+            empty.setObjectName("customProvidersEmpty")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setMinimumHeight(74)
             empty.setStyleSheet(
@@ -2263,45 +3163,77 @@ class SettingsDialog(QDialog):
                 _pid = str(entry.get("id", "")).strip()
                 QTimer.singleShot(600, lambda _pid=_pid: self._schedule_auto_fetch(_pid))
 
+    @staticmethod
+    def _custom_provider_card_stylesheet(
+        colors: dict[str, str], stripe_color: str,
+    ) -> str:
+        panel = QColor(colors["panel"])
+        stripe = QColor(stripe_color)
+        background = QColor(
+            round(panel.red() * 0.74 + stripe.red() * 0.26),
+            round(panel.green() * 0.74 + stripe.green() * 0.26),
+            round(panel.blue() * 0.74 + stripe.blue() * 0.26),
+        ).name()
+        return (
+            f"QFrame#customProviderCard {{ background: {background}; "
+            f"border: 1px solid {colors['border']}; border-radius: 12px; }}"
+            "QFrame#customProviderCard QLabel { "
+            "border: none; background: transparent; }"
+            "QFrame#customProviderCard QLineEdit, "
+            "QFrame#customProviderCard QComboBox { "
+            "min-height: 30px; border-radius: 8px; padding: 3px 8px; }"
+            "QFrame#customProviderCard QPushButton { "
+            "min-height: 30px; border-radius: 8px; padding: 4px 10px; }"
+            "QFrame#customProviderCard "
+            "QPushButton#collapseProviderButton { "
+            "min-width: 34px; max-width: 34px; "
+            f"background: {colors['surface']}; color: {colors['text']}; "
+            f"border: 1px solid {colors['border']}; padding: 0; "
+            "font-size: 21px; font-weight: 600; }"
+            "QFrame#customProviderCard "
+            "QPushButton#collapseProviderButton:hover { "
+            f"background: {colors['selection']}; color: {colors['text']}; "
+            f"border-color: {colors['accent_light']}; }}"
+            "QFrame#customProviderCard "
+            "QPushButton#providerRemoveButton { "
+            "min-width: 34px; max-width: 34px; "
+            f"background: {colors['surface']}; color: {colors['text']}; "
+            f"border: 1px solid {colors['border']}; padding: 0; "
+            "font-size: 19px; font-weight: 600; }"
+            "QFrame#customProviderCard "
+            "QPushButton#providerRemoveButton:hover { "
+            f"background: {colors['surface_hover']}; "
+            f"border-color: {colors['accent_light']}; }}"
+            "QFrame#customProviderCard QCheckBox { "
+            "spacing: 8px; font-weight: 600; background: transparent; }"
+            "QFrame#customProviderCard "
+            "QCheckBox#providerActiveCheck::indicator { "
+            "width: 12px; height: 12px; border-radius: 6px; }"
+            "QFrame#customProviderCard "
+            "QCheckBox#providerActiveCheck::indicator:checked { "
+            f"background: {colors['success']}; "
+            f"border: 1px solid {colors['success']}; }}"
+            "QFrame#customProviderCard "
+            "QCheckBox#providerActiveCheck::indicator:unchecked { "
+            f"background: {colors['warning']}; "
+            f"border: 1px solid {colors['warning']}; }}"
+        )
+
     def _make_custom_card(self, entry: dict, stripe_color: str) -> QWidget:
         cid = str(entry.get("id", "")).strip()
         name = str(entry.get("name", "")).strip() or cid
         colors = self._theme_colors()
-        panel_color = QColor(colors["panel"])
-        accent_color = QColor(stripe_color)
-        tint_amount = 0.26
-        card_background = QColor(
-            round(panel_color.red() * (1 - tint_amount) + accent_color.red() * tint_amount),
-            round(panel_color.green() * (1 - tint_amount) + accent_color.green() * tint_amount),
-            round(panel_color.blue() * (1 - tint_amount) + accent_color.blue() * tint_amount),
-        ).name()
         card = QFrame()
         card.setObjectName("customProviderCard")
         card.setFrameShape(QFrame.Shape.StyledPanel)
         card.setStyleSheet(
-            f"QFrame#customProviderCard {{ background: {card_background}; "
-            f"border: 1px solid {colors['border']}; "
-            f"border-radius: 12px; }}"
-            f"QFrame#customProviderCard QLabel {{ border: none; background: transparent; }}"
-            f"QFrame#customProviderCard QLineEdit, QFrame#customProviderCard QComboBox {{ min-height: 30px; border-radius: 8px; padding: 3px 8px; }}"
-            f"QFrame#customProviderCard QPushButton {{ min-height: 30px; border-radius: 8px; padding: 4px 10px; }}"
-            f"QFrame#customProviderCard QPushButton#collapseProviderButton {{ min-width: 34px; max-width: 34px; background: {colors['surface']}; color: {colors['text']}; border: 1px solid {colors['border']}; padding: 0; font-size: 21px; font-weight: 600; }}"
-            f"QFrame#customProviderCard QPushButton#collapseProviderButton:hover {{ background: {colors['selection']}; color: {colors['text']}; border-color: {colors['accent_light']}; }}"
-            f"QFrame#customProviderCard QPushButton#providerRemoveButton {{ min-width: 34px; max-width: 34px; background: {colors['surface']}; color: {colors['text']}; border: 1px solid {colors['border']}; padding: 0; font-size: 19px; font-weight: 600; }}"
-            f"QFrame#customProviderCard QPushButton#providerRemoveButton:hover {{ background: {colors['surface_hover']}; border-color: {colors['accent_light']}; }}"
-            f"QFrame#customProviderCard QCheckBox {{ spacing: 8px; font-weight: 600; background: transparent; }}"
-            "QFrame#customProviderCard QCheckBox#providerActiveCheck::indicator "
-            "{ width: 12px; height: 12px; border-radius: 6px; }"
-            "QFrame#customProviderCard QCheckBox#providerActiveCheck::indicator:checked "
-            "{ background: #00E676; border: 1px solid #69F0AE; }"
-            "QFrame#customProviderCard QCheckBox#providerActiveCheck::indicator:unchecked "
-            "{ background: #FF3B30; border: 1px solid #FF8A80; }"
-        )
+            self._custom_provider_card_stylesheet(colors, stripe_color))
         card_layout = QHBoxLayout(card)
         card_layout.setContentsMargins(1, 1, 1, 1)
         card_layout.setSpacing(0)
         accent_stripe = QFrame(card)
         accent_stripe.setObjectName("providerAccentStripe")
+        accent_stripe.setProperty("provider_stripe_color", stripe_color)
         accent_stripe.setFixedWidth(7)
         accent_stripe.setStyleSheet(
             f"background-color: {stripe_color}; border: none; border-radius: 0px;"
@@ -2325,6 +3257,7 @@ class SettingsDialog(QDialog):
         name_edit.textChanged.connect(lambda _v, _id=cid: self._on_custom_field_changed(_id))
         name_edit.editingFinished.connect(self._on_custom_providers_edited)
         name_label = QLabel("Provider name")
+        name_label.setProperty("theme_color_role", "muted")
         name_label.setStyleSheet(f"color: {colors['muted']}; font-size: 14px; font-weight: 600; background: transparent; border: none;")
         header.addWidget(name_label)
         header.addWidget(name_edit, 1)
@@ -2471,6 +3404,7 @@ class SettingsDialog(QDialog):
         caps_layout.setContentsMargins(10, 5, 10, 5)
         caps_layout.setSpacing(14)
         caps_title = QLabel("CAPABILITIES")
+        caps_title.setProperty("theme_color_role", "muted")
         caps_title.setToolTip(
             "Controls request behavior for the selected model. Only enable "
             "features supported by your endpoint.")
@@ -4027,7 +4961,27 @@ class SettingsDialog(QDialog):
 
     def reject(self) -> None:
         self._size_save_timer.stop()
+        self._theme_preview_timer.stop()
         self._save_dialog_geometry()
+        self._settings["theme"] = self._initial_settings.get(
+            "theme", "Dark Slate")
+        self._settings["color_scheme"] = self._initial_settings.get(
+            "color_scheme", "system")
+        self._settings["pdf_canvas_theme_background"] = (
+            self._initial_settings.get("pdf_canvas_theme_background", False))
+        self._settings["user_themes"] = register_user_themes(
+            self._initial_settings.get("user_themes"))
+        self._begin_theme_grade(
+            self._settings["theme"],
+            resolved_color_scheme(self._settings["color_scheme"]),
+        )
+        self._refresh_personal_theme_controls()
+        self._apply_theme_style()
+        try:
+            self.previewSettingsChanged.emit(
+                dict(self._initial_settings), True)
+        except (AttributeError, TypeError, ValueError):
+            log.exception("Could not restore the application theme preview")
         parent = self.parent()
         popups = getattr(parent, "popups", None)
         if popups:
@@ -4043,22 +4997,52 @@ class SettingsDialog(QDialog):
         from translators import registry
         cur = self._current_model()
         status = registry.custom_image_capability(cur, self._credentials()) if cur.startswith(registry.CUSTOM_PROVIDER_PREFIX) else registry.image_capability(cur)
-        label, background, foreground = _IMAGE_BADGES[status]
+        label = _IMAGE_BADGES[status][0]
+        colors = self._theme_colors()
+        background_role = {
+            "supported": "success",
+            "unsupported": "warning",
+            "unknown": "surface",
+        }[status]
+        foreground_role = "text" if status != "unknown" else "muted"
         self.model_image_badge.setText(label)
+        self.model_image_badge.setProperty(
+            "theme_background_role", background_role)
+        self.model_image_badge.setProperty(
+            "theme_color_role", foreground_role)
+        self.model_image_badge.setProperty(
+            "theme_border_role", "border")
+        self._invalidate_theme_role_widget_cache()
         self.model_image_badge.setStyleSheet(
-            "QLabel {" f"background-color: {background.name()}; color: {foreground.name()}; border-radius: 8px; padding: 5px 10px; font-size: 13px; font-weight: 700; border: none; " "}"
+            "QLabel {"
+            f"background-color: {colors[background_role]}; "
+            f"color: {colors[foreground_role]}; "
+            f"border: 1px solid {colors['border']}; "
+            "border-radius: 8px; padding: 5px 10px; "
+            "font-size: 13px; font-weight: 700; }"
         )
         self.model_image_badge.setToolTip({"supported": "This model accepts image input.", "unsupported": "This model accepts text only.", "unknown": "Image support not verified."}[status])
 
     def _update_key_states(self) -> None:
         creds = self._credentials()
-        self.gemini_state.setText("●" if creds["gemini_key"] else "○")
-        self.gemini_state.setStyleSheet("color: #10B981; font-size: 14px; background: transparent; border: none;" if creds["gemini_key"] else "color: #EF4444; font-size: 14px; background: transparent; border: none;")
-        for state, filled in ((self.groq_state, creds["groq_key"]), (self.cf_token_state, creds["cloudflare_token"]), (self.mistral_state, creds["mistral_key"]), (self.flm_state, creds["flm_key"])):
+        states = (
+            (self.gemini_state, creds["gemini_key"]),
+            (self.groq_state, creds["groq_key"]),
+            (self.cf_token_state, creds["cloudflare_token"]),
+            (self.mistral_state, creds["mistral_key"]),
+            (self.flm_state, creds["flm_key"]),
+            (self.cf_account_state, creds["cloudflare_account_id"]),
+        )
+        colors = self._theme_colors()
+        for state, filled in states:
+            role = "success" if filled else "warning"
             state.setText("●" if filled else "○")
-            state.setStyleSheet("color: #10B981; font-size: 14px; background: transparent; border: none;" if filled else "color: #EF4444; font-size: 14px; background: transparent; border: none;")
-        self.cf_account_state.setText("●" if creds["cloudflare_account_id"] else "○")
-        self.cf_account_state.setStyleSheet("color: #10B981; font-size: 14px; background: transparent; border: none;" if creds["cloudflare_account_id"] else "color: #EF4444; font-size: 14px; background: transparent; border: none;")
+            state.setProperty("theme_color_role", role)
+            self._invalidate_theme_role_widget_cache()
+            state.setStyleSheet(
+                f"color: {colors[role]}; font-size: 14px; "
+                "background: transparent; border: none;"
+            )
 
     def _update_engine_hint(self) -> None:
         from translators import registry
@@ -4074,7 +5058,15 @@ class SettingsDialog(QDialog):
             status += f"\n⌘ OpenCode CLI unavailable: {self._cli_model_error}"
         self.engine_hint.setText(status)
         colors = self._theme_colors()
-        self.engine_hint.setStyleSheet(f"color: {colors['success']}; font-weight: 600; background: transparent; border: none;" if ok and not self._cli_model_error else f"color: {colors['warning']}; font-weight: 600; background: transparent; border: none;")
+        role = (
+            "success"
+            if ok and not self._cli_model_error else "warning")
+        self.engine_hint.setProperty("theme_color_role", role)
+        self._invalidate_theme_role_widget_cache()
+        self.engine_hint.setStyleSheet(
+            f"color: {colors[role]}; font-weight: 600; "
+            "background: transparent; border: none;"
+        )
         # sync header badge
         try:
             self.header_status.setText(
@@ -4224,6 +5216,8 @@ class SettingsDialog(QDialog):
         out.update({
             "theme": self._settings.get("theme", "Dark Slate"),
             "color_scheme": self._settings.get("color_scheme", "system"),
+            "user_themes": register_user_themes(
+                self._settings.get("user_themes")),
             "pdf_canvas_theme_background":
                 self.pdf_canvas_theme_check.isChecked(),
             "model": self._current_model(),

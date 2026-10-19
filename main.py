@@ -61,7 +61,7 @@ from PySide6.QtCore import (
     Qt, Signal,
 )
 from PySide6.QtGui import (
-    QAction, QColor, QDesktopServices, QKeySequence, QPainter, QPen,
+    QAction, QColor, QDesktopServices, QKeySequence, QPainter, QPalette, QPen,
 )
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
@@ -166,7 +166,7 @@ QPushButton:disabled, QToolButton:disabled {
 /* Inputs & Combos matched to button height */
 QPushButton#openPdfButton {
     background-color: @accent@;
-    color: #FFFFFF;
+    color: @text@;
     border: none;
     border-radius: 12px;
     min-height: 44px;
@@ -280,9 +280,9 @@ QScrollArea#pdfCanvas {
 QWidget#pdfPageContainer {
     background-color: @pdf_canvas@;
 }
-QSplitter::handle { 
-    background-color: @border@; 
-    width: 1px; 
+QSplitter::handle {
+    background-color: transparent;
+    width: 1px;
 }
 QSplitter::handle:hover {
     background-color: @accent_light@;
@@ -337,26 +337,26 @@ QScrollBar#pdfVerticalScrollBar:vertical {
     margin: 0;
 }
 QScrollBar#pdfVerticalScrollBar::handle:vertical {
-    background-color: @accent_light@;
+    background-color: @scroll@;
     min-height: 64px;
     border-radius: 7px;
     margin: 2px 3px;
 }
 QScrollBar#pdfVerticalScrollBar::handle:vertical:hover {
-    background-color: @accent@;
+    background-color: @scroll_hover@;
 }
 QScrollBar#pdfThumbnailScrollBar {
     background-color: @panel@;
     margin: 0;
 }
 QScrollBar#pdfThumbnailScrollBar::handle:vertical {
-    background-color: @accent_light@;
+    background-color: @scroll@;
     min-height: 64px;
     border-radius: 7px;
     margin: 2px 3px;
 }
 QScrollBar#pdfThumbnailScrollBar::handle:vertical:hover {
-    background-color: @accent@;
+    background-color: @scroll_hover@;
 }
 
 /* Labels & Status */
@@ -414,13 +414,19 @@ QLabel#stepText {
 }
 
 /* Thumbnails panel (needs matching selectors inside reader/bookview.py) */
+QListWidget#pdfThumbnails,
+QListWidget#pdfBookmarks {
+    /* No box around the list: its left and right edges were two of the
+       standing vertical lines beside the document. */
+    border: none;
+}
 QListWidget#pdfThumbnails::viewport,
 QListWidget#pdfBookmarks::viewport {
     background-color: @panel@;
 }
 QWidget#thumbsPanel {
     background-color: @panel@;
-    border-right: 1px solid @border@;
+    border-right: none;
 }
 QScrollArea#thumbsScroll {
     background-color: @panel@;
@@ -1044,9 +1050,14 @@ class MainWindow(QMainWindow):
         pdf_background = bool(
             self.settings.get("pdf_canvas_theme_background", False))
         text = app_stylesheet(theme, scheme, pdf_background)
-        if self._skin_already_applied(text, theme):
+        force_apply = (
+            bool(getattr(self, "_theme_preview_requires_full_apply", False))
+            or bool(getattr(self, "_pending_skin_force_apply", False))
+        )
+        if self._skin_already_applied(text, theme) and not force_apply:
             return
         self._pending_skin = (text, theme)
+        self._pending_skin_force_apply = force_apply
         self._ensure_app_stylesheet_timer().start()
 
     def _flush_app_skin(self) -> None:
@@ -1054,12 +1065,17 @@ class MainWindow(QMainWindow):
         if not pending:
             return
         text, theme = pending
+        force_apply = bool(getattr(self, "_pending_skin_force_apply", False))
         self._pending_skin = None
-        if self._skin_already_applied(text, theme):
+        self._pending_skin_force_apply = False
+        skin_unchanged = self._skin_already_applied(text, theme)
+        if skin_unchanged and not force_apply:
             return
-        self._applied_app_stylesheet = text
-        self._applied_theme = theme
-        QApplication.instance().setStyleSheet(text)
+        if not skin_unchanged:
+            self._applied_app_stylesheet = text
+            self._applied_theme = theme
+            QApplication.instance().setStyleSheet(text)
+        self._clear_theme_preview_fast_styles()
         # Same turn as the stylesheet, so no window shows the new theme alone.
         self._apply_theme_to_books(theme)
         self._apply_chat_theme()
@@ -2937,13 +2953,15 @@ class MainWindow(QMainWindow):
     # Settings that change the app-wide skin. Re-applying an application
     # stylesheet re-styles every widget in every window, so it must only run
     # when the skin itself actually moved.
-    _APP_SKIN_KEYS = ("theme", "color_scheme", "pdf_canvas_theme_background")
+    _APP_SKIN_KEYS = (
+        "theme", "color_scheme", "pdf_canvas_theme_background", "user_themes",
+    )
 
     # Settings a visible translation popup draws or reads out. Re-rendering a
     # popup rebuilds its whole Markdown document, which is far too costly to
     # repeat every time the dialog is closed.
     _POPUP_DISPLAY_KEYS = (
-        "theme", "color_scheme", "font_size", "translation_font",
+        "theme", "color_scheme", "user_themes", "font_size", "translation_font",
         "translation_font_arabic", "translation_font_latin", "arabic_tashkeel",
         "line_spacing_px", "translation_side_margin_px",
         "translation_top_bottom_margin_px", "source_language",
@@ -2991,8 +3009,13 @@ class MainWindow(QMainWindow):
             dlg = None
         if dlg is None:
             dlg = SettingsDialog(self.settings, self)
+            dlg.previewSettingsChanged.connect(
+                self._preview_theme_from_settings)
             self._settings_dialog = dlg
+        else:
+            dlg.set_preview_baseline(self.settings)
         if dlg.exec():
+            self._theme_preview_active = False
             # Keep the outgoing values so the expensive re-skin and popup
             # re-render below can be skipped when the dialog was closed
             # without changing anything that affects them.
@@ -3030,17 +3053,254 @@ class MainWindow(QMainWindow):
                         self._automatic_page_prefetch_scheduled = (
                             book, popup, page_no)
                         self._automatic_page_prefetch_timer.start(5000)
-            if self._app_skin_changed(previous, self.settings):
+            if (
+                self._app_skin_changed(previous, self.settings)
+                or getattr(self, "_theme_preview_requires_full_apply", False)
+            ):
                 self._apply_theme_skin(
                     self.settings.get("theme", "Dark Slate"))
-            if self._popup_display_changed(previous, self.settings):
+                self._theme_preview_requires_full_apply = False
+            if (
+                self._popup_display_changed(previous, self.settings)
+                or getattr(self, "_theme_preview_requires_popup_refresh", False)
+            ):
+                timer = getattr(self, "_theme_preview_timer", None)
+                if timer is not None:
+                    timer.stop()
                 for popup in self.popups:
                     if popup.isVisible():
                         popup.refresh_display(self.settings)
+                self._theme_preview_requires_popup_refresh = False
             self._sync_theme_button(self.settings.get("theme", "Dark Slate"))
             self._sync_selection_mode_button()
             self._refresh_engine_label()
             self._flash_info("Settings saved ✓")
+
+    def _preview_theme_from_settings(
+        self, preview: dict, restoring: bool,
+    ) -> None:
+        from ui.theme import register_user_themes
+
+        grade_editing = bool(preview.get("_grade_editing", False))
+        self._theme_preview_active = not restoring
+        self.settings["user_themes"] = register_user_themes(
+            preview.get("user_themes"))
+        for key in ("theme", "color_scheme", "pdf_canvas_theme_background"):
+            if key in preview:
+                self.settings[key] = preview[key]
+        theme = self.settings.get("theme", "Dark Slate")
+        if restoring:
+            self._theme_preview_requires_full_apply = False
+            self._apply_theme_preview_fast(theme)
+            self._clear_theme_preview_fast_styles()
+            self._apply_theme_skin(theme)
+        else:
+            self._theme_preview_requires_full_apply = True
+            if grade_editing:
+                self._apply_theme_grade_preview_fast(theme)
+            else:
+                self._apply_theme_preview_fast(theme)
+        if set(self._theme_actions) != set(THEMES):
+            for name, action in list(self._theme_actions.items()):
+                if name not in THEMES:
+                    self.theme_menu.removeAction(action)
+                    action.deleteLater()
+                    del self._theme_actions[name]
+            for name in THEMES:
+                if name in self._theme_actions:
+                    continue
+                action = self.theme_menu.addAction(name)
+                action.setCheckable(True)
+                action.triggered.connect(
+                    lambda _checked=False, selected=name:
+                        self._on_theme_changed(selected))
+                self._theme_actions[name] = action
+        self._sync_theme_button(theme)
+        self._theme_preview_requires_popup_refresh = True
+        if not grade_editing:
+            self._queue_theme_preview_refresh()
+
+    def _apply_theme_grade_preview_fast(self, theme: str) -> None:
+        self._apply_theme_preview_fast(theme)
+
+    def _apply_theme_preview_fast(self, theme: str) -> None:
+        """Update visible theme surfaces without repolishing every app widget."""
+        colors = theme_colors(
+            theme, self.settings.get("color_scheme", "system"))
+        tab_canvas = colors["canvas"]
+        if not self.settings.get("pdf_canvas_theme_background", False):
+            colors = dict(colors)
+            colors["canvas"] = "#F1F3F5"
+        central = getattr(self, "centralWidget", lambda: None)()
+        if central is not None:
+            palette = central.palette()
+            palette.setColor(QPalette.ColorRole.Window, QColor(colors["window"]))
+            central.setPalette(palette)
+            central.setAutoFillBackground(True)
+        toolbar = getattr(self, "_toolbar", None)
+        if toolbar is not None:
+            style = (
+                "QToolBar { "
+                f"background-color: {colors['toolbar']}; "
+                f"color: {colors['text']}; "
+                f"border-bottom: 1px solid {colors['border']}; }}"
+                "QToolBar QToolButton, QToolBar QComboBox { "
+                f"background-color: {colors['surface']}; "
+                f"color: {colors['text']}; "
+                f"border: 1px solid {colors['border']}; "
+                "border-radius: 8px; }"
+                "QToolBar QToolButton:hover, QToolBar QComboBox:hover { "
+                f"background-color: {colors['surface_hover']}; "
+                f"border-color: {colors['accent_light']}; }}"
+                "QToolBar QToolButton:pressed { "
+                f"background-color: {colors['selection']}; "
+                f"border-color: {colors['accent_light']}; "
+                f"color: {colors['text']}; }}"
+                "QToolBar QComboBox QAbstractItemView { "
+                f"background-color: {colors['panel']}; "
+                f"color: {colors['text']}; "
+                f"border: 1px solid {colors['border']}; "
+                f"selection-background-color: {colors['selection']}; "
+                f"selection-color: {colors['text']}; }}"
+            )
+            if style != getattr(self, "_preview_toolbar_stylesheet", None):
+                toolbar.setStyleSheet(style)
+                self._preview_toolbar_stylesheet = style
+
+        tabs = getattr(self, "tabs", None)
+        if tabs is not None:
+            pane_style = (
+                "QTabWidget::pane { "
+                f"background-color: {tab_canvas}; border: none; }}"
+            )
+            if tabs.styleSheet() != pane_style:
+                tabs.setStyleSheet(pane_style)
+            tab_style = (
+                "QTabBar { "
+                f"background-color: {colors['toolbar']}; "
+                f"border-bottom: 1px solid {colors['border']}; }}"
+                "QTabBar::tab { "
+                "background-color: transparent; "
+                f"color: {colors['muted']}; "
+                "border: none; border-bottom: 3px solid transparent; "
+                "padding: 11px 20px; min-width: 120px; font-size: 13px; "
+                "font-weight: 600; }"
+                "QTabBar::tab:selected { "
+                f"background-color: {colors['surface']}; "
+                f"color: {colors['text']}; "
+                "font-weight: 700; "
+                f"border-bottom: 3px solid {colors['accent_light']}; "
+                "border-top-left-radius: 8px; "
+                "border-top-right-radius: 8px; }"
+                "QTabBar::tab:hover:!selected { "
+                f"background-color: {colors['surface_hover']}; "
+                f"color: {colors['text']}; }}"
+            )
+            tab_bar = tabs.tabBar()
+            if tab_style != getattr(self, "_preview_tab_stylesheet", None):
+                tab_bar.setStyleSheet(tab_style)
+                self._preview_tab_stylesheet = tab_style
+
+        welcome = getattr(self, "welcome", None)
+        if welcome is not None:
+            welcome_style = (
+                "QFrame#welcomeCard { "
+                f"background-color: {colors['panel']}; "
+                f"border: 1px solid {colors['border']}; }}"
+                "QFrame#stepsCard { "
+                f"background-color: {colors['surface']}; "
+                f"border: 1px solid {colors['border']}; }}"
+                "QLabel#welcomeEyebrow, QLabel#stepNumber { "
+                f"color: {colors['accent_light']}; }}"
+                "QLabel#welcomeTitle { "
+                f"color: {colors['text']}; }}"
+                "QLabel#welcomeDescription, QLabel#stepText { "
+                f"color: {colors['muted']}; }}"
+                "QPushButton#openPdfButton { "
+                f"background-color: {colors['accent']}; "
+                f"color: {colors['text']}; }}"
+                "QPushButton#openPdfButton:hover { "
+                f"background-color: {colors['accent_hover']}; }}"
+            )
+            if welcome_style != getattr(
+                self, "_preview_welcome_stylesheet", None
+            ):
+                welcome.setStyleSheet(welcome_style)
+                self._preview_welcome_stylesheet = welcome_style
+
+        menu_style = (
+            "QMenu { "
+            f"background-color: {colors['panel']}; "
+            f"color: {colors['text']}; "
+            f"border: 1px solid {colors['border']}; }}"
+            "QMenu::item:selected { "
+            f"background-color: {colors['selection']}; "
+            f"color: {colors['text']}; }}"
+        )
+        for menu_name in ("file_menu", "fit_menu", "theme_menu"):
+            menu = getattr(self, menu_name, None)
+            if menu is not None and menu.styleSheet() != menu_style:
+                menu.setStyleSheet(menu_style)
+
+        iter_books = getattr(self, "_iter_books", None)
+        if callable(iter_books):
+            for book in iter_books():
+                apply_theme = getattr(book, "apply_theme", None)
+                if callable(apply_theme):
+                    apply_theme(colors)
+
+        apply_chat_theme = getattr(self, "_apply_chat_theme", None)
+        if callable(apply_chat_theme):
+            apply_chat_theme()
+        apply_readout_theme = getattr(
+            self, "_apply_model_readout_theme", None)
+        if callable(apply_readout_theme):
+            apply_readout_theme()
+
+    def _clear_theme_preview_fast_styles(self) -> None:
+        central = getattr(self, "centralWidget", lambda: None)()
+        if central is not None:
+            # An empty palette clears the widget-local override and resumes
+            # inheriting the application palette after the fast preview.
+            central.setPalette(QPalette())
+            central.setAttribute(Qt.WidgetAttribute.WA_SetPalette, False)
+            central.setAutoFillBackground(False)
+        toolbar = getattr(self, "_toolbar", None)
+        if toolbar is not None and toolbar.styleSheet():
+            toolbar.setStyleSheet("")
+        tabs = getattr(self, "tabs", None)
+        if tabs is not None:
+            if tabs.styleSheet():
+                tabs.setStyleSheet("")
+            if tabs.tabBar().styleSheet():
+                tabs.tabBar().setStyleSheet("")
+        welcome = getattr(self, "welcome", None)
+        if welcome is not None and welcome.styleSheet():
+            welcome.setStyleSheet("")
+        for menu_name in ("file_menu", "fit_menu", "theme_menu"):
+            menu = getattr(self, menu_name, None)
+            if menu is not None and menu.styleSheet():
+                menu.setStyleSheet("")
+        self._preview_toolbar_stylesheet = None
+        self._preview_tab_stylesheet = None
+        self._preview_welcome_stylesheet = None
+
+    def _queue_theme_preview_refresh(self) -> None:
+        timer = getattr(self, "_theme_preview_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(50)
+            timer.timeout.connect(self._refresh_theme_preview_popups)
+            self._theme_preview_timer = timer
+        if not timer.isActive():
+            timer.start()
+
+    def _refresh_theme_preview_popups(self) -> None:
+        for popup in self.popups:
+            if popup.isVisible():
+                popup.refresh_display(self.settings)
+        self._theme_preview_requires_popup_refresh = False
 
     def _on_theme_changed(self, theme: str) -> None:
         if theme not in THEMES:
@@ -3117,9 +3377,11 @@ class MainWindow(QMainWindow):
             self.settings.get("theme", "Dark Slate"),
             self.settings.get("color_scheme", "system"),
         )
-        self.model_readout.setStyleSheet(
+        style = (
             f"color: {colors['text']}; font-size: 13px; font-weight: 600; "
             "background: transparent; border: none;")
+        if self.model_readout.styleSheet() != style:
+            self.model_readout.setStyleSheet(style)
 
     def _model_running_total(self) -> tuple[int, int, int]:
         """(total, prompt, completion) this session has spent on that model."""
@@ -3280,16 +3542,19 @@ class MainWindow(QMainWindow):
         self._chat_panel.apply_theme(colors)
         if isinstance(self._chat_dock, _ChatDockWidget):
             self._chat_dock.set_marker_color(colors["accent_light"])
-        self._chat_title_bar.setStyleSheet(
+        title_bar_style = (
             "QWidget#chatDockTitleBar { "
             f"background-color: {colors['toolbar']}; "
             f"border-bottom: 1px solid {colors['border']}; }}"
         )
+        if self._chat_title_bar.styleSheet() != title_bar_style:
+            self._chat_title_bar.setStyleSheet(title_bar_style)
         title = self._chat_title_bar.findChild(QLabel, "chatDockTitle")
         if title is not None:
-            title.setStyleSheet(
-                f"color: {colors['text']}; font-weight: 600;")
-        self._chat_close_button.setStyleSheet(
+            title_style = f"color: {colors['text']}; font-weight: 600;"
+            if title.styleSheet() != title_style:
+                title.setStyleSheet(title_style)
+        close_button_style = (
             "QToolButton#chatDockCloseButton { "
             f"background-color: {colors['toolbar']}; color: {colors['muted']}; "
             "border: 0; border-radius: 4px; font-size: 18px; padding: 0; }"
@@ -3297,24 +3562,39 @@ class MainWindow(QMainWindow):
             f"background-color: {colors['surface_hover']}; "
             f"color: {colors['text']}; }}"
         )
+        if self._chat_close_button.styleSheet() != close_button_style:
+            self._chat_close_button.setStyleSheet(close_button_style)
 
     def _apply_theme_to_books(self, theme: str) -> None:
-        """Push the active theme colors to every open BookView's thumbnails
-        panel. Requires `BookView.apply_theme(colors: dict)` to exist in
-        reader/bookview.py (it should restyle the thumbs panel/background,
-        thumbnail cards, scrollbars, etc. using the same keys as THEMES)."""
+        """Push active theme colors to every open book view."""
         colors = theme_colors(
             theme, self.settings.get("color_scheme", "system"))
+        if not self.settings.get("pdf_canvas_theme_background", False):
+            colors = dict(colors)
+            colors["canvas"] = "#F1F3F5"
         for book in self._iter_books():
-            if hasattr(book, "apply_theme"):
-                try:
-                    book.apply_theme(colors)
-                except Exception:
-                    pass
+            book.apply_theme(colors)
+
+    def _keep_live_theme_preview(self, settings: dict) -> dict:
+        if not getattr(self, "_theme_preview_active", False):
+            return settings
+
+        from ui.theme import register_user_themes
+
+        merged = dict(settings)
+        preview_keys = (
+            "theme", "color_scheme", "pdf_canvas_theme_background",
+        )
+        for key in preview_keys:
+            if key in self.settings:
+                merged[key] = self.settings[key]
+        merged["user_themes"] = register_user_themes(
+            self.settings.get("user_themes"))
+        return merged
 
     def _reload_settings(self):
         try:
-            cur = load()
+            cur = self._keep_live_theme_preview(load())
             if cur != self.settings:
                 old = self.settings
                 self.settings = cur

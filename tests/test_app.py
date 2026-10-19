@@ -714,9 +714,15 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         )
         self.assertIn("border-radius: 6px", card.styleSheet())
         self.assertIn("indicator:checked", card.styleSheet())
-        self.assertIn("background: #00E676", card.styleSheet())
+        self.assertIn(
+            f"background: {dialog._theme_colors()['success']}",
+            card.styleSheet(),
+        )
         self.assertIn("indicator:unchecked", card.styleSheet())
-        self.assertIn("background: #FF3B30", card.styleSheet())
+        self.assertIn(
+            f"background: {dialog._theme_colors()['warning']}",
+            card.styleSheet(),
+        )
         self.assertTrue(card._cp_enabled.isChecked())
         card._cp_enabled.setChecked(False)
         self.assertFalse(card._cp_enabled.isChecked())
@@ -1014,7 +1020,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         self.assertEqual(
             [button.text() for button in dialog._nav_buttons],
             ["Custom Providers", "API Keys", "Appearance",
-             "Performance", "Application", "Read Aloud / TTS"],
+             "Performance", "Application", "Read Aloud / TTS", "My Theme"],
         )
         self.assertTrue(dialog._page_keys[0].isAncestorOf(dialog.z_model))
         self.assertTrue(
@@ -6622,6 +6628,7 @@ class TestReaderZoom(_GuiCase):
                 panel.list.ScrollMode.ScrollPerPixel)
             self.assertIn(
                 "QScrollBar#pdfThumbnailScrollBar::handle:vertical", style)
+            self.assertIn("background-color: #30363D", style)
             gap = panel.ITEM_GAP
             self.assertGreaterEqual(
                 panel.list.viewport().width() - panel.list.iconSize().width(),
@@ -6814,7 +6821,13 @@ class TestReaderZoom(_GuiCase):
         book = BookView()
         try:
             book.apply_theme(THEMES["Dark Slate"])
-            self.assertIn("#8BE9FD", book.thumbs.styleSheet())
+            self.assertNotIn("#8BE9FD", book.thumbs.styleSheet())
+            self.assertIn(
+                "QListWidget#pdfThumbnails::item:selected, "
+                "QListWidget#pdfBookmarks::item:selected "
+                "{ background-color: transparent;",
+                book.thumbs.styleSheet(),
+            )
             panel.resize(240, 500)
             panel.show()
             for page in range(6):
@@ -7057,8 +7070,9 @@ class TestReaderZoom(_GuiCase):
                     and color.blue() > color.green()
                 )
             )
-            self.assertGreater(
-                cyan_pixels, 0, "current thumbnail should have a translucent cyan tint")
+            self.assertEqual(
+                cyan_pixels, 0,
+                "current thumbnail should not have a translucent cyan tint")
 
             panel.set_bookmarks({1})
             panel.mark_current_position(1, 0.5)
@@ -7799,6 +7813,7 @@ class TestReaderZoom(_GuiCase):
                   "email": "a@b.c", "font_size": 18,
                   "translation_font_arabic": "Georgia",
                   "translation_font_latin": "Times New Roman",
+                  "color_scheme": "dark",
                   "model_instructions": "Preserve technical terms."})
         dlg = SettingsDialog(s)
         try:
@@ -8698,7 +8713,7 @@ class TestReaderZoom(_GuiCase):
                 )
                 self.assertEqual(pop._speed_display.text(), "1.00x")
                 self.assertIn(
-                    "background: #f7f8fa",
+                    "background-color: #f7f8fa",
                     panel.styleSheet(),
                 )
                 self.assertIn(
@@ -8706,7 +8721,7 @@ class TestReaderZoom(_GuiCase):
                     panel.styleSheet(),
                 )
                 self.assertIn(
-                    "QMenu { background: #f7f8fa",
+                    "QMenu { background-color: #f7f8fa",
                     pop.speed_menu.styleSheet(),
                 )
 
@@ -8758,7 +8773,7 @@ class TestReaderZoom(_GuiCase):
 
                 button_style = pop.speed_btn.styleSheet()
                 self.assertIn(
-                    "background-color: #f7f8fa",
+                    "background-color: #f1f3f6",
                     button_style,
                 )
                 self.assertIn(
@@ -9594,7 +9609,7 @@ class TestSession(_GuiCase):
             self.assertGreaterEqual(scrollbar.width(), 18)
             style = app_stylesheet("Dark Slate")
             self.assertIn("QScrollBar#pdfVerticalScrollBar::handle:vertical", style)
-            self.assertIn("background-color: #6366F1", style)
+            self.assertIn("background-color: #30363D", style)
             self.assertIn("min-height: 64px", style)
             self.assertGreater(
                 scrollbar.mapTo(reader, scrollbar.rect().topLeft()).x(),
@@ -10102,6 +10117,8 @@ class TestSession(_GuiCase):
                 load()["open_tabs"][0]["scroll_position"],
                 first.reader.verticalScrollBar().value())
             win._save_session_soon()
+            expected_selection = first._display_rect(
+                1, QRect(12, 24, 160, 30))
             first_scroll_position = first.reader.verticalScrollBar().value()
             first_splitter_sizes = first.splitter.sizes()
             saved_before_close = load()
@@ -10122,15 +10139,12 @@ class TestSession(_GuiCase):
                 saved_before_close["open_tabs"][0]["splitter_sizes"],
                 first_splitter_sizes)
             sel = saved_before_close["open_tabs"][0]["last_selection"]
-            # Points survive a zoom change; pixels would not. QRect.right() and
-            # bottom() are inclusive, hence the -1 in the expected x1/y1.
-            z = first.zoom
             self.assertEqual(sel[0], "pdf")
             self.assertEqual(sel[1], 1)
-            self.assertEqual([round(v, 1) for v in sel[2:]],
-                             [round(12 / z, 1), round(24 / z, 1),
-                              round((12 + 160 - 1) / z, 1),
-                              round((24 + 30 - 1) / z, 1)])
+            self.assertEqual(
+                sel[2:],
+                [round(value, 2) for value in expected_selection],
+            )
             self.assertEqual(saved_before_close["open_tabs"][1]["zoom"], 150)
             self.assertEqual(saved_before_close["open_tabs"][1]["ocr"], "it,en")
             self.assertEqual(
@@ -11491,6 +11505,8 @@ class TestMemoryZoom(_GuiCase):
                 ocr_langs=None,
                 book=book,
                 page_no=0,
+                full_page_translation=True,
+                start_automatic_reading=False,
             )
         finally:
             window.close()
@@ -13934,10 +13950,14 @@ class TestGuideFlow(_GuiCase):
                 "QWidget#chatDockTitleBar",
                 window._chat_title_bar.styleSheet(),
             )
-            self.assertIn(
-                f"background-color: {colors['border']}",
-                panel.styleSheet(),
-            )
+            # The divider under the action buttons used to be the only
+            # thing in the panel painted in the Border colour; it was
+            # removed on request and must stay removed.
+            panel_divider = panel.styleSheet().split(
+                "QSplitter#standaloneChatSplitter::handle:vertical {", 1
+            )[1].split("}", 1)[0]
+            self.assertNotIn(colors["border"], panel_divider)
+            self.assertIn("background-color: transparent", panel_divider)
             self.assertIn(
                 f"background-color: {colors['accent']}",
                 panel.styleSheet(),
@@ -14151,6 +14171,8 @@ class TestGuideFlow(_GuiCase):
                 ocr_langs=(),
                 book=book,
                 page_no=2,
+                full_page_translation=False,
+                start_automatic_reading=False,
             )
             ocr_available.assert_not_called()
         finally:

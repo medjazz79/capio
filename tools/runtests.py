@@ -21,6 +21,7 @@ package must be a real package and not an implicit namespace one.
 """
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,8 @@ os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+SETTINGS_ENV = "HARMONY_TEST_SETTINGS_PATH"
 
 CHILD = r"""
 import os, sys, unittest
@@ -104,6 +107,14 @@ def _isolate_test_methods(names: list[str]) -> list[str]:
     return isolated
 
 
+def isolate_settings() -> pathlib.Path:
+    """Give this test run a disposable settings file and provider store."""
+    directory = pathlib.Path(
+        tempfile.mkdtemp(prefix="harmony-runtests-settings-"))
+    os.environ[SETTINGS_ENV] = str(directory / "settings.json")
+    return directory
+
+
 def targets(argv: list[str]) -> list[str]:
     """Fully-qualified targets.
 
@@ -150,6 +161,7 @@ def main() -> int:
         prefix="harmony-runtests-", suffix=".txt")
     os.close(report_fd)
     os.environ["REPORT"] = report
+    settings_directory = isolate_settings()
     total = failed = 0
     problems: list[str] = []
     for name in targets(sys.argv[1:]):
@@ -203,6 +215,7 @@ def main() -> int:
             print(f"  {p}")
     if os.path.exists(report):
         os.remove(report)
+    shutil.rmtree(settings_directory, ignore_errors=True)
     return 1 if failed else 0
 
 

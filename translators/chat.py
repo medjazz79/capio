@@ -36,7 +36,11 @@ def _model_messages(
     source_name = LANGUAGE_NAMES.get(
         source_language, "the automatically detected source language")
     system = (
-        "You are a helpful tutor for a student reading a music-harmony textbook. "
+        "You are the helpful reading assistant in Capio, a book and document "
+        "reader. The supplied passage is from the book or document the student "
+        "is reading. Answer about its content directly; do not ask which book "
+        "they are reading or whether it is about music. Do not assume the "
+        "passage is about music unless its content makes that clear. "
         f"Reply in {target_name}. Your response MUST use the selected target "
         "language; do not switch to English or another language unless the "
         "student explicitly requests it. Answer the student's questions conversationally "

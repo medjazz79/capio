@@ -19,6 +19,7 @@ from PySide6.QtGui import QIcon, QPixmap, QImage, QPainter, QColor, QPainterPath
 from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QToolButton, QHBoxLayout, QVBoxLayout,
     QStackedWidget, QWidget, QMenu, QStyledItemDelegate, QStyle,
+    QStyleOptionViewItem,
 )
 from ui.context_menu import style_context_menu
 
@@ -100,30 +101,49 @@ def _start_thumbnail_processes(processes) -> None:
 
 
 class _ThumbnailPositionDelegate(QStyledItemDelegate):
-    def paint(self, painter, option, index) -> None:
-        super().paint(painter, option, index)
-        progress = index.data(_VIEW_POSITION_ROLE)
-        if progress is None:
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._border_color = QColor("#30363D")
+
+    def set_border_color(self, color: str) -> None:
+        updated = QColor(color)
+        if updated == self._border_color:
             return
-        widget = option.widget
+        self._border_color = updated
+        widget = self.parent()
+        if isinstance(widget, QListWidget):
+            widget.viewport().update()
+
+    def paint(self, painter, option, index) -> None:
+        style_option = QStyleOptionViewItem(option)
+        self.initStyleOption(style_option, index)
+        super().paint(painter, style_option, index)
+        widget = style_option.widget
         if widget is None:
             return
         icon_rect = widget.style().subElementRect(
-            QStyle.SubElement.SE_ItemViewItemDecoration, option, widget)
+            QStyle.SubElement.SE_ItemViewItemDecoration,
+            style_option,
+            widget,
+        )
         if icon_rect.isEmpty():
             return
 
         painter.save()
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(56, 189, 248, 72))
-        painter.drawRoundedRect(icon_rect.adjusted(-2, -2, 2, 2), 3, 3)
+        progress = index.data(_VIEW_POSITION_ROLE)
+        if progress is not None:
+            marker_y = round(
+                icon_rect.top() + progress * (icon_rect.height() - 1))
+            marker = icon_rect.adjusted(2, 0, -2, 0)
+            painter.setBrush(QColor("#7f1d1d"))
+            painter.drawRect(marker.left(), marker_y - 2, marker.width(), 5)
+            painter.setBrush(QColor("#ef4444"))
+            painter.drawRect(marker.left(), marker_y - 1, marker.width(), 3)
 
-        marker_y = round(icon_rect.top() + progress * (icon_rect.height() - 1))
-        marker = icon_rect.adjusted(2, 0, -2, 0)
-        painter.setBrush(QColor("#7f1d1d"))
-        painter.drawRect(marker.left(), marker_y - 2, marker.width(), 5)
-        painter.setBrush(QColor("#ef4444"))
-        painter.drawRect(marker.left(), marker_y - 1, marker.width(), 3)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(self._border_color)
+        painter.drawRoundedRect(
+            icon_rect.adjusted(0, 0, -1, -1), 6, 6)
         painter.restore()
 
 
@@ -664,6 +684,12 @@ class ThumbPanel(QWidget):
                         item.setIcon(source_item.icon())
             page_list.verticalScrollBar().setSingleStep(grid_size.height())
         self._queue_visible_thumbnails()
+
+    def set_border_color(self, color: str) -> None:
+        for page_list in (self.list, self.bookmarks_list):
+            delegate = page_list.itemDelegate()
+            if isinstance(delegate, _ThumbnailPositionDelegate):
+                delegate.set_border_color(color)
 
     def set_bookmarks(self, pages: set[int]) -> None:
         self._bookmarks = set(pages)

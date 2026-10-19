@@ -1072,15 +1072,51 @@ class BookView(QWidget):
 
     def apply_theme(self, colors: dict[str, str]) -> None:
         background = colors.get("panel", colors.get("window", "#161B22"))
+        canvas = colors.get("canvas", background)
         text = colors.get("text", "#F0F6FC")
         border = colors.get("border", "#30363D")
         surface = colors.get("surface", "#21262D")
         accent = colors.get("accent", "#4F46E5")
         selection = colors.get("selection", "#26354A")
+        scroll = colors.get("scroll", "#30363D")
+        scroll_hover = colors.get("scroll_hover", "#484F58")
         self._apply_source_editor_style()
-        self.thumbs.setStyleSheet(
-            f"QWidget#bookmarkRail {{ background-color: {background}; "
-            f"border-right: 1px solid {border}; }}"
+        viewport_style = f"background-color: {canvas};"
+        if self.reader.viewport().styleSheet() != viewport_style:
+            self.reader.viewport().setStyleSheet(viewport_style)
+        container_style = f"background-color: {background};"
+        if self.reader._container.styleSheet() != container_style:
+            self.reader._container.setStyleSheet(container_style)
+        splitter_style = (
+            # Transparent: the divider is a 1 px grab area, not a line to
+            # look at. The width is untouched so the panes do not move, and
+            # the hover tint still shows it can be dragged.
+            "QSplitter::handle { "
+            "background-color: transparent; width: 1px; }}"
+            "QSplitter::handle:hover { "
+            f"background-color: {colors.get('accent_light', accent)}; }}"
+        )
+        if self.splitter.styleSheet() != splitter_style:
+            self.splitter.setStyleSheet(splitter_style)
+        self.thumbs.set_border_color(border)
+        for scrollbar in (
+            self.reader.verticalScrollBar(),
+            self.thumbs.list.verticalScrollBar(),
+            self.thumbs.bookmarks_list.verticalScrollBar(),
+        ):
+            scrollbar_style = (
+                "QScrollBar:vertical { width: 18px; }"
+                "QScrollBar::handle:vertical { "
+                f"background-color: {scroll}; }}"
+                "QScrollBar::handle:vertical:hover { "
+                f"background-color: {scroll_hover}; }}"
+            )
+            if scrollbar.styleSheet() != scrollbar_style:
+                scrollbar.setStyleSheet(scrollbar_style)
+        thumbs_style = (
+            # No vertical rules here: the rail's right edge and the panel's
+            # right edge were two of the standing lines beside the document.
+            f"QWidget#bookmarkRail {{ background-color: {background}; }}"
             f"QToolButton#bookmarkPageButton, "
             f"QToolButton#myBookmarksButton {{ color: {text}; "
             f"background: transparent; border: 1px solid transparent; "
@@ -1090,8 +1126,7 @@ class BookView(QWidget):
             f"background-color: {surface}; border-color: {border}; }}"
             f"QToolButton#bookmarkPageButton:checked {{ color: {accent}; "
             f"background-color: {selection}; border-color: {accent}; }}"
-            f"QWidget#pdfThumbnailsPanel {{ background-color: {background}; "
-            f"border-right: 1px solid {border}; }}"
+            f"QWidget#pdfThumbnailsPanel {{ background-color: {background}; }}"
             f"QListWidget#pdfThumbnails, QListWidget#pdfBookmarks "
             f"{{ background-color: {background}; "
             f"color: {text}; border: none; }}"
@@ -1100,11 +1135,13 @@ class BookView(QWidget):
             f"{{ background-color: {background}; }}"
             f"QListWidget#pdfThumbnails::item:selected, "
             f"QListWidget#pdfBookmarks::item:selected {{ "
-            f"background-color: #8BE9FD; color: #0D1117; }}"
+            f"background-color: transparent; color: {text}; }}"
         )
+        if self.thumbs.styleSheet() != thumbs_style:
+            self.thumbs.setStyleSheet(thumbs_style)
 
     def _apply_source_editor_style(self) -> None:
-        self.source_editor.setStyleSheet(
+        style = (
             "QTextEdit#sourceTextEditor {"
             " background-color: #FFFFFF; color: #202124;"
             " border: 1px solid #C8CDD3;"
@@ -1114,6 +1151,8 @@ class BookView(QWidget):
             f"font-size: {self._source_editor_font_size}px;"
             " }"
         )
+        if self.source_editor.styleSheet() != style:
+            self.source_editor.setStyleSheet(style)
 
     def session_state(self) -> dict:
         scroll = self.reader.verticalScrollBar()

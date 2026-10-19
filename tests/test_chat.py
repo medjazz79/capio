@@ -154,7 +154,7 @@ class TestTranslationChat(unittest.TestCase):
     def test_standalone_chat_speed_button_and_resizable_composer(self):
         from PySide6.QtCore import QPoint, Qt
         from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QPushButton
+        from PySide6.QtWidgets import QPushButton, QScrollBar
         from ui.chat_panel import ChatPanel
 
         panel = ChatPanel(lambda: {"speech_rate": 1.0})
@@ -173,6 +173,8 @@ class TestTranslationChat(unittest.TestCase):
                 "surface": "#303030",
                 "accent": "#ff8800",
                 "muted": "#aaaaaa",
+                "scroll": "#123456",
+                "scroll_hover": "#234567",
             })
             self.assertIn("font-size: 15px", panel.speed_button.styleSheet())
             self.assertIn(
@@ -191,6 +193,19 @@ class TestTranslationChat(unittest.TestCase):
                 "background-color: #303030",
                 panel.chat_actions_scroll.styleSheet(),
             )
+            self.assertIn(
+                "background: #123456",
+                panel.chat_actions_scroll.styleSheet(),
+            )
+            self.assertIn(
+                "background: #234567",
+                panel.chat_actions_scroll.styleSheet(),
+            )
+            chat_scrollbars = panel.findChildren(QScrollBar)
+            self.assertTrue(chat_scrollbars)
+            for scrollbar in chat_scrollbars:
+                self.assertIn("background: #123456", scrollbar.styleSheet())
+                self.assertIn("background: #234567", scrollbar.styleSheet())
             for button in panel._chat_action_buttons + (panel.send_button,):
                 self.assertTrue(button.isFlat())
                 for corner in (
@@ -1194,6 +1209,9 @@ class TestTranslationChat(unittest.TestCase):
         self.assertIn("Original passage", system_prompt)
         self.assertIn("Current translation", system_prompt)
         self.assertIn("Reply in Arabic", system_prompt)
+        self.assertIn("a book and document reader", system_prompt)
+        self.assertIn("do not ask which book", system_prompt)
+        self.assertNotIn("music-harmony textbook", system_prompt)
 
     def test_popup_instructions_are_included_in_chat_system_prompt(self):
         from translators import chat
