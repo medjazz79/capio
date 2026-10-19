@@ -439,3 +439,112 @@ class TestThemePresets(unittest.TestCase):
             )
         finally:
             book.close()
+
+
+class SettingsMenusWearTheirOwnThemeTest(unittest.TestCase):
+    """Every menu in Settings must wear the theme it belongs to.
+
+    A light reset (`#FFFFFF` / `#1B1F27`) once slipped into the dialog's popup
+    rules, and because a widget's own stylesheet beats the app-wide
+    `QComboBox QAbstractItemView { @panel@ }` rule (main.py), every dropdown in
+    Settings -- the model list in the report -- painted a light panel inside a
+    dark theme. The popup rules must keep taking their colours from the theme.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import shutil
+
+        import config.settings as settings_module
+
+        scratch = Path(tempfile.mkdtemp(prefix="harmony-menus-"))
+        self.addCleanup(shutil.rmtree, scratch, True)
+        patcher = mock.patch("config.settings.SETTINGS_PATH",
+                             scratch / "settings.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        settings_module.save({
+            "theme": "Dark Slate",
+            "color_scheme": "dark",
+            "font_size": 17,
+        })
+
+    def _dialog(self):
+        """A Settings window opened the way the app opens it: from a live
+        MainWindow, so the app-wide stylesheet is in force too."""
+        from main import MainWindow
+        from ui.settings_dialog import SettingsDialog
+
+        window = MainWindow()
+        self.addCleanup(window.close)
+        settings = dict(window.settings)
+        settings["custom_providers"] = [{
+            "id": "custom-test", "name": "Gemini",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "test", "model": "models/example",
+            "enabled": True, "reasoning_enabled": False,
+            "vision_enabled": False,
+        }]
+        dialog = SettingsDialog(settings, window)
+        self.addCleanup(dialog.close)
+        dialog.show()
+        self.app.processEvents()
+        return dialog
+
+    def _popup_colours(self, combo):
+        from PySide6.QtGui import QPalette
+
+        combo.addItems(["vendor/one-model", "vendor/two-model"])
+        combo.showPopup()
+        self.app.processEvents()
+        self.app.processEvents()
+        view = combo.view()
+        image = view.window().grab().toImage()
+        # The current row is painted with the selection colour; ask about an
+        # ordinary row, which is the popup's own background.
+        row = view.visualRect(combo.model().index(combo.count() - 1, 0))
+        painted = image.pixelColor(
+            row.left() + 6, row.center().y()).name().upper()
+        text = view.palette().color(QPalette.ColorRole.Text).name().upper()
+        combo.hidePopup()
+        return painted, text
+
+    def test_the_model_picker_popup_paints_the_theme_colours(self):
+        from PySide6.QtWidgets import QComboBox
+        from ui.theme import theme_colors
+
+        colors = theme_colors("Dark Slate", "dark")
+        dialog = self._dialog()
+        combo = dialog.findChild(QComboBox, "customProviderModelPicker")
+        self.assertIsNotNone(combo, "the provider model picker is missing")
+
+        painted, text = self._popup_colours(combo)
+
+        self.assertEqual(
+            painted, colors["panel"].upper(),
+            "the model popup painted outside the theme it belongs to")
+        self.assertEqual(
+            text, colors["text"].upper(),
+            "the model popup text colour is not the theme's")
+
+    def test_a_plain_settings_combo_popup_paints_the_theme_colours(self):
+        """Every dropdown in the dialog, not just the delegated model list."""
+        from PySide6.QtWidgets import QComboBox
+        from ui.theme import theme_colors
+
+        colors = theme_colors("Dark Slate", "dark")
+        dialog = self._dialog()
+        combo = QComboBox(dialog)
+        combo.setObjectName("plainProbeCombo")
+        combo.move(10, 10)
+
+        painted, text = self._popup_colours(combo)
+
+        self.assertEqual(painted, colors["panel"].upper())
+        self.assertEqual(text, colors["text"].upper())
