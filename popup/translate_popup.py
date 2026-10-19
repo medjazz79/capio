@@ -105,6 +105,9 @@ _BLOCK_START_LINE = re.compile(
     r"(?:\*{3,}|-{3,}|_{3,})[ \t]*$|\|)"
 )
 _SETEXT_UNDERLINE = re.compile(r"^[ \t]{0,3}(?:=+|-{3,})[ \t]*$")
+# Markdown folds any run of blank lines into one paragraph break; a plain-text
+# preview keeps each blank line as its own block.
+_BLANK_LINE_RUN = re.compile(r"\n(?:[ \t]*\n){2,}")
 
 
 def reflow_wrapped_prose(markdown: str, *, hold_trailing: bool = False) -> str:
@@ -1036,8 +1039,9 @@ class TranslatePopup(QDialog):
         match the rendered result.
         """
         if not self._reflows_wrapped_prose():
-            return text
-        return reflow_wrapped_prose(text, hold_trailing=True)
+            return _BLANK_LINE_RUN.sub("\n\n", text)
+        reflowed = reflow_wrapped_prose(text, hold_trailing=True)
+        return _BLANK_LINE_RUN.sub("\n\n", reflowed)
 
     def _reflows_wrapped_prose(self) -> bool:
         """Report whether prose soft breaks are reflowed for this target."""

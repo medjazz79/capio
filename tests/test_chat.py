@@ -983,6 +983,58 @@ class TestTranslationChat(unittest.TestCase):
         finally:
             popup.close()
 
+    def test_streamed_preview_keeps_the_rendered_paragraph_spacing(self):
+        """A plain-text preview must not open gaps the render collapses.
+
+        Translation models sometimes separate blocks with more than one blank
+        line. Markdown folds any run of blank lines into a single paragraph
+        break, but ``setPlainText`` keeps each one as its own block, so the
+        preview showed twice the gap the finished document shows.
+        """
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        text = (
+            "على بطنها، وكان فخذها الأيمن يحمل أثر كدمة.\n\n\n"
+            "### تخفيفات الشرطة\n\n"
+            "وحدّثت الشرطة مزيداً من الأدلة."
+        )
+        popup = TranslatePopup(
+            dict(DEFAULTS, target_language="ar"), source_text=None)
+        self.addCleanup(popup.close)
+        popup.resize(1100, 800)
+        popup.show()
+        self.app.processEvents()
+        popup.result.setFixedWidth(1000)
+
+        def heading_gap():
+            document = popup.result.document()
+            document.setTextWidth(1000)
+            block = document.begin()
+            previous_bottom = None
+            while block.isValid():
+                rect = document.documentLayout().blockBoundingRect(block)
+                if "تخفيفات" in block.text() and previous_bottom is not None:
+                    return round(rect.top() - previous_bottom, 1)
+                if block.text().strip():
+                    previous_bottom = rect.top() + rect.height()
+                block = block.next()
+            return None
+
+        popup._append_streamed_partial(text)
+        streamed_gap = heading_gap()
+        popup._render_markdown(text)
+        rendered_gap = heading_gap()
+
+        self.assertIsNotNone(streamed_gap)
+        self.assertIsNotNone(rendered_gap)
+        self.assertAlmostEqual(
+            streamed_gap, rendered_gap, delta=1.0,
+            msg=(
+                f"the streamed preview leaves {streamed_gap} px before the "
+                f"heading while the rendered document leaves "
+                f"{rendered_gap} px"))
+
     def test_streamed_preview_reflows_arabic_wrapped_prose(self):
         from config.settings import DEFAULTS
         from popup.translate_popup import TranslatePopup
