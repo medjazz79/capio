@@ -40,6 +40,7 @@ from popup.speech_worker import (
     ARABIC_VOICE,
     DEFAULT_SPEECH_RATE,
     SpeechWorker,
+    learn_latin_pairs,
     normalize_speed,
     python_to_qt_position,
     qt_to_python_position,
@@ -1197,6 +1198,10 @@ class ChatPanel(QWidget):
             # words there leaves nothing to synthesize, so the click on a user
             # message looked dead next to a working model reply.
             read_latin_words = True
+        latin_only = (
+            bool(settings.get("speech_latin_only", False))
+            and response_language.casefold().split("-", 1)[0] == "ar"
+        )
         worker = SpeechWorker(
             self._speech_text,
             self,
@@ -1208,6 +1213,9 @@ class ChatPanel(QWidget):
             fast=bool(settings.get("fast_mode", True)),
             stream_audio=False,
             read_latin_words=read_latin_words,
+            latin_only=latin_only,
+            glossary=(
+                learn_latin_pairs(self._speech_text) if latin_only else None),
             engine=engine,
             gemini_api_key=api_key,
             gemini_voice=str(settings.get("gemini_tts_voice") or "Kore"),

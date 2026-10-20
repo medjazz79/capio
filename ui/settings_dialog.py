@@ -2097,13 +2097,39 @@ class SettingsDialog(QDialog):
         form.addRow("Automatic Voice", self.automatic_speech_voice)
 
         self.speech_read_latin_words = QCheckBox(
-            "Read Latin-script words in Arabic translations")
+            "Read both, Latin-script and Arabic")
         self.speech_read_latin_words.setChecked(
             bool(settings.get("speech_read_latin_words", False)))
         self.speech_read_latin_words.setToolTip(
             "Include English, French, and other Latin-script words mixed "
             "into Arabic speech, using the selected voice.")
         form.addRow("Latin Words", self.speech_read_latin_words)
+
+        self.speech_latin_only = QCheckBox(
+            "Read only Latin words and skip arabic")
+        self.speech_latin_only.setChecked(
+            bool(settings.get("speech_latin_only", False)))
+        self.speech_latin_only.setToolTip(
+            "When a name is written in Arabic with its Latin original in "
+            "parentheses (or in quotes before it), read the foreign words in "
+            "Latin and keep genuine Arabic words in Arabic, with the highlight "
+            "on the Arabic. A parenthetical that is a full Arabic translation "
+            "is skipped. Names learned while a book is open are reused until "
+            "it closes, even when the Latin original is not repeated.")
+        form.addRow("Latin Words", self.speech_latin_only)
+
+        def _only_one_latin_choice(checked: bool, other: QCheckBox) -> None:
+            if checked and other.isChecked():
+                other.setChecked(False)
+
+        self.speech_read_latin_words.toggled.connect(
+            lambda checked: _only_one_latin_choice(
+                checked, self.speech_latin_only))
+        self.speech_latin_only.toggled.connect(
+            lambda checked: _only_one_latin_choice(
+                checked, self.speech_read_latin_words))
+        if self.speech_latin_only.isChecked():
+            self.speech_read_latin_words.setChecked(False)
 
         self.prefetch_next_page_translation = QCheckBox(
             "Translate the next page while reading")
@@ -4730,6 +4756,7 @@ class SettingsDialog(QDialog):
             "speech_read_latin_words": (
                 self.speech_read_latin_words.isChecked()
             ),
+            "speech_latin_only": self.speech_latin_only.isChecked(),
             "prefetch_next_page_translation": (
                 self.prefetch_next_page_translation.isChecked()
             ),

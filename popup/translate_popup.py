@@ -56,7 +56,8 @@ from translators.prompt import LANGUAGE_CHOICES
 from .speech_worker import (
     ARABIC_VOICE, DEFAULT_SPEECH_RATE, GEMINI_TTS_ENGINE,
     MAX_SPEECH_RATE, MIN_SPEECH_RATE, SpeechWorker, VoiceListWorker,
-    _cache_key, _speech_text_for_synthesis, normalize_speed,
+    _cache_key, normalize_speed,
+    build_latin_only_speech, latin_only_click_offset, learn_latin_pairs,
     python_to_qt_position, qt_to_python_position,
     snap_speed_to_quarter, speech_available, speech_missing_message,
     speech_start_offset,
@@ -326,10 +327,13 @@ class TranslatePopup(QDialog):
                  language_change_callback: (
                      Callable[[str, str, TranslatePopup], None] | None
                  ) = None,
-                 full_page_translation: bool = False):
+                 full_page_translation: bool = False,
+                 speech_glossary: dict[str, str] | None = None):
         super().__init__(parent, Qt.WindowType.Tool)
         self._settings = settings
         self.settings = settings
+        self._speech_glossary: dict[str, str] = (
+            speech_glossary if speech_glossary is not None else {})
         self._worker: TranslateWorker | None = None
         self._translation_workers: list[TranslateWorker] = []
         self._chat_workers: list[ChatWorker] = []
@@ -1207,6 +1211,7 @@ class TranslatePopup(QDialog):
                     "speech_rate_arabic",
                     "speech_rate_other",
                     "speech_read_latin_words",
+                    "speech_latin_only",
                     "speech_voice",
                     "target_language",
                     "translation_font",
@@ -1767,6 +1772,9 @@ class TranslatePopup(QDialog):
     def _on_done(self, translated_text: str, badge: str) -> None:
         self.spin.hide()
         self._translation_text = translated_text
+        # Every finished translation teaches the open book's names, even when
+        # the reader only looks at the page and never presses Read aloud.
+        self._learn_speech_glossary(translated_text)
         self._translation_needs_render = bool(translated_text)
         self.chat_send_btn.setEnabled(
             bool(translated_text.strip()) and self._chat_worker is None)
@@ -3233,8 +3241,7 @@ class TranslatePopup(QDialog):
             return False
         segment = probe._segments[0]
         spans = probe._segment_word_spans[0]
-        synthesis_text = _speech_text_for_synthesis(
-            segment, kwargs["target_language"])
+        synthesis_text = probe._synthesis_text(segment)
         voice = probe._segment_voices[0]
         key = _cache_key(
             synthesis_text,
@@ -3368,6 +3375,27 @@ class TranslatePopup(QDialog):
 
         self._begin_speech(start_offset)
 
+    def _latin_only_enabled(self) -> bool:
+        return (
+            bool(self.settings.get("speech_latin_only", False))
+            and str(self.settings.get("target_language", "ar"))
+            .casefold().split("-", 1)[0] == "ar"
+        )
+
+    def set_speech_glossary(self, glossary: dict[str, str] | None) -> None:
+        """Share the open book's glossary; the popup updates it in place."""
+        self._speech_glossary = glossary if glossary is not None else {}
+
+    def _learn_speech_glossary(self, text: str) -> None:
+        if not text or not self._latin_only_enabled():
+            return
+        learned = learn_latin_pairs(text)
+        if learned:
+            self._speech_glossary.update(learned)
+
+    def _latin_only_speech(self, text: str):
+        return build_latin_only_speech(text, self._speech_glossary)
+
     def _speech_worker_kwargs(self, text: str, source_offset: int) -> dict:
         """Keyword arguments both speech workers are built from.
 
@@ -3375,6 +3403,7 @@ class TranslatePopup(QDialog):
         synthesis request, or the prefetch fills a cache entry the read never
         looks up. One builder keeps them in lockstep.
         """
+        latin_only = self._latin_only_enabled()
         return {
             "rate": DEFAULT_SPEECH_RATE,
             "source_offset": source_offset,
@@ -3386,6 +3415,8 @@ class TranslatePopup(QDialog):
             "read_latin_words": bool(
                 self.settings.get("speech_read_latin_words", False)
             ),
+            "latin_only": latin_only,
+            "glossary": dict(self._speech_glossary) if latin_only else None,
             "fast": bool(self.settings.get("fast_mode", True)),
             "engine": self._speech_engine,
             "gemini_api_key": str(self.settings.get("gemini_key") or ""),
@@ -3423,8 +3454,7 @@ class TranslatePopup(QDialog):
             return False
         segment = probe._segments[0]
         spans = probe._segment_word_spans[0]
-        synthesis_text = _speech_text_for_synthesis(
-            segment, kwargs["target_language"])
+        synthesis_text = probe._synthesis_text(segment)
         voice = probe._segment_voices[0]
         key = _cache_key(
             synthesis_text,
@@ -3524,6 +3554,9 @@ class TranslatePopup(QDialog):
                 self._speech_trace.mark("speech_empty_input")
             self._speech_active = False
             return
+        if self._latin_only_enabled():
+            self._learn_speech_glossary(text)
+            start_offset = latin_only_click_offset(text, start_offset)
         text = text[start_offset:]
         leading_whitespace = len(text) - len(text.lstrip())
         text = text.lstrip()
@@ -3653,6 +3686,7 @@ class TranslatePopup(QDialog):
         text = raw.lstrip()
         if not text or len(text) > SPEECH_PREFETCH_MAX_CHARS:
             return
+        self._learn_speech_glossary(raw)
         source_offset = len(raw) - len(text)
         self._start_speech_prefetch_text(text, source_offset)
 
@@ -3679,6 +3713,7 @@ class TranslatePopup(QDialog):
         text = self._speech_text_from_document(document).lstrip()
         if not text or len(text) > SPEECH_PREFETCH_MAX_CHARS:
             return
+        self._learn_speech_glossary(text)
         self._start_speech_prefetch_text(text, 0)
 
     def _start_speech_prefetch_text(
@@ -3691,6 +3726,8 @@ class TranslatePopup(QDialog):
             kwargs["automatic_voice"],
             kwargs["target_language"],
             kwargs["read_latin_words"],
+            kwargs["latin_only"],
+            tuple(sorted((kwargs["glossary"] or {}).items())),
         )
         if key == self._speech_prefetch_key:
             return

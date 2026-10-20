@@ -2891,6 +2891,17 @@ class MainWindow(QMainWindow):
             raise ValueError(f"Unsupported OCR source language: {source_language}")
         return hints
 
+    @staticmethod
+    def _speech_glossary_for(book: BookView | None) -> dict[str, str] | None:
+        """One speech glossary per open book; popups share it by reference."""
+        if book is None:
+            return None
+        glossary = getattr(book, "speech_glossary", None)
+        if glossary is None:
+            glossary = {}
+            book.speech_glossary = glossary
+        return glossary
+
     def _show_popup(self, text: str | None = None, pil_image=None,
                     ocr_langs=("ru", "en"), book: BookView | None = None,
                     page_no: int | None = None,
@@ -2906,6 +2917,7 @@ class MainWindow(QMainWindow):
             floating_language_controls=True,
             language_change_callback=self._on_popup_languages_changed,
             full_page_translation=full_page_translation,
+            speech_glossary=self._speech_glossary_for(book),
         )
         popup.explanationRequested.connect(
             lambda style, selected_text, source_popup=popup:
@@ -2979,7 +2991,8 @@ class MainWindow(QMainWindow):
         "explain_mode", "explain_instructions",
         "speech_engine", "speech_rate", "speech_rate_arabic",
         "speech_rate_other", "speech_voice", "gemini_tts_voice",
-        "speech_read_latin_words", "automatic_speech_voice", "gemini_key",
+        "speech_read_latin_words", "speech_latin_only",
+        "automatic_speech_voice", "gemini_key",
     )
 
     @staticmethod

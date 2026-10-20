@@ -5,6 +5,7 @@ import asyncio
 import base64
 import binascii
 from contextvars import ContextVar
+import difflib
 import hashlib
 import json
 import math
@@ -14,7 +15,7 @@ import tempfile
 import time
 import unicodedata
 from pathlib import Path
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 import requests
 
@@ -591,6 +592,8 @@ class SpeechWorker(QThread):
         engine: str = "edge",
         gemini_api_key: str = "",
         gemini_voice: str = "Kore",
+        latin_only: bool = False,
+        glossary: dict[str, str] | None = None,
     ):
         super().__init__(parent)
         continuous = bool(continuous_stream and engine == "edge")
@@ -606,6 +609,8 @@ class SpeechWorker(QThread):
             read_latin_words=read_latin_words,
             first_chunk_length=FIRST_CHUNK_LENGTH,
             continuous=continuous,
+            latin_only=latin_only,
+            glossary=dict(glossary or {}),
         )
         self._source_text = text
         self._source_offset = source_offset
@@ -623,7 +628,12 @@ class SpeechWorker(QThread):
         self._gemini_voice = gemini_voice
         self._target_language = target_language
         self._read_latin_words = bool(read_latin_words)
+        self._latin_only = bool(latin_only)
         self._automatic_voice = bool(automatic_voice)
+        self._foreign_pauses = (
+            str(target_language or "").casefold().split("-", 1)[0] == "ar"
+            and (self._latin_only or self._read_latin_words)
+        )
         self._output_paths: list[Path] = []
         self._rate = rate_string(rate)
         # fast=False: classic behavior — no disk cache, strictly sequential.
@@ -891,6 +901,18 @@ class SpeechWorker(QThread):
             if self._trace is not None:
                 self._trace.mark("continuous_stream_finished")
 
+    def _synthesis_text(self, text: str) -> str:
+        """The exact text sent to the voice for one segment.
+
+        The prefetch and the cache probes must call this too, or they hash a
+        different request from the one the reader will play.
+        """
+        synthesis_text = _speech_text_for_synthesis(
+            text, self._target_language)
+        if self._foreign_pauses:
+            synthesis_text = _with_foreign_pauses(synthesis_text)
+        return synthesis_text
+
     async def _make_segment(
         self,
         index: int,
@@ -903,8 +925,7 @@ class SpeechWorker(QThread):
         """Synthesize one segment, cache its audio, and map word boundaries."""
         segment_started_ns = time.perf_counter_ns()
         text = self._segments[index]
-        synthesis_text = _speech_text_for_synthesis(
-            text, self._target_language)
+        synthesis_text = self._synthesis_text(text)
         voice = (
             self._gemini_voice
             if self._engine == GEMINI_TTS_ENGINE
@@ -1306,8 +1327,14 @@ def _segment_word_spans(
     text: str,
     segments: list[str],
     source_words: list[tuple[int, int]] | None = None,
+    source_tokens: list[str] | None = None,
 ) -> list[list[tuple[int, int]]]:
-    """Map normalized speech segments back to word ranges in the displayed text."""
+    """Map normalized speech segments back to word ranges in the displayed text.
+
+    ``source_tokens`` lets a caller supply the *spoken* word for each source
+    range when the display text and the synthesis text differ (a foreign name
+    is spoken in Latin where the display shows its Arabic transliteration).
+    """
     if source_words is None:
         source_words = _speech_source_word_spans(text)
     next_source_word = 0
@@ -1320,7 +1347,22 @@ def _segment_word_spans(
             if next_source_word >= len(source_words):
                 continue
             source_start, source_end = source_words[next_source_word]
-            source_token = text[source_start:source_end].casefold()
+            source_token = (
+                source_tokens[next_source_word].casefold()
+                if source_tokens is not None
+                else text[source_start:source_end].casefold()
+            )
+            if source_tokens is not None:
+                planned = _normalize_boundary_token(source_token)
+                spoken = _normalize_boundary_token(token)
+                if not planned or not spoken or not (
+                    planned.startswith(spoken) or spoken.startswith(planned)
+                ):
+                    continue
+                spans.append((source_start, source_end))
+                next_source_word += 1
+                partial_word_offset = 0
+                continue
             token_start = partial_word_offset
             if not source_token[token_start:].startswith(token):
                 continue
@@ -1336,6 +1378,584 @@ def _segment_word_spans(
     return result
 
 
+class LatinOnlySpeech(NamedTuple):
+    """Speech text built from a display text, plus its highlight map.
+
+    ``words`` are word spans inside ``text``; ``display_spans`` holds the
+    matching span in the original display text for each spoken word. A spoken
+    foreign name points at the Arabic words it replaces, so the highlight stays
+    on the Arabic while the voice says the Latin name.
+    """
+
+    text: str
+    words: list[tuple[int, int]]
+    display_spans: list[tuple[int, int]]
+    learned: dict[str, str]
+
+
+_LATIN_PAIR_RE = re.compile(r"[\(\[]\s*([^\(\)\[\]]{1,120}?)\s*[\)\]]")
+_ARABIC_MARK_RE = re.compile(
+    r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed\u0640]")
+_ARABIC_LETTER_RE = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]")
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
+# Bidirectional and zero-width controls carry no sound. Translation models
+# often put them around a Latin name inside Arabic text; they must not split
+# the pair or reach the voice.
+_INVISIBLE_SPEECH_RE = re.compile(
+    r"[\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+_PAIR_GAP_RE = re.compile(
+    r"[\s،,«»\"'“”‘’„‟‹›「」『』"
+    r"\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]*")
+_LATIN_QUOTE_CHARACTERS = "\"'«»“”‘’„‟‹›「」『』"
+_MAX_PAIR_WORDS = 6
+
+# One Arabic letter or diacritic: the edge of a word that touches Latin.
+# Arabic punctuation lives in the same Unicode block, so exclude it.
+_ARABIC_SEAM = (
+    r"(?![،؛؟٪-٬۔])"
+    r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff"
+    r"\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed]"
+)
+_FOREIGN_SEAM_START_RE = re.compile(
+    rf"({_ARABIC_SEAM})(\s*)(?=[A-Za-z\u00c0-\u00d6\u00d8-\u00f6"
+    rf"\u00f8-\u024f\u1e00-\u1eff])")
+_FOREIGN_SEAM_END_RE = re.compile(
+    rf"(?<=[A-Za-z0-9\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f"
+    rf"\u1e00-\u1eff'’])(\s*)({_ARABIC_SEAM})")
+_LATIN_SEAM_LETTER_RE = re.compile(
+    r"[A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f\u1e00-\u1eff]")
+
+
+def _with_foreign_pauses(text: str) -> str:
+    """Add a comma after an inline Latin run before Arabic resumes.
+
+    A multilingual voice slides from Arabic into an inline Latin name and
+    clips the name's final word. A comma after the name lengthens it, but it
+    also inserts an audible stop after every foreign phrase. That stop is kept
+    because it makes the name intelligible and the text reads better. No comma
+    is added before the name, at paragraph edges, or beside real punctuation.
+    The displayed text and the word/highlight map never change, and
+    punctuation does not create words, so word indices stay identical.
+    """
+    text = _INVISIBLE_SPEECH_RE.sub("", text)
+    # Emphasis and quote markers carry no sound; keep them out of the seam so
+    # ``*Jess Haskins*`` gets the same space as the plain name.
+    text = re.sub(r"[*_\"“”‘’«»]", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    if (
+        not _ARABIC_LETTER_RE.search(text)
+        or not _LATIN_SEAM_LETTER_RE.search(text)
+    ):
+        return text
+    # A plain space before the Latin run: the voice must enter the name
+    # without a pause. The comma belongs after the run, where it ends the
+    # foreign phrase before Arabic resumes.
+    text = _FOREIGN_SEAM_START_RE.sub(r"\1 ", text)
+    text = _FOREIGN_SEAM_END_RE.sub(r"، \2", text)
+    text = re.sub(r"[ \t]*،[ \t]*", "، ", text)
+    return text.strip()
+
+# Arabic words that describe the name instead of transliterating it. They stay
+# in Arabic: ``شمال كارولاينا (North Carolina)`` keeps ``شمال`` audible.
+_ARABIC_NAME_STOP_WORDS = frozenset({
+    "في", "من", "إلى", "الى", "على", "عن", "مع", "ثم", "و", "أو", "او",
+    "أن", "ان", "إن", "كان", "كانت", "هذا", "هذه", "ذلك", "تلك", "كل",
+    "بعد", "قبل", "بين", "حتى", "قد", "لا", "ما", "هو", "هي", "هم",
+    "كما", "لكن", "حيث", "عند", "لدى", "شمال", "جنوب", "شرق", "غرب",
+    "وسط", "ضد", "حول", "خلال", "دون", "سوى", "نحو", "منذ", "مدينة",
+})
+
+
+def _normalize_arabic_phrase(text: str) -> str:
+    """Stable key for the same name with or without its diacritics."""
+    text = _ARABIC_MARK_RE.sub("", text)
+    for source, replacement in (
+        ("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه"),
+    ):
+        text = text.replace(source, replacement)
+    return " ".join(text.split())
+
+
+_NORMALIZED_NAME_STOP_WORDS = frozenset(
+    _normalize_arabic_phrase(word) for word in _ARABIC_NAME_STOP_WORDS)
+
+# Month, weekday and calendar-unit names are Arabic calendar words, never the
+# foreign name behind a parenthetical. Once a book glossary learned
+# ``يناير -> January`` it read every later date in English, even where no
+# parenthetical remained.
+_ARABIC_CALENDAR_WORDS = frozenset({
+    "يناير", "فبراير", "مارس", "أبريل", "ابريل", "مايو", "يونيو",
+    "يوليو", "أغسطس", "اغسطس", "سبتمبر", "أكتوبر", "اكتوبر",
+    "نوفمبر", "ديسمبر",
+    "كانون", "كانون الأول", "كانون الثاني", "شباط", "آذار", "نيسان",
+    "أيار", "حزيران", "تموز", "آب", "أيلول", "تشرين",
+    "تشرين الأول", "تشرين الثاني",
+    "الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة",
+    "السبت",
+    "شهر", "الشهر", "شهور", "أشهر", "يوم", "اليوم", "أيام",
+    "سنة", "السنة", "سنوات", "عام", "العام", "أعوام",
+    "أسبوع", "الأسبوع", "أسبوعين", "أسابيع",
+})
+_NORMALIZED_CALENDAR_WORDS = frozenset(
+    _normalize_arabic_phrase(word) for word in _ARABIC_CALENDAR_WORDS)
+
+
+def _contains_calendar_word(key: str) -> bool:
+    """True when a learned phrase is or includes a month/weekday name."""
+    if key in _NORMALIZED_CALENDAR_WORDS:
+        return True
+    return any(
+        word in _NORMALIZED_CALENDAR_WORDS for word in key.split())
+
+_ARABIC_PHONETIC_MAP = {
+    "ا": "a", "أ": "a", "إ": "e", "آ": "a", "ء": "", "ؤ": "", "ئ": "",
+    "ى": "a", "ة": "h", "ب": "b", "ت": "t", "ث": "th", "ج": "j",
+    "ح": "h", "خ": "kh", "د": "d", "ذ": "dh", "ر": "r", "ز": "s",
+    "س": "s", "ش": "sh", "ص": "s", "ض": "d", "ط": "t", "ظ": "dh",
+    "ع": "", "غ": "gh", "ف": "f", "ق": "q", "ك": "k", "ل": "l",
+    "م": "m", "ن": "n", "ه": "h", "و": "w", "ي": "y",
+}
+_FOREIGN_MATCH_THRESHOLD = 0.72
+
+
+def _phonetic_key(text: str) -> str:
+    """Consonant skeleton shared by an Arabic transliteration and its original.
+
+    ``غْرَيْهَاوُنْد`` and ``Greyhound`` both reduce to ``GRHND``, while
+    ``حَافِلَات`` (``HFLT``) stays far from ``Bus`` (``BS``), so the reader can
+    keep genuine Arabic words and pronounce the foreign ones.
+    """
+    mapped = "".join(
+        _ARABIC_PHONETIC_MAP.get(character, character)
+        for character in _ARABIC_MARK_RE.sub("", text).casefold()
+    )
+    mapped = unicodedata.normalize("NFKD", mapped)
+    mapped = "".join(
+        character for character in mapped if character.isalpha())
+    for source, replacement in (
+        ("ph", "f"), ("gh", "g"), ("kh", "k"), ("sh", "s"), ("ch", "s"),
+        ("th", "t"), ("dh", "d"), ("ck", "k"), ("qu", "k"),
+        ("ci", "si"), ("ce", "se"), ("cy", "sy"),
+        ("q", "k"), ("c", "k"), ("x", "ks"), ("j", "g"),
+        ("v", "f"), ("p", "b"), ("z", "s"),
+        ("w", ""), ("y", ""),
+        ("a", ""), ("e", ""), ("i", ""), ("o", ""), ("u", ""),
+    ):
+        mapped = mapped.replace(source, replacement)
+    mapped = "".join(
+        character for character in mapped if character.isalpha())
+    collapsed: list[str] = []
+    for character in mapped:
+        if not collapsed or collapsed[-1] != character:
+            collapsed.append(character)
+    return "".join(collapsed).upper()
+
+
+def _looks_like_arabic_derivation(word: str) -> bool:
+    """True for a genuine Arabic word built with Arabic morphology.
+
+    ``الفِدْرَالِيّ`` shares its consonants with ``Federal`` because it is a
+    loanword, but the article plus the nisba ending mark it as a translated
+    adjective: it must stay Arabic, and its parenthetical must not be read.
+    """
+    word = _normalize_arabic_phrase(word)
+    if not word:
+        return False
+    if word.endswith("يه"):
+        return True
+    return word.startswith("ال") and word.endswith("ي")
+
+
+def _word_match_score(arabic_key: str, latin_key: str) -> float:
+    """Similarity of two consonant skeletons, exact for one-letter names."""
+    if len(arabic_key) < 2 or len(latin_key) < 2:
+        return 1.0 if arabic_key == latin_key else 0.0
+    return difflib.SequenceMatcher(None, arabic_key, latin_key).ratio()
+
+
+def _match_pair_words(
+    text: str,
+    arabic_words: list[tuple[int, int]],
+    latin: str,
+) -> list[tuple[tuple[int, int], str]]:
+    """Pair each Arabic word with the Latin word it transliterates."""
+    latin_spans = _speech_source_word_spans(latin)
+    latin_keys = [_phonetic_key(latin[start:end]) for start, end in latin_spans]
+    candidates: list[tuple[float, int, int]] = []
+    for arabic_index, (start, end) in enumerate(arabic_words):
+        if _looks_like_arabic_derivation(text[start:end]):
+            continue
+        arabic_key = _phonetic_key(text[start:end])
+        if not arabic_key:
+            continue
+        for latin_index, latin_key in enumerate(latin_keys):
+            if not latin_key:
+                continue
+            score = _word_match_score(arabic_key, latin_key)
+            if score >= _FOREIGN_MATCH_THRESHOLD:
+                candidates.append((score, arabic_index, latin_index))
+    candidates.sort(reverse=True)
+    used_arabic: set[int] = set()
+    used_latin: set[int] = set()
+    matched: list[tuple[tuple[int, int], str]] = []
+    for _score, arabic_index, latin_index in candidates:
+        if arabic_index in used_arabic or latin_index in used_latin:
+            continue
+        used_arabic.add(arabic_index)
+        used_latin.add(latin_index)
+        latin_start, latin_end = latin_spans[latin_index]
+        matched.append((
+            arabic_words[arabic_index], latin[latin_start:latin_end]))
+    matched.sort()
+    return matched
+
+
+def _is_attached_waw_conjunction(text: str, latin: str) -> bool:
+    """True for an Arabic ``و`` that joins a Latin name, not a W name.
+
+    ``وَجُو دِنِيس (Joe Denis)`` starts with the conjunction ``و``, while
+    ``وُودْلُون (Woodlawn)`` starts with the name's own W. The Latin spelling
+    disambiguates: a W name must keep its Arabic W. The helper is only used
+    when a name is already being replaced, so a false positive cannot turn a
+    genuine Arabic word into ``and``.
+    """
+    words = text.split(None, 1)
+    if not words:
+        return False
+    key = _normalize_arabic_phrase(words[0])
+    if len(key) < 2 or key[0] != "و" or key[1] == "و":
+        return False
+    return not latin.lstrip().casefold().startswith(("w", "and "))
+
+
+def _without_attached_waw(key: str, latin: str) -> str | None:
+    """Return the name key without a joining waw, or None for a W name."""
+    if _is_attached_waw_conjunction(key, latin):
+        return key[1:]
+    return None
+
+
+def _with_attached_and(text: str, latin: str) -> str:
+    """Speak a joining Arabic waw as English ``and`` before a Latin name."""
+    if _is_attached_waw_conjunction(text, latin):
+        return "and " + latin
+    return latin
+
+
+def _pair_learning(
+    text: str,
+    pair: tuple[int, int, str, int, int],
+    words: list[tuple[int, int]],
+) -> tuple[dict[str, str], bool]:
+    """Learn the foreign words of one pair; report whether it is whole.
+
+    A whole pair (every Arabic word transliterates a Latin word) is learned
+    as one phrase and read entirely in Latin. A mixed pair such as
+    ``محطة حافلات غريهاوند`` keeps its Arabic words and learns only
+    ``غريهاوند -> Greyhound``. A pair with no phonetic match is a genuine
+    translation: every Arabic word stays and the parenthetical is dropped.
+    """
+    start, end, latin, _open, _close = pair
+    arabic_words = [
+        (word_start, word_end)
+        for word_start, word_end in words
+        if word_start >= start and word_end <= end
+    ]
+    matches = _match_pair_words(text, arabic_words, latin)
+    learned: dict[str, str] = {}
+    for (word_start, word_end), latin_word in matches:
+        key = _normalize_arabic_phrase(text[word_start:word_end])
+        latin_word = _normalize_latin_speech_text(latin_word)
+        if (
+            len(key) < 2
+            or key in _NORMALIZED_NAME_STOP_WORDS
+            or _contains_calendar_word(key)
+        ):
+            continue
+        learned[key] = latin_word
+        without_waw = _without_attached_waw(key, latin_word)
+        if without_waw:
+            learned[without_waw] = latin_word
+    whole = bool(matches) and len(matches) == len(arabic_words)
+    if whole:
+        key = _normalize_arabic_phrase(text[start:end])
+        latin = _normalize_latin_speech_text(latin)
+        if _contains_calendar_word(key):
+            whole = False
+        elif key:
+            learned[key] = latin
+            without_waw = _without_attached_waw(key, latin)
+            if without_waw:
+                learned[without_waw] = latin
+    return learned, whole
+
+
+def _span_inside_pairs(
+    start: int, end: int, pair_spans: list[tuple[int, int]],
+) -> bool:
+    """A learned word may sit inside a pair, but never straddle its edge."""
+    for pair_start, pair_end in pair_spans:
+        if start < pair_end and end > pair_start:
+            return start >= pair_start and end <= pair_end
+    return True
+
+
+def _foreign_pairs(
+    text: str,
+) -> list[tuple[int, int, str, int, int]]:
+    """Find ``Arabic transliteration (Latin original)`` pairs.
+
+    Returns ``(arabic_start, arabic_end, latin_text, paren_start, paren_end)``.
+    Up to as many Arabic words are claimed as the Latin phrase has words, so
+    ``مدينة هنتنغتون بيتش (Huntington Beach)`` keeps ``مدينة`` in Arabic; a
+    descriptive word such as ``شمال`` also stays Arabic.
+    """
+    words = _speech_source_word_spans(text)
+    pairs: list[tuple[int, int, str, int, int]] = []
+    claimed: set[int] = set()
+    for match in _LATIN_PAIR_RE.finditer(text):
+        latin = _INVISIBLE_SPEECH_RE.sub("", match.group(1))
+        latin = latin.strip().strip(_LATIN_QUOTE_CHARACTERS).strip()
+        if not _LATIN_LETTER_RE.search(latin):
+            continue
+        if _ARABIC_LETTER_RE.search(latin):
+            continue
+        latin_words = _speech_source_word_spans(latin)
+        if not 1 <= len(latin_words) <= _MAX_PAIR_WORDS:
+            continue
+        if any(
+            not _LATIN_LETTER_RE.search(latin[start:end])
+            for start, end in latin_words
+        ):
+            continue
+        before = [
+            index for index, (_, end) in enumerate(words)
+            if end <= match.start()
+        ]
+        if not before:
+            continue
+        last = before[-1]
+        if last in claimed:
+            continue
+        first = last
+        collected = 0
+        while first >= 0 and collected < len(latin_words):
+            start, end = words[first]
+            word = _normalize_arabic_phrase(text[start:end])
+            if word in _NORMALIZED_NAME_STOP_WORDS:
+                break
+            first -= 1
+            collected += 1
+        first += 1
+        if collected < 1:
+            continue
+        chosen = words[first:last + 1]
+        if any(index in claimed for index in range(first, last + 1)):
+            continue
+        if not _PAIR_GAP_RE.fullmatch(text[chosen[-1][1]:match.start()]):
+            continue
+        if any(
+            not _ARABIC_LETTER_RE.search(text[start:end])
+            for start, end in chosen
+        ):
+            continue
+        if any(
+            _LATIN_LETTER_RE.search(text[start:end])
+            for start, end in chosen
+        ):
+            continue
+        pairs.append((
+            chosen[0][0], chosen[-1][1], latin,
+            match.start(), match.end(),
+        ))
+        claimed.update(range(first, last + 1))
+    return pairs
+
+
+def learn_latin_pairs(text: str) -> dict[str, str]:
+    """Learn the foreign name behind each Arabic transliteration in ``text``."""
+    words = _speech_source_word_spans(text)
+    learned: dict[str, str] = {}
+    for pair in _foreign_pairs(text):
+        pair_learned, _whole = _pair_learning(text, pair, words)
+        learned.update(pair_learned)
+    return learned
+
+
+def build_latin_only_speech(
+    text: str,
+    glossary: dict[str, str] | None = None,
+) -> LatinOnlySpeech:
+    """Read each foreign word in Latin and keep genuine Arabic words.
+
+    A word written in Arabic that matches the Latin original phonetically is
+    spoken in Latin; a genuine Arabic word next to it (``حافلات``, ``مدينة``)
+    stays Arabic. Parentheticals that pair with the preceding Arabic name are
+    dropped from the speech text and from the highlight, and names learned
+    from the book glossary are replaced on every later occurrence.
+    """
+    glossary = dict(glossary or {})
+    words = _speech_source_word_spans(text)
+    pairs = _foreign_pairs(text)
+    learned: dict[str, str] = {}
+    replacements: dict[int, tuple[int, str]] = {}
+    pair_spans: list[tuple[int, int]] = []
+    deleted: list[tuple[int, int]] = []
+    for pair in pairs:
+        start, end, latin, open_paren, close_paren = pair
+        pair_learned, whole = _pair_learning(text, pair, words)
+        learned.update(pair_learned)
+        if whole:
+            replacements[start] = (
+                end,
+                _with_attached_and(
+                    text[start:end],
+                    _normalize_latin_speech_text(latin),
+                ),
+            )
+        pair_spans.append((start, end))
+        deleted.append((open_paren, close_paren))
+
+    known = {
+        key: _normalize_latin_speech_text(value)
+        for key, value in {**glossary, **learned}.items()
+        if not _contains_calendar_word(key)
+    }
+    max_words = max((len(key.split()) for key in known), default=0)
+    if known and words:
+        index = 0
+        while index < len(words):
+            word_start, word_end = words[index]
+            if any(
+                word_start < close and word_end > open
+                for open, close in deleted
+            ):
+                index += 1
+                continue
+            match: tuple[int, int, str, int] | None = None
+            for count in range(min(max_words, len(words) - index), 0, -1):
+                start = words[index][0]
+                end = words[index + count - 1][1]
+                if any(start < close and end > open for open, close in deleted):
+                    continue
+                candidate = _normalize_arabic_phrase(text[start:end])
+                if candidate in known:
+                    match = (start, end, known[candidate], count)
+                    break
+            if match is None:
+                index += 1
+                continue
+            start, end, latin, count = match
+            if not _span_inside_pairs(start, end, pair_spans):
+                index += 1
+                continue
+            replacements.setdefault(
+                start,
+                (end, _with_attached_and(text[start:end], latin)),
+            )
+            index += count
+
+    characters: list[str] = []
+    display_of: list[int] = []
+    source_of: list[tuple[int, int] | None] = []
+    deletions = sorted(set(deleted))
+    delete_index = 0
+    cursor = 0
+    while cursor < len(text):
+        if (
+            delete_index < len(deletions)
+            and cursor >= deletions[delete_index][1]
+        ):
+            delete_index += 1
+            continue
+        if (
+            delete_index < len(deletions)
+            and deletions[delete_index][0] <= cursor < deletions[delete_index][1]
+        ):
+            cursor = deletions[delete_index][1]
+            continue
+        replacement = replacements.get(cursor)
+        if replacement is not None:
+            end, latin = replacement
+            if characters and (
+                characters[-1].isalnum()
+                or unicodedata.category(characters[-1]).startswith("M")
+            ):
+                characters.append(" ")
+                display_of.append(cursor)
+                source_of.append(None)
+            for character in latin:
+                characters.append(character)
+                display_of.append(cursor)
+                source_of.append((cursor, end))
+            cursor = end
+            # A following word must not be glued to the Latin name. Look past
+            # the parenthetical being deleted: ``هاسكينز(Jess Haskins)ملاحظات``
+            # must become ``Jess Haskins ملاحظات``, not one giant token.
+            probe = cursor
+            while True:
+                containing = next(
+                    (close for open_, close in deletions
+                     if open_ <= probe < close),
+                    None,
+                )
+                if containing is None:
+                    break
+                probe = containing
+            if (
+                probe < len(text)
+                and not text[probe].isspace()
+                and not unicodedata.category(text[probe]).startswith(("P", "S"))
+            ):
+                characters.append(" ")
+                display_of.append(cursor)
+                source_of.append(None)
+            continue
+        character = text[cursor]
+        if character.isspace() and characters and characters[-1].isspace():
+            cursor += 1
+            continue
+        characters.append(character)
+        display_of.append(cursor)
+        source_of.append(None)
+        cursor += 1
+
+    trim_start = 0
+    while trim_start < len(characters) and characters[trim_start].isspace():
+        trim_start += 1
+    trim_end = len(characters)
+    while trim_end > trim_start and characters[trim_end - 1].isspace():
+        trim_end -= 1
+    characters = characters[trim_start:trim_end]
+    display_of = display_of[trim_start:trim_end]
+    source_of = source_of[trim_start:trim_end]
+
+    speech = "".join(characters)
+    speech_words = _speech_source_word_spans(speech)
+    display_spans: list[tuple[int, int]] = []
+    for word_start, word_end in speech_words:
+        starts: list[int] = []
+        ends: list[int] = []
+        for position in range(word_start, word_end):
+            source = source_of[position]
+            if source is None:
+                starts.append(display_of[position])
+                ends.append(display_of[position] + 1)
+            else:
+                starts.append(source[0])
+                ends.append(source[1])
+        display_spans.append((min(starts), max(ends)))
+    return LatinOnlySpeech(speech, speech_words, display_spans, learned)
+
+
+def latin_only_click_offset(text: str, position: int) -> int:
+    """Start reading at the Arabic name when its Latin gloss is clicked."""
+    for start, _end, _latin, open_paren, close_paren in _foreign_pairs(text):
+        if open_paren <= position < close_paren:
+            return start
+    return position
+
+
 def _speech_segments_with_voices(
     text: str,
     selected_voice: str,
@@ -1345,6 +1965,8 @@ def _speech_segments_with_voices(
     first_chunk_length: int = FIRST_CHUNK_LENGTH,
     read_latin_words: bool = False,
     continuous: bool = False,
+    latin_only: bool = False,
+    glossary: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str], list[list[tuple[int, int]]]]:
     """Split speech into script runs and retain each segment's source spans.
 
@@ -1370,8 +1992,32 @@ def _speech_segments_with_voices(
             _segment_word_spans(text, segments),
         )
 
+    is_arabic_target = (
+        target_language.casefold().split("-", 1)[0] == "ar")
+    if is_arabic_target and latin_only:
+        plan = build_latin_only_speech(text, glossary)
+        synthesis_text = plan.text
+        if continuous:
+            segments = _split_continuous_speech_text(synthesis_text)
+        else:
+            segments = split_speech_text(
+                synthesis_text, first_chunk_length=first_chunk_length)
+        segment_spans = _segment_word_spans(
+            synthesis_text,
+            segments,
+            source_words=plan.display_spans,
+            source_tokens=[
+                synthesis_text[start:end] for start, end in plan.words
+            ],
+        )
+        voice = (
+            AUTOMATIC_SPEECH_VOICES.get(target_language, selected_voice)
+            if automatic_voice else selected_voice
+        )
+        return segments, [voice] * len(segments), segment_spans
+
     skip_latin = (
-        target_language.casefold().split("-", 1)[0] == "ar"
+        is_arabic_target
         and not read_latin_words
     )
     if (

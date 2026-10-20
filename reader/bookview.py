@@ -56,6 +56,7 @@ class BookView(QWidget):
         self.title = "Untitled"
         self.ocr_langs = ocr_langs
         self.pinned = False
+        self.speech_glossary: dict[str, str] = {}
         self.last_selection: tuple[int, QRect] | None = None
         self.bookmarked_pages: set[int] = set()
         self.pending_page: int | None = None

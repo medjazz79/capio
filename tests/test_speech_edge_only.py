@@ -616,7 +616,7 @@ class TestSpeechSynthesis(unittest.TestCase):
 
         self.assertEqual(
             [text.strip() for text, _voice in FakeCommunicate.calls],
-            ["مرحبا hello بك"],
+            ["مرحبا hello، بك"],
         )
         self.assertEqual(
             [voice for _text, voice in FakeCommunicate.calls],
