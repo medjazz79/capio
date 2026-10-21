@@ -206,6 +206,69 @@ class TestHandOffKeepsHighlight(unittest.TestCase):
             popup._speech_waiting,
             "the popup must know it is between segments")
 
+    def test_finished_segment_starts_the_next_ready_segment(self):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        popup = self._popup("first second")
+        popup._speech_active = True
+        popup._speech_index = 0
+        popup._speech_paths = {0: "seg0.mp3", 1: "seg1.mp3"}
+        popup._speech_worker = mock.MagicMock()
+        popup._speech_worker.isRunning.return_value = True
+
+        with mock.patch.object(popup, "_play_ready_speech_segment") as play:
+            popup._on_media_status_changed(
+                QMediaPlayer.MediaStatus.EndOfMedia)
+
+        self.assertEqual(popup._speech_index, 1)
+        self.assertFalse(popup._speech_waiting)
+        play.assert_called_once_with(1)
+
+    def test_segment_stream_end_advances_without_resolving_full_read(self):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        popup = self._popup("first second")
+        popup._speech_active = True
+        popup._speech_index = 0
+        popup._speech_playing_stream_index = 0
+        popup._speech_playing_continuous_stream = False
+        popup._speech_stream_urls[1] = "http://127.0.0.1/next"
+        popup._speech_worker = mock.MagicMock()
+        popup._speech_worker.isRunning.return_value = True
+
+        with (
+            mock.patch.object(popup, "_play_ready_speech_segment") as play,
+            mock.patch.object(
+                popup, "_resolve_continuous_stream_end") as resolve,
+        ):
+            popup._on_media_status_changed(
+                QMediaPlayer.MediaStatus.EndOfMedia)
+
+        self.assertEqual(popup._speech_index, 1)
+        self.assertFalse(popup._speech_stream_end_pending)
+        play.assert_called_once_with(1)
+        resolve.assert_not_called()
+
+    def test_ready_segment_stream_starts_after_the_previous_segment_ends(self):
+        popup = self._popup("first second")
+        popup._speech_active = True
+        popup._speech_index = 1
+        popup._speech_waiting = True
+        popup._speech_worker = mock.MagicMock()
+        popup._speech_worker._continuous_stream = False
+
+        with mock.patch.object(popup, "_play_speech_source") as play:
+            popup._on_speech_stream_ready(
+                1, "http://127.0.0.1/next-segment")
+
+        self.assertEqual(
+            popup._speech_stream_urls[1],
+            "http://127.0.0.1/next-segment",
+        )
+        self.assertEqual(popup._speech_playing_stream_index, 1)
+        self.assertFalse(popup._speech_playing_continuous_stream)
+        play.assert_called_once()
+
     def test_continuous_stream_end_waits_for_worker_instead_of_advancing_segment(self):
         from PySide6.QtMultimedia import QMediaPlayer
 
@@ -213,6 +276,7 @@ class TestHandOffKeepsHighlight(unittest.TestCase):
         popup._speech_active = True
         popup._speech_index = 0
         popup._speech_playing_stream_index = 0
+        popup._speech_playing_continuous_stream = True
         popup._speech_worker = mock.MagicMock()
         popup._speech_worker.isRunning.return_value = True
 

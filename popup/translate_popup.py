@@ -391,6 +391,7 @@ class TranslatePopup(QDialog):
         self._stale_speech_paths: list[str] = []
         self._speech_stream_urls: dict[int, str] = {}
         self._speech_playing_stream_index: int | None = None
+        self._speech_playing_continuous_stream = False
         self._speech_boundaries: dict[int, list[tuple[int, int, int, int]]] = {}
         self._speech_index = 0
         self._pending_player_position_ms: int | None = None
@@ -1045,6 +1046,7 @@ class TranslatePopup(QDialog):
         self._speech_boundaries.clear()
         self._speech_stream_urls.clear()
         self._speech_playing_stream_index = None
+        self._speech_playing_continuous_stream = False
         self._pending_player_position_ms = None
         self._pending_player_source = None
         self._speech_highlight_timer.stop()
@@ -3277,6 +3279,7 @@ class TranslatePopup(QDialog):
             self._close_speech_stream_server()
             self._speech_stream_urls.clear()
             self._speech_playing_stream_index = None
+            self._speech_playing_continuous_stream = False
             self._clear_speech_highlight()
             self._player.stop()
             self._pending_player_position_ms = None
@@ -3696,6 +3699,7 @@ class TranslatePopup(QDialog):
         self._speech_index = 0
         self._speech_stream_urls.clear()
         self._speech_playing_stream_index = None
+        self._speech_playing_continuous_stream = False
         self._speech_boundaries.clear()
         self._speech_stream_end_pending = False
         self._speech_expected_end_offset = None
@@ -3783,7 +3787,7 @@ class TranslatePopup(QDialog):
             **kwargs,
             stream_server=stream_server,
             continuous_stream=True,
-            stream_audio=False,
+            stream_audio=True,
             trace=self._speech_trace,
         )
         self._speech_expected_end_offset = (
@@ -4010,6 +4014,10 @@ class TranslatePopup(QDialog):
         stream_url = self._speech_stream_urls.get(index)
         if stream_url is not None:
             self._speech_playing_stream_index = index
+            self._speech_playing_continuous_stream = bool(
+                self._speech_worker is not None
+                and getattr(self._speech_worker, "_continuous_stream", False)
+            )
             self._play_speech_source(QUrl(stream_url))
         else:
             path = self._speech_paths.get(index)
@@ -4018,6 +4026,7 @@ class TranslatePopup(QDialog):
 
     def _play_speech_segment(self, path: str, position_ms: int = 0) -> None:
         self._speech_playing_stream_index = None
+        self._speech_playing_continuous_stream = False
         self._play_speech_source(QUrl.fromLocalFile(path), position_ms)
 
     def _play_speech_source(self, source: QUrl, position_ms: int = 0) -> None:
@@ -4476,7 +4485,10 @@ class TranslatePopup(QDialog):
             self._player.play()
         if not self._speech_active or status != QMediaPlayer.MediaStatus.EndOfMedia:
             return
-        if self._speech_playing_stream_index is not None:
+        if (
+            self._speech_playing_stream_index is not None
+            and self._speech_playing_continuous_stream
+        ):
             self._speech_stream_end_pending = True
             if self._speech_trace is not None:
                 self._speech_trace.mark(
@@ -4492,6 +4504,8 @@ class TranslatePopup(QDialog):
                 self.spin.setText("Checking speech playback…")
                 self.spin.show()
             return
+        self._speech_playing_stream_index = None
+        self._speech_playing_continuous_stream = False
         self._speech_index += 1
         if (
             self._speech_index in self._speech_paths
@@ -4556,6 +4570,7 @@ class TranslatePopup(QDialog):
         self._speech_boundaries_finalized = False
         self._speech_stream_urls.clear()
         self._speech_playing_stream_index = None
+        self._speech_playing_continuous_stream = False
         self._speech_boundaries.clear()
         self._pending_highlight = None
         self._clear_speech_highlight()

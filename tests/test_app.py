@@ -8049,7 +8049,7 @@ class TestReaderZoom(_GuiCase):
                 speech_worker.call_args.kwargs["read_latin_words"])
             self.assertIs(
                 speech_worker.call_args.kwargs["stream_server"], stream_server)
-            self.assertFalse(speech_worker.call_args.kwargs["stream_audio"])
+            self.assertTrue(speech_worker.call_args.kwargs["stream_audio"])
             worker.segment_stream_ready.connect.assert_called_once_with(
                 popup._on_speech_stream_ready)
         finally:

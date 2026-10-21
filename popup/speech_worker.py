@@ -135,13 +135,10 @@ EDGE_TTS_PREFERRED_LANGUAGE_CODES = frozenset(
     {"ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "pt", "ru", "zh"}
 )
 SPEECH_RATE = "+15%"
-# Classic segmented playback keeps only the first request short for a quick
-# start. Continuous playback instead uses one synthesis request per read: a
-# length-based boundary restarts Edge prosody and MP3 framing audibly, even
-# when the player itself never changes source.
+# Classic playback keeps only the first request short for a quick start.
+# Continuous reads bound long requests while preserving sentence punctuation.
 FIRST_CHUNK_LENGTH = 90
-# Retained for compatibility; continuous playback no longer cuts a short first
-# synthesis request because that boundary itself was audible.
+# Retained for compatibility with callers that used a longer first chunk.
 CONTINUOUS_FIRST_CHUNK_LENGTH = 240
 MAX_CHUNK_LENGTH = 1200
 MAX_PARALLEL_SEGMENTS = 3
@@ -493,18 +490,11 @@ def split_speech_text(
 
 
 def _split_continuous_speech_text(text: str) -> list[str]:
-    """Normalize one read without introducing a synthesis boundary.
-
-    Continuous playback keeps a single Edge TTS request so prosody and MP3
-    framing do not restart in the middle of a phrase. Word wrapping is
-    disabled by giving the whole normalized passage as its own limit; Edge
-    itself streams the first audio long before the complete response arrives.
-    """
-    whole_text_length = max(1, len(text))
+    """Normalize a read into bounded requests while preserving punctuation."""
     return split_speech_text(
         text,
-        max_length=whole_text_length,
-        first_chunk_length=whole_text_length,
+        max_length=MAX_CHUNK_LENGTH,
+        first_chunk_length=MAX_CHUNK_LENGTH,
         preserve_sentence_punctuation=True,
     )
 
@@ -685,7 +675,7 @@ class SpeechWorker(QThread):
         self._stream_server = stream_server
         self._owns_stream_server = stream_server is None
         self._stream_audio = bool(stream_audio)
-        self._continuous_stream = continuous
+        self._continuous_stream = continuous and len(self._segments) == 1
         self._prefetch_only = prefetch_only
         self._trace = trace
         self._event_loop: asyncio.AbstractEventLoop | None = None

@@ -931,22 +931,24 @@ class TestSpeechSynthesis(unittest.TestCase):
         finally:
             worker.cleanup_output()
 
-    @requires_loopback
-    def test_continuous_playback_streams_segments_in_one_ordered_track(self):
-        import threading
-        from urllib.request import urlopen
+    def test_continuous_playback_delivers_long_audio_segments_in_order(self):
         from PySide6.QtCore import Qt
-        from popup.audio_stream import AudioStreamServer
 
         class FakeCommunicate:
             requests = []
+            next_index = 0
 
             def __init__(self, text, *_args, **_kwargs):
                 self.text = text
+                self.index = type(self).next_index
+                type(self).next_index += 1
                 type(self).requests.append(text)
 
             async def stream(self):
-                yield {"type": "audio", "data": b"x" * 48_000}
+                yield {
+                    "type": "audio",
+                    "data": bytes([self.index % 256]) * 48_000,
+                }
                 yield {
                     "type": "WordBoundary",
                     "offset": 0,
@@ -955,40 +957,21 @@ class TestSpeechSynthesis(unittest.TestCase):
                 }
 
         text = "مرحبا بالعالم " * 120
-        stream_server = AudioStreamServer()
         worker = speech_worker.SpeechWorker(
             text,
             fast=False,
-            stream_server=stream_server,
             continuous_stream=True,
             stream_audio=False,
         )
-        stream_urls = []
-        boundary_events = []
-        received_audio = bytearray()
-        stream_errors = []
-        consumer_threads = []
-
-        def consume_stream(url):
-            try:
-                with urlopen(url, timeout=5) as response:
-                    received_audio.extend(response.read())
-            except Exception as error:
-                stream_errors.append(error)
-
-        def start_consumer(index, url):
-            stream_urls.append((index, url))
-            consumer = threading.Thread(
-                target=consume_stream, args=(url,), daemon=True)
-            consumer_threads.append(consumer)
-            consumer.start()
-
-        worker.segment_stream_ready.connect(
-            start_consumer,
+        ready_segments = []
+        boundary_segments = []
+        worker.segment_ready.connect(
+            lambda index, path: ready_segments.append(
+                (index, Path(path).read_bytes())),
             Qt.ConnectionType.DirectConnection,
         )
-        worker.word_boundary_ready.connect(
-            lambda index, boundary: boundary_events.append((index, boundary)),
+        worker.word_boundaries.connect(
+            lambda index, _boundaries: boundary_segments.append(index),
             Qt.ConnectionType.DirectConnection,
         )
 
@@ -997,37 +980,112 @@ class TestSpeechSynthesis(unittest.TestCase):
             type("Edge", (), {"Communicate": FakeCommunicate}),
         ):
             FakeCommunicate.requests = []
+            FakeCommunicate.next_index = 0
             worker.start()
             self.assertTrue(worker.wait(5000))
 
         try:
-            for consumer in consumer_threads:
-                consumer.join(5)
-            self.assertEqual(len(worker._segments), 1)
+            self.assertGreater(len(worker._segments), 1)
+            self.assertFalse(worker._continuous_stream)
+            self.assertTrue(all(
+                len(segment) <= speech_worker.MAX_CHUNK_LENGTH
+                for segment in worker._segments
+            ))
             self.assertEqual(FakeCommunicate.requests, worker._segments)
-            self.assertEqual(len(stream_urls), 1)
-            self.assertEqual(stream_urls[0][0], 0)
-            self.assertTrue(
-                stream_urls[0][1].startswith("http://127.0.0.1:"))
-            self.assertTrue(all(not thread.is_alive()
-                                for thread in consumer_threads))
-            self.assertEqual(stream_errors, [])
             self.assertEqual(
-                received_audio, b"x" * 48_000 * len(worker._segments))
-            self.assertEqual(
-                [index for index, _boundary in boundary_events],
-                [0] * len(worker._segments),
+                [index for index, _audio in ready_segments],
+                list(range(len(worker._segments))),
             )
             self.assertEqual(
-                [boundary[0] for _index, boundary in boundary_events],
+                [audio for _index, audio in ready_segments],
                 [
-                    80_000_000 * index
+                    bytes([index % 256]) * 48_000
                     for index in range(len(worker._segments))
                 ],
             )
+            self.assertEqual(boundary_segments, list(range(len(worker._segments))))
         finally:
-            stream_server.close()
             worker.cleanup_output()
+
+    def test_long_continuous_read_streams_each_segment(self):
+        from PySide6.QtCore import Qt
+
+        class FakeStreamServer:
+            def __init__(self):
+                self.streams = {}
+                self.finished = set()
+                self.next_id = 0
+
+            def create_stream(self):
+                token = str(self.next_id)
+                self.next_id += 1
+                self.streams[token] = bytearray()
+                return token, f"http://127.0.0.1/{token}"
+
+            def write(self, token, audio):
+                self.streams[token].extend(audio)
+
+            def finish(self, token):
+                self.finished.add(token)
+
+        class FakeCommunicate:
+            next_index = 0
+
+            def __init__(self, text, *_args, **_kwargs):
+                self.text = text
+                self.index = type(self).next_index
+                type(self).next_index += 1
+
+            async def stream(self):
+                yield {
+                    "type": "audio",
+                    "data": bytes([self.index + 1]) * 1024,
+                }
+                yield {
+                    "type": "WordBoundary",
+                    "offset": 0,
+                    "duration": 1_000_000,
+                    "text": self.text.split()[0],
+                }
+
+        stream_server = FakeStreamServer()
+        worker = speech_worker.SpeechWorker(
+            "مرحبا بالعالم " * 120,
+            fast=False,
+            stream_server=stream_server,
+            continuous_stream=True,
+            stream_audio=True,
+        )
+        stream_urls = []
+        worker.segment_stream_ready.connect(
+            lambda index, url: stream_urls.append((index, url)),
+            Qt.ConnectionType.DirectConnection,
+        )
+
+        with mock.patch(
+            "popup.speech_worker.edge_tts",
+            type("Edge", (), {"Communicate": FakeCommunicate}),
+        ):
+            FakeCommunicate.next_index = 0
+            worker.start()
+            self.assertTrue(worker.wait(5000))
+
+        self.assertGreater(len(worker._segments), 1)
+        self.assertFalse(worker._continuous_stream)
+        self.assertEqual(
+            [index for index, _url in stream_urls],
+            list(range(len(worker._segments))),
+        )
+        self.assertEqual(
+            list(stream_server.streams.values()),
+            [bytearray([index + 1]) * 1024
+             for index in range(len(worker._segments))],
+        )
+        self.assertEqual(
+            stream_server.finished,
+            {str(index) for index in range(len(worker._segments))},
+        )
+        worker.cleanup_output()
 
     def test_continuous_playback_prefetches_without_reordering_audio(self):
         import asyncio
@@ -1125,7 +1183,7 @@ class TestSpeechSynthesis(unittest.TestCase):
                            speech_worker.FIRST_CHUNK_LENGTH)
         self.assertGreater(len(classic_worker._segments), 1)
 
-    def test_continuous_playback_uses_one_request_for_long_text(self):
+    def test_continuous_playback_bounds_long_synthesis_segments(self):
         text = "هذه جملة قصيرة. " + "كلمة " * 400
         worker = speech_worker.SpeechWorker(
             text,
@@ -1135,13 +1193,35 @@ class TestSpeechSynthesis(unittest.TestCase):
             fast=False,
         )
 
-        self.assertEqual(len(worker._segments), 1)
-        self.assertGreater(
-            len(worker._segments[0]),
-            speech_worker.MAX_CHUNK_LENGTH,
+        self.assertGreater(len(worker._segments), 1)
+        self.assertFalse(worker._continuous_stream)
+        self.assertTrue(all(
+            len(segment) <= speech_worker.MAX_CHUNK_LENGTH
+            for segment in worker._segments
+        ))
+        spoken_words = [
+            text[start:end]
+            for spans in worker._segment_word_spans
+            for start, end in spans
+        ]
+        source_words = [
+            text[start:end]
+            for start, end in speech_worker._speech_source_word_spans(text)
+        ]
+        self.assertEqual(spoken_words, source_words)
+
+    def test_short_continuous_read_keeps_one_stream(self):
+        worker = speech_worker.SpeechWorker(
+            "مرحبا بالعالم. كيف حالك؟",
+            target_language="ar",
+            continuous_stream=True,
+            fast=False,
         )
 
-    def test_continuous_playback_streams_cached_segments_in_order(self):
+        self.assertEqual(len(worker._segments), 1)
+        self.assertTrue(worker._continuous_stream)
+
+    def test_continuous_playback_streams_cached_audio_in_order(self):
         class FakeStreamServer:
             def __init__(self):
                 self.audio = bytearray()
@@ -1156,7 +1236,7 @@ class TestSpeechSynthesis(unittest.TestCase):
             def finish(self, _token):
                 self.finished = True
 
-        text = "مرحبا بالعالم " * 130
+        text = "مرحبا بالعالم " * 20
         stream_server = FakeStreamServer()
         worker = speech_worker.SpeechWorker(
             text,
@@ -1167,8 +1247,9 @@ class TestSpeechSynthesis(unittest.TestCase):
         )
         cached_audio = b"cached-frame" * 4_000
         boundaries = []
-        worker.word_boundary_ready.connect(
-            lambda index, boundary: boundaries.append((index, boundary)))
+        worker.word_boundaries.connect(
+            lambda index, segment_boundaries:
+                boundaries.append((index, segment_boundaries)))
 
         def cached_segment(_key):
             return cached_audio, [(0, 1_000_000, 0, 1)]
@@ -1186,11 +1267,12 @@ class TestSpeechSynthesis(unittest.TestCase):
         self.assertEqual([index for index, _ in boundaries],
                          [0] * len(worker._segments))
         self.assertEqual(
-            [boundary[0] for _index, boundary in boundaries],
             [
-                (len(cached_audio) * 8 * 10_000_000 // 48_000) * index
-                for index in range(len(worker._segments))
+                boundary[0]
+                for _index, segment_boundaries in boundaries
+                for boundary in segment_boundaries
             ],
+            [0],
         )
         self.assertTrue(stream_server.finished)
 
