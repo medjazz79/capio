@@ -40,12 +40,29 @@ import os, sys, unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 name = sys.argv[1]
 rep = open(os.environ["REPORT"], "w", encoding="utf-8")
+import faulthandler
+faulthandler.dump_traceback_later(45, file=rep)
 suite = unittest.defaultTestLoader.loadTestsFromName(name)
 res = unittest.TextTestRunner(verbosity=0, stream=rep).run(suite)
+faulthandler.cancel_dump_traceback_later()
 rep.write("RUN %d FAILED %d\n" % (res.testsRun, len(res.failures) + len(res.errors)))
+rep.write("SKIPPED %d\n" % len(res.skipped))
 for t, _ in res.failures + res.errors:
     rep.write("FAILNAME " + t.id() + "\n")
 rep.close()
+# ExitProcess (also used by os._exit on Windows) can deadlock in Qt/FFmpeg's
+# DLL detach after tests already wrote their result. This disposable child
+# needs no native teardown. Reap only its own spawned PDF workers first.
+import multiprocessing
+for child in multiprocessing.active_children():
+    child.terminate()
+    child.join(timeout=1)
+if sys.platform == "win32":
+    import ctypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    kernel.TerminateProcess(kernel.GetCurrentProcess(), 0)
 import os as _o; _o._exit(0)
 """
 
@@ -71,6 +88,7 @@ MODULES = tuple(
 )
 
 ISOLATED_TEST_CLASSES = {
+    "tests.test_app.TestOnlyWorkingModelsAreOffered",
     "tests.test_app.TestReaderZoom",
     "tests.test_app.TestMemoryZoom",
 }
@@ -162,29 +180,47 @@ def main() -> int:
     os.close(report_fd)
     os.environ["REPORT"] = report
     settings_directory = isolate_settings()
-    total = failed = 0
+    total = failed = skipped = 0
     problems: list[str] = []
     for name in targets(sys.argv[1:]):
-        if os.path.exists(report):
+        try:
             os.remove(report)
+        except OSError:
+            pass
+        report_fd, report = tempfile.mkstemp(prefix="harmony-runtests-", suffix=".txt")
+        os.close(report_fd)
+        os.environ["REPORT"] = report
         # The app's RotatingFileHandler cannot rotate while a previous run still
         # holds the file, so it floods stderr with "Logging error" blocks. They
         # are not test failures; discard them so a real error stays visible.
-        completed = subprocess.run([sys.executable, "-c", CHILD, name],
-                                   check=False,
-                                   stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL)
+        try:
+            completed = subprocess.run([sys.executable, "-c", CHILD, name],
+                                       check=False, timeout=60,
+                                       stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            print(f"{name.split('.')[-1]:>34}: TIMEOUT (60s)", flush=True)
+            try:
+                print(pathlib.Path(report).read_text(encoding="utf-8")[-5000:], flush=True)
+            except OSError:
+                pass
+            failed += 1
+            problems.append(f"{name} (timeout)")
+            continue
         text = ""
         if os.path.exists(report):
             with open(report, encoding="utf-8") as fh:
                 text = fh.read()
         run = failed_here = 0
+        skipped_here = 0
         for line in text.splitlines():
             if line.startswith("RUN "):
                 parts = line.split()
                 run, failed_here = int(parts[1]), int(parts[3])
             elif line.startswith("FAILNAME "):
                 problems.append(line[len("FAILNAME "):])
+            elif line.startswith("SKIPPED "):
+                skipped_here = int(line.split()[1])
         if run == 0:
             # Two different things look identical here: the module could not be
             # imported, or the child died before it could write the report. A
@@ -205,16 +241,23 @@ def main() -> int:
             continue
         total += run
         failed += failed_here
+        skipped += skipped_here
         mark = "ok" if not failed_here else f"{failed_here} FAILED"
+        if skipped_here:
+            mark += f", {skipped_here} skipped"
         print(f"{name.split('.')[-1]:>34}: {run:>4} run, {mark}")
+        if failed_here:
+            print(text[:8000])
     print("-" * 46)
-    print(f"{'TOTAL':>34}: {total:>4} run, {failed} failed")
+    print(f"{'TOTAL':>34}: {total:>4} run, {failed} failed, {skipped} skipped")
     if problems:
         print("\nfailing tests:")
         for p in problems:
             print(f"  {p}")
-    if os.path.exists(report):
+    try:
         os.remove(report)
+    except OSError:
+        pass
     shutil.rmtree(settings_directory, ignore_errors=True)
     return 1 if failed else 0
 

@@ -21,9 +21,21 @@ class TranslateWorker(QThread):
         # None (or ("auto",)) = detect the language automatically.
         self._ocr_langs = None if ocr_langs in (None, ("auto",)) else tuple(ocr_langs)
         self._settings = dict(settings)
+        # The translation chain consults this between requests. A superseded
+        # worker must leave the single-request queue instead of spending one
+        # more key while its replacement waits.
+        self._settings["_cancelled"] = self.isInterruptionRequested
         self.translate_secs: float = 0.0  # proof of which layer answered + how long
 
     def run(self) -> None:
+        from translators.http_client import cancellation_scope, RequestCancelled
+        try:
+            with cancellation_scope(self.isInterruptionRequested):
+                self._translate()
+        except RequestCancelled:
+            return
+
+    def _translate(self) -> None:
         if self.isInterruptionRequested():
             return
         try:
@@ -54,19 +66,30 @@ class TranslateWorker(QThread):
             from translators import chain
             t0 = time.time()
             translated_text, badge = "", "—"
-            for kind, partial, badge in chain.translate_stream(
-                    self._text, self._settings):
-                if self.isInterruptionRequested():
-                    return
-                if kind == "partial" and partial:
-                    self.partial.emit(partial)
-                elif kind == "done":
-                    translated_text, badge = partial, badge
+            stream = chain.translate_stream(self._text, self._settings)
+            try:
+                for kind, partial, badge in stream:
+                    if self.isInterruptionRequested():
+                        return
+                    if kind == "partial" and partial:
+                        if chain.translation_preview_matches_target(partial, self._settings):
+                            self.partial.emit(partial)
+                    elif kind == "done":
+                        translated_text, badge = partial, badge
+            finally:
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    close()
             if self.isInterruptionRequested():
                 return
             self.translate_secs = time.time() - t0
             self.done.emit(translated_text, badge)
         except Exception as e:  # safety net
+            from translators.chain import TranslationCancelled
+
+            if self.isInterruptionRequested() or isinstance(
+                    e, TranslationCancelled):
+                return
             self.failed.emit(str(e))
 
     def _translate_image(self) -> None:
@@ -77,16 +100,32 @@ class TranslateWorker(QThread):
         import time
         started = time.time()
         translated_text, badge = "", "—"
-        for kind, partial, current_badge in chain.translate_image_stream(
-                self._pil_image, self._settings):
-            if self.isInterruptionRequested():
-                return
-            if kind == "partial" and partial:
-                self.partial.emit(partial)
-            elif kind == "done":
-                translated_text, badge = partial, current_badge
+        stream = chain.translate_image_stream(
+            self._pil_image, self._settings)
+        try:
+            for kind, partial, current_badge in stream:
+                if self.isInterruptionRequested():
+                    return
+                if kind == "partial" and partial:
+                    if chain.translation_preview_matches_target(partial, self._settings):
+                        self.partial.emit(partial)
+                elif kind == "done":
+                    translated_text, badge = partial, current_badge
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
         if self.isInterruptionRequested():
             return
+        wrong_language = chain._wrong_output_language(self._settings, translated_text)
+        if wrong_language:
+            from translators.prompt import LANGUAGE_NAMES
+
+            target_name = LANGUAGE_NAMES.get(
+                self._settings.get("target_language", "ar"), "Arabic")
+            raise RuntimeError(
+                f"Image translation returned {wrong_language} instead of "
+                f"{target_name}; no additional request was made.")
         self.translate_secs = time.time() - started
         self.done.emit(translated_text, badge)
 

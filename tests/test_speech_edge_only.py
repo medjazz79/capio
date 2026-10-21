@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from tests.transport_support import requires_loopback
 from unittest import mock
 
 from popup import speech_worker
@@ -930,6 +931,7 @@ class TestSpeechSynthesis(unittest.TestCase):
         finally:
             worker.cleanup_output()
 
+    @requires_loopback
     def test_continuous_playback_streams_segments_in_one_ordered_track(self):
         import threading
         from urllib.request import urlopen

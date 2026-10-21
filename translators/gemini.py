@@ -7,11 +7,11 @@ import json
 import threading
 import time
 
-import requests
+from . import http_client as requests
 from PIL import Image
 
 from .prompt import (
-    output_token_budget, system_instructions, user_prompt,
+    output_token_budget, system_instructions, request_user_prompt,
 )
 from .vision import image_system_instructions, image_translation_prompt
 
@@ -173,7 +173,7 @@ def translate(
     payload = {
         "system_instruction": {"parts": [{"text": system_instructions(
             instructions, source_language, target_language)}]},
-        "contents": [{"parts": [{"text": user_prompt(
+        "contents": [{"parts": [{"text": request_user_prompt(
             text, source_language, target_language)}]}],
         "generationConfig": {
             "temperature": 0.3,
@@ -223,7 +223,7 @@ def stream_translate(
     payload = {
         "system_instruction": {"parts": [{"text": system_instructions(
             instructions, source_language, target_language)}]},
-        "contents": [{"parts": [{"text": user_prompt(
+        "contents": [{"parts": [{"text": request_user_prompt(
             text, source_language, target_language)}]}],
         "generationConfig": {
             "temperature": 0.3,

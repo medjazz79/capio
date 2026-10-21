@@ -19,10 +19,21 @@ class ChatWorker(QThread):
         super().__init__()
         self._messages = [dict(message) for message in messages]
         self._settings = dict(settings)
+        self._settings["_cancelled"] = self.isInterruptionRequested
         self._source_text = source_text
         self._translated_text = translated_text
 
     def run(self) -> None:
+        from translators.http_client import cancellation_scope, RequestCancelled
+        if self.isInterruptionRequested():
+            return
+        try:
+            with cancellation_scope(self.isInterruptionRequested):
+                self._reply()
+        except RequestCancelled:
+            return
+
+    def _reply(self) -> None:
         chunks: list[str] = []
         try:
             from translators.chat import reply_stream
@@ -33,11 +44,15 @@ class ChatWorker(QThread):
                 self._source_text,
                 self._translated_text,
             ):
+                if self.isInterruptionRequested():
+                    return
                 chunks.append(chunk)
                 self.partial.emit("".join(chunks))
             answer = "".join(chunks)
             if not answer.strip():
                 raise RuntimeError("The selected model returned an empty reply.")
-            self.done.emit(answer.strip())
+            if not self.isInterruptionRequested():
+                self.done.emit(answer.strip())
         except Exception as error:
-            self.failed.emit(str(error))
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))

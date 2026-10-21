@@ -12,6 +12,7 @@ The two promises `chain.py` exists to keep:
 """
 import os
 import unittest
+from tests.transport_support import requires_loopback
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -837,6 +838,7 @@ class TestSpeechSegmentScheduling(unittest.TestCase):
         self.assertFalse(writer.is_alive())
         self.assertLessEqual(stream._queued_bytes, STREAM_QUEUE_MAX_BYTES)
 
+    @requires_loopback
     def test_stream_buffers_multiple_synthesis_segments_before_backpressure(self):
         import threading
         from urllib.request import urlopen
@@ -883,6 +885,7 @@ class TestSpeechSegmentScheduling(unittest.TestCase):
         finally:
             server.close()
 
+    @requires_loopback
     def test_finished_stream_remains_available_until_first_get(self):
         from urllib.request import urlopen
         from popup.audio_stream import AudioStreamServer
@@ -900,6 +903,7 @@ class TestSpeechSegmentScheduling(unittest.TestCase):
         finally:
             server.close()
 
+    @requires_loopback
     def test_close_unblocks_handler_waiting_for_first_audio_chunk(self):
         import threading
         from urllib.request import urlopen

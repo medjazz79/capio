@@ -11,7 +11,10 @@ Two rules this module exists to enforce:
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import re
+import threading
+import unicodedata
 from collections.abc import Callable
 
 from . import (
@@ -24,6 +27,84 @@ from . import (
     opencode_zen,
     registry,
 )
+
+
+class TranslationCancelled(RuntimeError):
+    """A superseded translation stopped before it could send another request."""
+
+
+# Providers bill and rate-limit per request, and several UI paths can ask for a
+# translation at once (two popups, a page flip during a stream, a language
+# change). The gate makes the network phase strictly serial: one translation
+# request is in flight at any moment, process-wide. It is re-entrant because a
+# corrective request belongs to the same translation and follows the first.
+_REQUEST_GATE = threading.Lock()
+_REQUEST_DEPTH = threading.local()
+
+# A CJK character is its own word: these languages are written without spaces,
+# so "one run of letters" would be the whole sentence. Hangul is written with
+# spaces, so Korean words stay whole.
+_IDEOGRAPHIC_RANGES = (
+    (0x3005, 0x3007),    # 々 〆 〇
+    (0x303B, 0x303B),    # 〻
+    (0x3040, 0x30FF),    # Hiragana and Katakana
+    (0x31F0, 0x31FF),    # Katakana phonetic extensions
+    (0x3400, 0x4DBF),    # CJK extension A
+    (0x4E00, 0x9FFF),    # CJK unified ideographs
+    (0xF900, 0xFAFF),    # CJK compatibility ideographs
+    (0xFF66, 0xFF9F),    # Halfwidth Katakana
+    (0x20000, 0x2FA1F),  # CJK extensions B-F
+)
+_TARGET_SCRIPT_PREFIXES = {
+    "ar": ("ARABIC",),
+    "hi": ("DEVANAGARI",),
+    "ja": ("HIRAGANA", "KATAKANA", "CJK"),
+    "ko": ("HANGUL",),
+    "ru": ("CYRILLIC",),
+    "zh": ("CJK",),
+}
+_LATIN_TARGETS = frozenset({"en", "fr", "de", "es", "it", "pt"})
+
+
+def _cancel_check(settings: dict | None) -> Callable[[], bool] | None:
+    check = (settings or {}).get("_cancelled")
+    return check if callable(check) else None
+
+
+def _check_cancelled(settings: dict | None) -> None:
+    check = _cancel_check(settings)
+    if check is not None and check():
+        raise TranslationCancelled("Translation was cancelled.")
+
+
+@contextmanager
+def _translation_request_slot(settings: dict | None = None):
+    """Serialise outbound translation requests, honouring cancellation.
+
+    Nested calls (a corrective request inside a translation) reuse the slot
+    their parent already holds; a different thread waits for it, polling the
+    cancel predicate so a superseded translation leaves the queue instead of
+    sending one last request.
+    """
+    depth = getattr(_REQUEST_DEPTH, "value", 0)
+    if depth:
+        _REQUEST_DEPTH.value = depth + 1
+        try:
+            yield
+        finally:
+            _REQUEST_DEPTH.value -= 1
+        return
+    while True:
+        _check_cancelled(settings)
+        if _REQUEST_GATE.acquire(timeout=0.05):
+            break
+    _REQUEST_DEPTH.value = 1
+    try:
+        _check_cancelled(settings)
+        yield
+    finally:
+        _REQUEST_DEPTH.value = 0
+        _REQUEST_GATE.release()
 
 # Larger batches reduce serial model round-trips for long page selections while
 # staying comfortably below common request/context limits.
@@ -535,6 +616,12 @@ def _split_words(para: str, limit: int) -> list[str]:
     cur: list[str] = []
     size = 0
     for w in para.split():
+        if len(w) > limit:
+            if cur:
+                out.append(" ".join(cur))
+                cur, size = [], 0
+            out.extend(w[offset:offset + limit] for offset in range(0, len(w), limit))
+            continue
         if cur and size + len(w) + 1 > limit:
             out.append(" ".join(cur))
             cur, size = [], 0
@@ -553,6 +640,12 @@ def _split_long(para: str, limit: int) -> list[str]:
     cur: list[str] = []
     size = 0
     for s in sentences:
+        if len(s) > limit:
+            if cur:
+                out.append(" ".join(cur))
+                cur, size = [], 0
+            out.extend(_split_words(s, limit))
+            continue
         if cur and size + len(s) + 1 > limit:
             out.append(" ".join(cur))
             cur, size = [], 0
@@ -574,6 +667,8 @@ def chunk_text(text: str, limit: int = MAX_CHUNK) -> list[str]:
     """Split into model-sized pieces. Whole paragraphs stay whole, so joining
     the result with newlines reproduces the input; only a paragraph that is
     itself over the limit gets broken up further."""
+    if limit < 1:
+        raise ValueError("Chunk limit must be positive")
     text = text.strip()
     if not text:
         return []
@@ -611,6 +706,7 @@ def translate(text: str, settings: dict) -> tuple[str, str]:
     badges: list[str] = []
     if not text.strip():
         return "", "—"
+    _check_cancelled(settings)
     source_text = dehyphenate(text.strip())
     chunks = _translation_chunks(source_text, settings)
     for index, chunk in enumerate(chunks):
@@ -635,7 +731,9 @@ def translate_image(image, settings: dict) -> tuple[str, str]:
 
     model = resolve_model(settings)
     instructions = _translation_instructions(settings, model)
-    translated, badge = _translate_image_once(image, settings, instructions)
+    _check_cancelled(settings)
+    with _translation_request_slot(settings):
+        translated, badge = _translate_image_once(image, settings, instructions)
     translated = _prepare_translation(translated)
     if not translated.strip():
         raise RuntimeError(f"Selected model {model} returned an empty translation.")
@@ -892,9 +990,11 @@ def translate_image_stream(image, settings: dict):
         )
 
     try:
-        for delta in stream_deltas(instructions):
-            partial += delta
-            yield ("partial", _normalize_latex_partial(partial), "")
+        with _translation_request_slot(settings):
+            for delta in stream_deltas(instructions):
+                _check_cancelled(settings)
+                partial += delta
+                yield ("partial", _normalize_latex_partial(partial), "")
         if not partial.strip():
             raise RuntimeError(f"Selected model {model} streamed no image text.")
 
@@ -987,6 +1087,7 @@ def translate_stream(text: str, settings: dict):
         parts: list[str] = []
         badges: list[str] = []
         for index, chunk in enumerate(chunks):
+            _check_cancelled(settings)
             chunk_settings = settings
             if settings.get("explain_mode", False) and index < len(chunks) - 1:
                 chunk_settings = {**settings, "explain_mode": False}
@@ -997,39 +1098,46 @@ def translate_stream(text: str, settings: dict):
                 "custom_provider": _stream_single_custom_provider,
             }.get(provider, _stream_single_compatible)
             current = ""
-            for kind, value, badge in streamer(chunk, chunk_settings):
-                if kind == "partial":
-                    current = value
-                    yield (
-                        "partial",
-                        "\n".join([*parts, current]).translate(_WESTERN_DIGITS),
-                        "",
-                    )
-                elif kind == "done":
-                    current = value
-                    if provider != "bridge":
-                        from .prompt import LANGUAGE_NAMES
-
-                        target_language = chunk_settings.get(
-                            "target_language", "ar")
-                        source_language = chunk_settings.get(
-                            "source_language", "auto")
-                        detected_language = _detect_translation_language(value)
+            with _translation_request_slot(chunk_settings):
+                for kind, value, badge in streamer(chunk, chunk_settings):
+                    _check_cancelled(chunk_settings)
+                    if kind == "partial":
+                        current = value
+                        yield (
+                            "partial",
+                            "\n".join([*parts, current]).translate(
+                                _WESTERN_DIGITS),
+                            "",
+                        )
+                    elif kind == "done":
+                        current = value
+                        wrong_language = (
+                            _wrong_output_language(chunk_settings, value)
+                            if provider != "bridge" else None)
                         if (
-                            target_language in LANGUAGE_NAMES
-                            and source_language != target_language
-                            and detected_language
-                            and detected_language != target_language
+                            provider != "bridge"
+                            and wrong_language
                         ):
+                            # One corrective request, not a second translation
+                            # chain: the retry must not run its own language
+                            # check and spend another key on the same chunk.
+                            from .prompt import LANGUAGE_NAMES
+
+                            target_language = chunk_settings.get(
+                                "target_language", "ar")
+                            target_name = LANGUAGE_NAMES[target_language]
                             current, badge = _translate_chunk(
-                                chunk, chunk_settings)
-                            detected_language = _detect_translation_language(
-                                current)
-                            if (
-                                detected_language
-                                and detected_language != target_language
-                            ):
-                                target_name = LANGUAGE_NAMES[target_language]
+                                chunk,
+                                {
+                                    **chunk_settings,
+                                    "_skip_language_check": True,
+                                    "_language_correction": _language_correction_instruction(
+                                        chunk_settings, wrong_language),
+                                },
+                            )
+                            detected_language = _wrong_output_language(
+                                chunk_settings, current)
+                            if detected_language:
                                 raise RuntimeError(
                                     "Streaming translation returned "
                                     f"{detected_language} instead of "
@@ -1041,8 +1149,8 @@ def translate_stream(text: str, settings: dict):
                                     _WESTERN_DIGITS),
                                 "",
                             )
-                    parts.append(current)
-                    badges.append(badge)
+                        parts.append(current)
+                        badges.append(badge)
         yield (
             "done",
             "\n".join(parts).translate(_WESTERN_DIGITS),
@@ -1052,6 +1160,7 @@ def translate_stream(text: str, settings: dict):
     parts: list[str] = []
     badges: list[str] = []
     for index, chunk in enumerate(chunks):
+        _check_cancelled(settings)
         chunk_settings = settings
         if settings.get("explain_mode", False) and index < len(chunks) - 1:
             chunk_settings = {**settings, "explain_mode": False}
@@ -1073,7 +1182,7 @@ def _stream_single_compatible(chunk: str, s: dict):
 
     chosen = resolve_model(s)
     provider = registry.provider_of(chosen)
-    instructions = _translation_instructions(s, chosen)
+    instructions = _translation_instructions(s, chosen, chunk)
     source_language = s.get("source_language", "auto")
     target_language = s.get("target_language", "ar")
     if source_language != "auto" and source_language not in LANGUAGE_NAMES:
@@ -1145,7 +1254,7 @@ def _stream_single_gemini(chunk: str, s: dict):
     from .prompt import LANGUAGE_NAMES
 
     chosen = resolve_model(s)
-    instructions = _translation_instructions(s, chosen)
+    instructions = _translation_instructions(s, chosen, chunk)
     source_language = s.get("source_language", "auto")
     target_language = s.get("target_language", "ar")
     if source_language != "auto" and source_language not in LANGUAGE_NAMES:
@@ -1166,8 +1275,8 @@ def _stream_single_gemini(chunk: str, s: dict):
             raise RuntimeError(f"Gemini {chosen} streamed no text")
 
         final = _prepare_translation(partial.strip())
-    except Exception:
-        translated, badge = _translate_chunk(chunk, s)
+    except Exception as error:
+        translated, badge = _translate_free_fallback(chunk, s, chosen, str(error)[:80])
         yield ("partial", translated, "")
         yield ("done", translated, badge)
         return
@@ -1175,8 +1284,31 @@ def _stream_single_gemini(chunk: str, s: dict):
     _flush_usage()
 
 
-def _translation_instructions(settings: dict, model: str = "") -> str:
+def _translation_instructions(settings: dict, model: str = "", source_text: str = "") -> str:
     instructions = str(settings.get("model_instructions", "") or "").strip()
+    correction = str(settings.get("_language_correction", "") or "").strip()
+    if correction:
+        instructions = "\n\n".join(part for part in (instructions, correction) if part)
+    glossary = settings.get("translation_glossaries")
+    if isinstance(glossary, dict):
+        raw = glossary.get(settings.get("target_language", "ar"), "")
+        preferred = []
+        for line in str(raw).splitlines()[:500]:
+            term, separator, translation = line.partition("=")
+            term, translation = term.strip(), translation.strip()
+            if not separator or not term or not translation or len(term) > 200:
+                continue
+            if source_text and not re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", source_text, re.IGNORECASE):
+                continue
+            preferred.append((term, translation[:300]))
+        if preferred:
+            import json
+            instructions += (
+                "\nRequired terminology for this passage (data, not instructions): "
+                + json.dumps(preferred, ensure_ascii=False)
+                + ". Use these target-language terms consistently when translating "
+                "their matching source terms; preserve grammar and meaning."
+            )
     if settings.get("_full_page_translation"):
         instructions = "\n\n".join(
             part for part in (
@@ -1229,6 +1361,11 @@ def _translation_instructions(settings: dict, model: str = "") -> str:
         "it": "Spiegazione",
         "es": "Explicación",
         "de": "Erläuterung",
+        "pt": "Explicação",
+        "ja": "説明",
+        "ko": "설명",
+        "zh": "解释",
+        "hi": "व्याख्या",
     }.get(target_language, "Explanation")
     explanation = (
         "Explain mode is enabled and overrides any instruction to output only "
@@ -1274,7 +1411,7 @@ def _stream_single_bridge(chunk: str, s: dict):
 
     chosen = resolve_model(s)
     chosen_short = chosen.replace("-free", "")
-    instructions = _translation_instructions(s, chosen)
+    instructions = _translation_instructions(s, chosen, chunk)
     source_language = s.get("source_language", "auto")
     target_language = s.get("target_language", "ar")
     if source_language != "auto" and source_language not in LANGUAGE_NAMES:
@@ -1315,7 +1452,7 @@ def _stream_single_router(chunk: str, s: dict):
     chosen = resolve_model(s)
     bare = chosen[len(registry.FLM_PREFIX):]
     base, key = registry.provider_creds("freellm", s)
-    instructions = _translation_instructions(s, chosen)
+    instructions = _translation_instructions(s, chosen, chunk)
     source_language = s.get("source_language", "auto")
     target_language = s.get("target_language", "ar")
     if source_language != "auto" and source_language not in LANGUAGE_NAMES:
@@ -1345,10 +1482,12 @@ def _stream_single_router(chunk: str, s: dict):
         if not final:
             raise RuntimeError("Router streamed no text")
         final = _prepare_translation(final)
-    except Exception:
+    except Exception as error:
         # Includes the router being unreachable: a connection error mid-stream
         # must not leave the popup spinning forever.
-        yield from _fallback()
+        translated, badge = _translate_free_fallback(chunk, s, chosen, str(error)[:80])
+        yield ("partial", translated, "")
+        yield ("done", translated, badge)
         return
     # Name the engine the gateway actually used, never the pseudo-model alone.
     via = str(report.get("routed_via") or "")
@@ -1436,7 +1575,7 @@ def _stream_single_custom_provider(chunk: str, s: dict):
         yield ("partial", arabic, "")
         yield ("done", arabic, badge)
         return
-    instructions = _translation_instructions(s, provider_model)
+    instructions = _translation_instructions(s, provider_model, chunk)
     source_language = s.get("source_language", "auto")
     target_language = s.get("target_language", "ar")
     if source_language != "auto" and source_language not in LANGUAGE_NAMES:
@@ -1460,8 +1599,8 @@ def _stream_single_custom_provider(chunk: str, s: dict):
         if not final:
             raise RuntimeError("Custom provider streamed no text")
         final = _prepare_translation(final)
-    except Exception:
-        arabic, badge = _translate_chunk(chunk, s)
+    except Exception as error:
+        arabic, badge = _translate_free_fallback(chunk, s, chosen, str(error)[:80])
         yield ("partial", arabic, "")
         yield ("done", arabic, badge)
         return
@@ -1621,6 +1760,12 @@ def _translate_free_fallback(
 ) -> tuple[str, str]:
     from .prompt import LANGUAGE_NAMES
 
+    _check_cancelled(s)
+    if not s.get("allow_translation_fallback", True):
+        raise RuntimeError(
+            f"Selected model {chosen} failed: {failure or 'not configured'}. "
+            "Automatic fallback is disabled; no other service received this text."
+        )
     source_language = s.get("source_language", "auto")
     target_language = s.get("target_language", "ar")
     if source_language != "auto" and source_language not in LANGUAGE_NAMES:
@@ -1639,6 +1784,7 @@ def _translate_free_fallback(
             return result, f"Free service  {note}"
         except Exception as error:
             failures.append(("free translation service", _one_line(error)))
+    _check_cancelled(s)
     try:
         result = mymemory.translate(
             chunk,
@@ -1647,6 +1793,8 @@ def _translate_free_fallback(
             target_language=target_language,
         )
         return result, f"Free service (alt)  {note}"
+    except TranslationCancelled:
+        raise
     except Exception as error:
         failures.append(("alternate free translation", _one_line(error)))
     if target_language == "ar":
@@ -1664,13 +1812,21 @@ def _translate_free_fallback(
 
 
 def _translate_chunk(chunk: str, s: dict) -> tuple[str, str]:
+    """Translate one chunk while holding the one-request-at-a-time slot."""
+    _check_cancelled(s)
+    with _translation_request_slot(s):
+        return _translate_chunk_locked(chunk, s)
+
+
+def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
     from config.settings import resolve_model
     from .prompt import LANGUAGE_NAMES
 
+    _check_cancelled(s)
     chosen = resolve_model(s)
     provider = registry.provider_of(chosen)
     chosen_short = chosen.replace("-free", "")
-    instructions = _translation_instructions(s)
+    instructions = _translation_instructions(s, source_text=chunk)
     source_language = s.get("source_language", "auto")
     target_language = s.get("target_language", "ar")
     if source_language != "auto" and source_language not in LANGUAGE_NAMES:
@@ -1679,7 +1835,7 @@ def _translate_chunk(chunk: str, s: dict) -> tuple[str, str]:
         target_language = "ar"
 
     def _call(model: str, extra_instructions: str = "") -> tuple[str, str]:
-        instructions = _translation_instructions(s, model)
+        instructions = _translation_instructions(s, model, chunk)
         if extra_instructions:
             instructions = "\n\n".join(
                 part for part in (instructions, extra_instructions) if part)
@@ -1762,29 +1918,17 @@ def _translate_chunk(chunk: str, s: dict) -> tuple[str, str]:
     def _translated_call(model: str) -> tuple[str, str]:
         output, badge = _call(model)
         output = _prepare_translation(output)
-        detected_language = _detect_translation_language(output)
-        if (
-            detected_language
-            and detected_language != target_language
-            and source_language != target_language
-        ):
-            from .prompt import LANGUAGE_NAMES
-
-            target_name = LANGUAGE_NAMES[target_language]
-            detected_name = LANGUAGE_NAMES.get(
-                detected_language, detected_language)
-            correction = (
-                f"Your previous response was in {detected_name}, not "
-                f"{target_name}. Translate the complete source passage into "
-                f"{target_name}. Do not leave sentences in {detected_name}; "
-                "return only the requested translation."
-            )
+        wrong_language = (None if s.get("_skip_language_check")
+                          else _wrong_output_language(s, output))
+        if wrong_language:
+            _check_cancelled(s)
+            correction = _language_correction_instruction(s, wrong_language)
             output, badge = _call(model, correction)
             output = _prepare_translation(output)
-            detected_language = _detect_translation_language(output)
-            if detected_language and detected_language != target_language:
+            wrong_language = _wrong_output_language(s, output)
+            if wrong_language:
                 raise RuntimeError(
-                    f"Selected model returned {detected_language} instead "
+                    f"Selected model returned {wrong_language} instead "
                     f"of the requested {target_language} translation.")
         return output, badge or _call_badge(model)
 
@@ -1907,15 +2051,118 @@ def _one_line(error: Exception) -> str:
     return (text or error.__class__.__name__)[:160]
 
 
+def _prose_for_language_detection(text: str) -> str:
+    """Strip code and URLs before asking langdetect about the prose."""
+    prose = re.sub(r"```.*?```|`[^`]*`", " ", text, flags=re.DOTALL)
+    return re.sub(r"https?://\S+", " ", prose)
+
+
+def _target_script_share(text: str, language: str) -> float:
+    """Share of letters in `text` written in the target language's script.
+
+    An Arabic page quoting ``C major`` and ``Bach`` stays Arabic prose; this
+    measures that instead of asking langdetect to guess from the whole mix.
+    Latin-script targets return 1.0 because they share letter shapes and only
+    langdetect can tell them apart.
+    """
+    if language in _LATIN_TARGETS:
+        return 1.0
+    prefixes = _TARGET_SCRIPT_PREFIXES.get(language)
+    if not prefixes:
+        return 1.0
+    letters = [character for character in text if character.isalpha()]
+    if not letters:
+        return 1.0
+    matching = sum(
+        1 for character in letters
+        if unicodedata.name(character, "").startswith(prefixes)
+    )
+    return matching / len(letters)
+
+
+def _needs_language_retry(settings: dict, output: str) -> bool:
+    """Would one corrective request actually improve this reply?
+
+    Only when the output is *not* written in the target script and its prose
+    detects as another language. A mostly-Arabic reply (with Latin names) or a
+    short notation line is never re-translated: that used to spend a second
+    full request and still fail the same check.
+    """
+    return _wrong_output_language(settings, output) is not None
+
+
+def _wrong_output_language(settings: dict, output: str) -> str | None:
+    from .prompt import LANGUAGE_NAMES
+
+    target_language = settings.get("target_language", "ar")
+    source_language = settings.get("source_language", "auto")
+    if (
+        target_language not in LANGUAGE_NAMES
+        or source_language == target_language
+    ):
+        return None
+    if target_language not in _LATIN_TARGETS and _target_script_share(output, target_language) >= 0.5:
+        return None
+    detected_language = _detect_translation_language(output)
+    return (detected_language if detected_language
+            and detected_language != target_language else None)
+
+
+def _language_correction_instruction(settings: dict, wrong_language: str) -> str:
+    from .prompt import LANGUAGE_NAMES, output_script_rule
+
+    target = settings.get("target_language", "ar")
+    target_name = LANGUAGE_NAMES.get(target, "Arabic")
+    wrong_name = LANGUAGE_NAMES.get(wrong_language, wrong_language)
+    return (
+        f"CRITICAL OUTPUT-LANGUAGE CORRECTION: The previous response was in "
+        f"{wrong_name}, not {target_name}. Retranslate the ORIGINAL source "
+        f"passage completely into {target_name}. {output_script_rule(target)} "
+        f"Do not continue or copy the {wrong_name} response. Return only the "
+        "requested translation, with no explanation of this correction."
+    )
+
+
+def translation_preview_matches_target(text: str, settings: dict) -> bool:
+    """Hold a wrong-script preview locally; never make a request to check it.
+
+    Use a small sample to keep streaming cheap. Latin names and notation may
+    precede prose, so a held prefix is released as soon as target prose arrives.
+    The final response still goes through the normal language validation.
+    """
+    target = settings.get("target_language", "ar")
+    prefixes = _TARGET_SCRIPT_PREFIXES.get(target)
+    if target in _LATIN_TARGETS:
+        prefixes = ("LATIN",)
+    if not prefixes:
+        return True
+    prose = _prose_for_language_detection(text[-512:])
+    letters = [character for character in prose if character.isalpha()]
+    if not letters:
+        return True
+    matching = sum(unicodedata.name(character, "").startswith(prefixes)
+                   for character in letters)
+    return matching >= len(letters) / 2
+
+
 def _detect_translation_language(text: str) -> str | None:
     """Detect the prose language when there is enough text to judge reliably."""
     from langdetect import LangDetectException, detect
 
-    prose = re.sub(r"```.*?```|`[^`]*`", " ", text, flags=re.DOTALL)
-    prose = re.sub(r"https?://\S+", " ", prose)
-    if sum(character.isalpha() for character in prose) < 40:
+    prose = _prose_for_language_detection(text)
+    # These scripts distinguish our supported languages directly. Do not let
+    # a statistical guess call Devanagari Hindi "ko", or miss short Hangul prose.
+    letters = [character for character in prose if character.isalpha()]
+    if len(letters) >= 6:
+        for language in ("hi", "ko", "ar", "ru"):
+            if _target_script_share(prose, language) >= 0.6:
+                return language
+    if len(letters) < 40:
         return None
     try:
-        return detect(prose)
+        detected = detect(prose)
     except LangDetectException:
         return None
+    # langdetect returns regional tags such as zh-cn or pt-BR. The catalog and
+    # the target-language check use base codes, so normalize before comparing.
+    return detected.replace("_", "-").split("-", 1)[0] or None

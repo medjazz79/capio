@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import json
 
-import requests
+from . import http_client as requests
 from PIL import Image
 
-from .prompt import output_token_budget, system_instructions, user_prompt
+from .prompt import output_token_budget, system_instructions, request_user_prompt
 from .vision import encode_image, openai_image_messages
 
 BASE = "https://opencode.ai/zen/v1"
@@ -50,7 +50,7 @@ def translate(
             "messages": [
                 {"role": "system", "content": system_instructions(
                     instructions, source_language, target_language)},
-                {"role": "user", "content": user_prompt(
+                {"role": "user", "content": request_user_prompt(
                     text, source_language, target_language)},
             ],
         },
@@ -170,7 +170,7 @@ def stream_translate(
         "messages": [
             {"role": "system", "content": system_instructions(
                 instructions, source_language, target_language)},
-            {"role": "user", "content": user_prompt(
+            {"role": "user", "content": request_user_prompt(
                 text, source_language, target_language)},
         ],
     }, model)

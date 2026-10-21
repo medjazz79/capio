@@ -10,7 +10,8 @@ import tempfile
 import threading
 from pathlib import Path
 
-from .prompt import system_instructions, user_prompt
+from .prompt import system_instructions, request_user_prompt
+from .http_client import run_process
 
 TIMEOUT = 120
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+-]*\Z")
@@ -62,7 +63,7 @@ def list_models(timeout: int = 30) -> list[str]:
     """Return configured provider/model ids reported by `opencode models`."""
     executable = _executable()
     try:
-        result = subprocess.run(
+        result = run_process(
             [executable, "models"],
             capture_output=True,
             text=True,
@@ -180,9 +181,10 @@ def translate(
             "json",
         ]
         try:
-            result = subprocess.run(
+            from .http_client import run_process
+            result = run_process(
                 command,
-                input=user_prompt(text, source_language, target_language),
+                input=request_user_prompt(text, source_language, target_language),
                 capture_output=True,
                 cwd=project,
                 text=True,
@@ -269,6 +271,9 @@ def stream_translate(
                 raise OpenCodeCLIError(
                     f"Could not start OpenCode CLI: {error}") from error
 
+            from .http_client import register_process
+            register_process(process)
+
             def stop_after_timeout() -> None:
                 timed_out.set()
                 try:
@@ -282,7 +287,7 @@ def stream_translate(
             timer.start()
             try:
                 assert process.stdin is not None
-                process.stdin.write(user_prompt(
+                process.stdin.write(request_user_prompt(
                     text, source_language, target_language))
                 process.stdin.close()
                 assert process.stdout is not None
@@ -378,7 +383,7 @@ def chat(
             encoding="utf-8",
         )
         try:
-            result = subprocess.run(
+            result = run_process(
                 [
                     executable, "run", "--model", model,
                     "--agent", AGENT_NAME, "--format", "json",

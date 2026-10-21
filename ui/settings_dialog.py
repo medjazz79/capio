@@ -12,6 +12,7 @@ from html import escape
 import json
 import re
 import threading
+import copy
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIntValidator, QPainter
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from config.app_log import get_logger
 from config.settings import (
+    copy_settings,
     DEFAULT_LINE_SPACING, DEFAULT_MODEL,
     DEFAULT_TRANSLATION_SIDE_MARGIN_PX,
     DEFAULT_TRANSLATION_TOP_BOTTOM_MARGIN_PX,
@@ -498,8 +500,8 @@ class SettingsDialog(QDialog):
         self._live_flm: list[str] | None = None
         self._cli_model_error: str | None = None
         self._syncing = False
-        self._settings = dict(settings)
-        self._initial_settings = dict(settings)
+        self._settings = copy_settings(settings)
+        self._initial_settings = copy.deepcopy(dict(settings))
         for key in ("user_themes", "theme_schemes", "theme_grades"):
             self._settings.pop(key, None)
             self._initial_settings.pop(key, None)
@@ -1246,6 +1248,8 @@ class SettingsDialog(QDialog):
                 persisted_settings = load()
                 persisted_settings.update(changed)
                 save(persisted_settings)
+                self._initial_settings.update(copy.deepcopy(changed))
+                self._settings.baseline.update(copy.deepcopy(changed))
             self._settings.update(changed)
             parent_settings = getattr(self.parent(), "settings", None)
             if isinstance(parent_settings, dict):
@@ -1281,7 +1285,7 @@ class SettingsDialog(QDialog):
             )
             return
 
-        self._settings.update(live_settings)
+        self._settings = copy_settings(live_settings)
         parent_settings = getattr(self.parent(), "settings", None)
         if isinstance(parent_settings, dict):
             parent_settings.update(live_settings)
@@ -1679,7 +1683,7 @@ class SettingsDialog(QDialog):
             log.exception("Could not build live theme preview settings")
 
     def set_preview_baseline(self, settings: dict) -> None:
-        self._initial_settings = dict(settings)
+        self._initial_settings = copy.deepcopy(dict(settings))
 
     def _build_performance_group(self) -> QWidget:
         outer = QWidget()
@@ -1708,6 +1712,12 @@ class SettingsDialog(QDialog):
         self.fast_details.setWordWrap(True)
         self.fast_details.setStyleSheet("font-size: 14px; padding-top: 2px; background: transparent; border: none;")
         blay.addWidget(self.fast_details)
+        self.fallback_check = QCheckBox("Allow other translation services if the selected model fails")
+        self.fallback_check.setChecked(bool(self._settings.get("allow_translation_fallback", True)))
+        self.fallback_check.setToolTip(
+            "When enabled, failed text translations may be sent to Google Translate "
+            "and MyMemory. Turn off to use only your selected provider.")
+        blay.addWidget(self.fallback_check)
 
         from translators.opencode_bridge import BRIDGE_FREE, DEFAULT_EFFORT, EFFORT_ORDER, MODEL_DEFAULT_EFFORTS, effort_for
         effort_form = QFormLayout()
@@ -1903,6 +1913,27 @@ class SettingsDialog(QDialog):
         )
         instructions_layout.addWidget(self.model_instructions, 1)
 
+        from translators.prompt import LANGUAGE_CHOICES
+        glossary_box = QGroupBox("PREFERRED TERMS")
+        glossary_layout = QVBoxLayout(glossary_box)
+        self.glossary_language = QComboBox()
+        for label, code in LANGUAGE_CHOICES:
+            self.glossary_language.addItem(label, code)
+        self.glossary_language.setCurrentIndex(max(0, self.glossary_language.findData(
+            self._settings.get("target_language", "ar"))))
+        raw_glossaries = self._settings.get("translation_glossaries")
+        self._glossaries = dict(raw_glossaries) if isinstance(raw_glossaries, dict) else {}
+        self._glossary_language = self.glossary_language.currentData()
+        self.glossary_text = QPlainTextEdit(str(self._glossaries.get(self._glossary_language, "")))
+        self.glossary_text.setPlaceholderText(
+            "One term per line: source term = preferred translation\n"
+            "Only terms found in the passage are sent to the model.")
+        self.glossary_text.setMaximumHeight(110)
+        self.glossary_language.currentIndexChanged.connect(self._switch_glossary_language)
+        glossary_layout.addWidget(self.glossary_language)
+        glossary_layout.addWidget(self.glossary_text)
+        instructions_layout.addWidget(glossary_box)
+
         # Card: shortcuts
         short_card = QGroupBox("SHORTCUTS")
         sform = QFormLayout(short_card)
@@ -1933,6 +1964,11 @@ class SettingsDialog(QDialog):
         where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(where)
         return outer
+
+    def _switch_glossary_language(self, _index=None):
+        self._glossaries[self._glossary_language] = self.glossary_text.toPlainText()
+        self._glossary_language = self.glossary_language.currentData()
+        self.glossary_text.setPlainText(str(self._glossaries.get(self._glossary_language, "")))
 
     def _build_tts_group(self) -> QWidget:
         settings = self._settings
@@ -2357,7 +2393,10 @@ class SettingsDialog(QDialog):
                 grouped.setdefault(language.title(), {}).setdefault(
                     country, []).append(voice)
 
-        for language in ("Fr", "Ar", "It", "En", "De", "Es", "Ru"):
+        for language in (
+            "Fr", "Ar", "It", "En", "De", "Es", "Ru",
+            "Pt", "Ja", "Ko", "Zh", "Hi",
+        ):
             if language not in grouped:
                 continue
             language_menu = self.edge_speech_voice_menu.addMenu(language)
@@ -4690,8 +4729,15 @@ class SettingsDialog(QDialog):
         from config.settings import DEFAULTS
         from translators.opencode_bridge import MODEL_DEFAULT_EFFORTS
         from config.settings import _sanitize_custom_providers
-        out = dict(DEFAULTS)
-        out.update(self._settings)
+        out = copy_settings(self._settings)
+        for key, value in DEFAULTS.items():
+            out.setdefault(key, value)
+        self._glossaries[self._glossary_language] = self.glossary_text.toPlainText()
+        out["translation_glossaries"] = {
+            language: text for language, text in self._glossaries.items()
+            if isinstance(text, str) and text.strip()
+        }
+        out["allow_translation_fallback"] = self.fallback_check.isChecked()
         groq_key = self.groq_key.text().strip()
         if not groq_key and "groq" in self.o_base.text() and self.o_key.text().strip():
             groq_key = self.o_key.text().strip()

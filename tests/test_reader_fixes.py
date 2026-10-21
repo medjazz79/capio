@@ -1038,6 +1038,7 @@ class TestOneOCRBackend(OneOCRTestCase):
         from ocr_providers import oneocr_backend as ob
 
         try:
+            ob._dir_cache.clear()
             with mock.patch("subprocess.run",
                             side_effect=FileNotFoundError("powershell")):
                 with self.assertLogs(ob.log, level="WARNING") as captured:

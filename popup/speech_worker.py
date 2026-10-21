@@ -17,7 +17,7 @@ import unicodedata
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
-import requests
+from translators import http_client as requests
 
 try:
     import edge_tts
@@ -125,9 +125,14 @@ AUTOMATIC_SPEECH_VOICES = {
     "it": "it-IT-ElsaNeural",
     "es": "es-ES-ElviraNeural",
     "de": "de-DE-KatjaNeural",
+    "pt": "pt-BR-FranciscaNeural",
+    "ja": "ja-JP-NanamiNeural",
+    "ko": "ko-KR-SunHiNeural",
+    "zh": "zh-CN-XiaoxiaoNeural",
+    "hi": "hi-IN-SwaraNeural",
 }
 EDGE_TTS_PREFERRED_LANGUAGE_CODES = frozenset(
-    {"ar", "de", "en", "es", "fr", "it", "ru"}
+    {"ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "pt", "ru", "zh"}
 )
 SPEECH_RATE = "+15%"
 # Classic segmented playback keeps only the first request short for a quick
@@ -180,7 +185,7 @@ def _speech_text_for_synthesis(text: str, target_language: str) -> str:
 
 
 def _normalize_arabic_pronunciation_token(token: str) -> str:
-    token = token.translate(str.maketrans({
+    token = unicodedata.normalize("NFC", token).translate(str.maketrans({
         "أ": "ا",
         "إ": "ا",
         "آ": "ا",
@@ -188,7 +193,8 @@ def _normalize_arabic_pronunciation_token(token: str) -> str:
     }))
     return "".join(
         character for character in token
-        if not unicodedata.category(character).startswith("M")
+        if not (unicodedata.category(character).startswith("M")
+                and unicodedata.name(character, "").startswith("ARABIC"))
     )
 
 
@@ -530,14 +536,47 @@ def speech_word_span(text: str, position: int) -> tuple[int, int]:
     return words[-1]
 
 
-def _word_spans(text: str) -> list[tuple[int, int]]:
-    """Return word ranges while keeping combining marks attached to their letters."""
-    spans = []
+_IDEOGRAPHIC_RANGES = (
+    (0x3005, 0x3007),    # 々 〆 〇
+    (0x303B, 0x303B),    # 〻
+    (0x3040, 0x30FF),    # Hiragana and Katakana
+    (0x31F0, 0x31FF),    # Katakana phonetic extensions
+    (0x3400, 0x4DBF),    # CJK extension A
+    (0x4E00, 0x9FFF),    # CJK unified ideographs
+    (0xF900, 0xFAFF),    # CJK compatibility ideographs
+    (0xFF66, 0xFF9F),    # Halfwidth Katakana
+    (0x20000, 0x2FA1F),  # CJK extensions B-F
+)
+
+
+def _is_ideographic_character(character: str) -> bool:
+    """True for scripts written without spaces between words."""
+    code = ord(character)
+    return any(start <= code <= end for start, end in _IDEOGRAPHIC_RANGES)
+
+
+def _word_spans_with(text: str, *, underscore: bool) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
     start = None
     for index, character in enumerate(text):
+        if _is_ideographic_character(character):
+            # Japanese and Chinese have no spaces: each character is its own
+            # word, and a boundary such as 音楽 matches two consecutive spans.
+            if start is not None:
+                spans.append((start, index))
+                start = None
+            spans.append((index, index + 1))
+            continue
         category = unicodedata.category(character)
         is_mark = category.startswith("M")
-        is_word = character.isalnum() or character == "_" or is_mark
+        if is_mark and start is None and spans and spans[-1][1] == index:
+            # A combining mark on the ideograph just emitted belongs to it.
+            spans[-1] = (spans[-1][0], index + 1)
+            continue
+        is_word = (
+            character.isalnum() or is_mark
+            or (underscore and character == "_")
+        )
         if is_word:
             if start is None and not is_mark:
                 start = index
@@ -547,6 +586,11 @@ def _word_spans(text: str) -> list[tuple[int, int]]:
     if start is not None:
         spans.append((start, len(text)))
     return spans
+
+
+def _word_spans(text: str) -> list[tuple[int, int]]:
+    """Return word ranges while keeping combining marks attached to their letters."""
+    return _word_spans_with(text, underscore=True)
 
 
 def python_to_qt_position(text: str, position: int) -> int:
@@ -661,7 +705,9 @@ class SpeechWorker(QThread):
                     self._trace.mark("speech_engine_unavailable")
                 self.failed.emit(speech_missing_message(self._engine))
                 return
-            asyncio.run(self._run_synthesis())
+            from translators.http_client import cancellation_scope
+            with cancellation_scope(self.isInterruptionRequested):
+                asyncio.run(self._run_synthesis())
         except asyncio.CancelledError:
             if self._trace is not None:
                 self._trace.mark("worker_cancelled")
@@ -671,7 +717,8 @@ class SpeechWorker(QThread):
             if self._trace is not None:
                 self._trace.mark(
                     "worker_failed", error_type=type(exc).__name__)
-            self.failed.emit(_safe_speech_error(exc))
+            if not self.isInterruptionRequested():
+                self.failed.emit(_safe_speech_error(exc))
         finally:
             if self._fast:
                 _prune_cache()
@@ -746,7 +793,10 @@ class SpeechWorker(QThread):
         loop = self._event_loop
         task = self._synthesis_task
         if loop is not None and task is not None and not task.done():
-            loop.call_soon_threadsafe(task.cancel)
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                pass  # The loop finished between the state check and cancellation.
 
     async def _run_synthesis(self) -> None:
         self._event_loop = asyncio.get_running_loop()
@@ -1313,14 +1363,41 @@ class VoiceListWorker(QThread):
     voices_ready = Signal(object)
     failed = Signal(str)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._loop = None
+        self._task = None
+
+    def requestInterruption(self):
+        super().requestInterruption()
+        if self._loop is not None and self._task is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._task.cancel)
+            except RuntimeError:
+                pass
+
+    async def _list(self):
+        self._loop = asyncio.get_running_loop()
+        self._task = asyncio.current_task()
+        try:
+            if self.isInterruptionRequested():
+                return []
+            return await asyncio.wait_for(edge_tts.list_voices(), timeout=20)
+        finally:
+            self._loop = self._task = None
+
     def run(self) -> None:
         try:
             if getattr(edge_tts, "Communicate", None) is None:
                 raise RuntimeError("The edge-tts package is not installed.")
-            voices = asyncio.run(edge_tts.list_voices())
-            self.voices_ready.emit(voices)
+            voices = asyncio.run(self._list())
+            if not self.isInterruptionRequested():
+                self.voices_ready.emit(voices)
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
-            self.failed.emit(str(exc))
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(exc))
 
 
 def _segment_word_spans(
@@ -2208,21 +2285,7 @@ def _normalize_latin_speech_text(text: str) -> str:
 
 def _speech_source_word_spans(text: str) -> list[tuple[int, int]]:
     """Return spoken word ranges, treating notation punctuation as separators."""
-    spans = []
-    start = None
-    for index, character in enumerate(text):
-        category = unicodedata.category(character)
-        is_mark = category.startswith("M")
-        is_word = character.isalnum() or is_mark
-        if is_word:
-            if start is None and not is_mark:
-                start = index
-        elif start is not None:
-            spans.append((start, index))
-            start = None
-    if start is not None:
-        spans.append((start, len(text)))
-    return spans
+    return _word_spans_with(text, underscore=False)
 
 
 _MAX_BOUNDARY_WORDS = 32
@@ -2268,7 +2331,14 @@ def _match_boundary_span(
 def _normalize_boundary_token(token: str) -> str:
     token = token.translate(_ARABIC_DIGITS_TO_WESTERN).casefold()
     token = _normalize_arabic_pronunciation_token(token)
-    token = re.sub(r"[\W_]", "", token)
+    # Keep combining marks: Devanagari matras distinguish कि from की, and Edge
+    # reports Hindi words exactly as written. Arabic tashkeel was already
+    # removed above because synthesis routinely drops it.
+    token = "".join(
+        character for character in token
+        if character.isalnum()
+        or unicodedata.category(character).startswith("M")
+    )
     if token == "فروليك":
         return "فرولك"
     return token

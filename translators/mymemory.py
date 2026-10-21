@@ -1,7 +1,7 @@
 """Second free layer: MyMemory (auto source detection). Falls through on any error."""
 from __future__ import annotations
 
-import requests
+from . import http_client as requests
 
 TIMEOUT = 15
 

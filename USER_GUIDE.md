@@ -4,6 +4,23 @@ This guide covers the everyday use of Capio. For model providers and optional
 configuration, see [Advanced Setup](ADVANCED_SETUP.md). Developers can start
 with [Development](DEVELOPMENT.md).
 
+## Preferred terms and fallback services
+
+In Settings, **PREFERRED TERMS** lets you keep a separate glossary for each
+translation language. Choose the language and enter one pair per line, for
+example `cadence = قفلة`. For text translation, Capio adds matching terms to
+the existing model request without sending another request. These are model
+instructions, so review specialist translations when exact terminology matters.
+
+In **Performance**, turn off **Allow other translation services if the selected
+model fails** to keep text within your selected provider. When enabled, Capio
+may send failed translations to Google Translate and MyMemory and identifies
+the answering service in the translation badge. A failed stream no longer
+automatically repeats the complete request to the same selected model.
+
+The reader and floating translator now merge their changed preferences when
+saving. An older window no longer replaces newly added provider settings.
+
 
 ## دليل Capio السهل (بالعربية)
 
@@ -114,8 +131,9 @@ Works on **both** kinds of PDFs:
 
 - Use the two toolbar language selectors to choose a source and target. The
   source selector includes **Auto** (the default) plus Arabic, French, English,
-  Russian, Italian, Spanish, and German; the target selector offers those
-  seven languages. Choices are remembered. For example, **Auto → Italiano**
+  Russian, Italian, Spanish, German, Portuguese, Japanese, Korean (South
+  Korea), Chinese Simplified, and Hindi; the target selector offers those
+  twelve languages. Choices are remembered. For example, **Auto → Italiano**
   detects the selected passage's language and translates it into Italian.
   Translation prompts for text and images explicitly require the selected
   target language even when the source is **Auto**. Longer model replies are
@@ -210,8 +228,9 @@ Works on **both** kinds of PDFs:
   (including Vivienne Multilingual). The live Edge voice catalog is available
   in both the translation popup's voice menu and **Settings → Read Aloud / TTS
   → Edge Voice**, limited to Arabic, French, Italian, English, German, Spanish,
-  and Russian voices plus every Multilingual voice; use **Refresh** to reload
-  the catalog.
+  Russian, Portuguese, Japanese, Korean (South Korea), Chinese Simplified, and
+  Hindi voices plus every Multilingual voice; use **Refresh** to reload the
+  catalog.
   when reading Arabic text, Latin-script words and phrases are skipped by
   default so they cannot change the Arabic delivery or interrupt it with a
   player hand-off. Enable **Settings → Read Aloud / TTS → Latin Words** to
@@ -299,7 +318,8 @@ Drag the button anywhere (position remembered); right-click to toggle
 **Explain**, choose **Image** or **OCR**, open settings, or quit. The translation
 popup has independent source and target
 language menus; the source defaults to **Auto** and can also be set explicitly.
-Both menus include Arabic, French, English, Russian, Italian, Spanish, German;
+Both menus include Arabic, French, English, Russian, Italian, Spanish, German,
+Portuguese, Japanese, Korean (South Korea), Chinese Simplified, and Hindi;
 changes are saved for the floating translator without changing the main
 reader's language settings. It uses the same translation prompts, output-
 language checks, notation handling, speech behavior, provider retries, and

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-import requests
+from . import http_client as requests
 
 GTX_URL = "https://translate.googleapis.com/translate_a/single"
 TIMEOUT = 18

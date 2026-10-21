@@ -64,7 +64,7 @@ from PySide6.QtWidgets import (
 )
 
 from config.settings import SettingsLoadError, load, save
-from popup.translate_popup import TranslatePopup
+from popup.translate_popup import TranslatePopup, retain_live_popups
 from ui.file_drop import local_document_paths
 from ui.theme import THEMES, theme_colors
 
@@ -629,7 +629,7 @@ class FloatButton(QDialog):
         self.btn.clicked.connect(self._on_click)
         self.btn.installEventFilter(self)
         lay.addWidget(self.btn)
-        self.setFixedSize(self.sizeHint())
+        self.setFixedSize(self.btn.size())
 
         self.menu = QMenu(self)
         self.menu.addAction("🌐 Translation languages…", self._open_float_languages)
@@ -754,11 +754,12 @@ class FloatButton(QDialog):
         return handled
 
     def _restore_latest_popup(self) -> None:
-        self.popups = [popup for popup in self.popups if popup.isVisible()]
-        if not self.popups:
+        self.popups = retain_live_popups(self.popups)
+        visible = [popup for popup in self.popups if popup.isVisible()]
+        if not visible:
             self.raise_()
             return
-        popup = self.popups[-1]
+        popup = visible[-1]
         popup.show()
         popup.raise_()
         popup.activateWindow()
@@ -1014,7 +1015,7 @@ class FloatButton(QDialog):
             ocr_langs = ocr_module.languages_for(
                 str(self.settings.get("float_source_language", "auto")))
             _log("ocr: reading…")
-        self.popups = [p for p in self.popups if p.isVisible()]
+        self.popups = retain_live_popups(self.popups)
         for p in self.popups:
             if not getattr(p, "_pinned", False):
                 p.close()
@@ -1329,11 +1330,23 @@ class FloatButton(QDialog):
     def _quit(self) -> None:
         """Real quit: pinned popups used to keep an invisible process alive."""
         log.info("floating translator quitting")
+        self.popups = retain_live_popups(self.popups, include_hidden=True)
         for p in list(self.popups):
             try:
                 p.close()
             except RuntimeError:
                 pass
+        if any(popup.isVisible() or getattr(popup, "_close_pending", False)
+               for popup in self.popups):
+            QTimer.singleShot(100, self._quit)
+            return
+        from PySide6.QtCore import QThread
+        workers = [worker for worker in self.findChildren(QThread) if worker.isRunning()]
+        if workers:
+            for worker in workers:
+                worker.requestInterruption()
+            QTimer.singleShot(100, self._quit)
+            return
         self.popups.clear()
         if self._tray is not None:
             self._tray.hide()
@@ -1381,4 +1394,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()

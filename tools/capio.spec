@@ -31,6 +31,7 @@ hidden = [
     "ocr_providers.oneocr_backend", "ocr_providers.manager",
     "popup.translate_popup", "popup.speech_worker",
     "reader.pdf_utils", "reader.thumbnails", "reader.document_import",
+    "reader.pdf_process", "translators.http_client",
     # third-party
     "pymupdf", "mammoth", "mss", "mss.windows", "PIL", "PIL.Image", "PIL.PngImagePlugin",
     "PIL.ImageOps", "edge_tts", "certifi", "langdetect",

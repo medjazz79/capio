@@ -268,6 +268,11 @@ LANGUAGE_NAMES = {
     "it": "Italian",
     "es": "Spanish",
     "de": "German",
+    "pt": "Portuguese",
+    "ja": "Japanese",
+    "ko": "Korean (South Korea)",
+    "zh": "Chinese Simplified",
+    "hi": "Hindi",
 }
 
 LANGUAGE_CHOICES = (
@@ -278,7 +283,24 @@ LANGUAGE_CHOICES = (
     ("Italiano", "it"),
     ("Español", "es"),
     ("Deutsch", "de"),
+    ("Portuguese", "pt"),
+    ("Japanese", "ja"),
+    ("Korean (South Korea)", "ko"),
+    ("Chinese Simplified", "zh"),
+    ("Hindi", "hi"),
 )
+
+
+def output_script_rule(target_language: str) -> str:
+    """Specify the writing system as well as the language name."""
+    return {
+        "hi": "Write natural Hindi (हिन्दी) in Devanagari script (देवनागरी), not Latin transliteration.",
+        "ko": "Write Korean prose in Hangul script.",
+        "zh": "Write Chinese prose using Simplified Chinese characters.",
+        "ja": "Write Japanese prose using normal Japanese kanji and kana.",
+        "ru": "Write Russian prose in Cyrillic script.",
+    }.get(target_language, "")
+
 
 def output_token_budget(text: str, minimum: int = 2048) -> int:
     """Leave enough generation room for translations that expand in token count."""
@@ -337,6 +359,7 @@ def system_instructions(
         f"in {target}; do not copy or retain source-language sentences or "
         "paragraphs. Only proper names, URLs that occur in the source, and "
         "notation that must remain unchanged may use another language. "
+        + output_script_rule(target_language) + " "
         + PARENTHESIS_RULES
         + (
             " " + ARABIC_NAME_PRESERVATION_RULE
@@ -357,7 +380,17 @@ def user_prompt(
     text: str,
     source_language: str = "auto",
     target_language: str = "ar",
+    *, include_rules: bool = True,
 ) -> str:
+    if not include_rules:
+        target = LANGUAGE_NAMES.get(target_language, "Arabic")
+        source = LANGUAGE_NAMES.get(source_language, "the detected source language")
+        music = music_domain_rules() if is_music_context(text) else ""
+        return (
+            f"Translate this passage from {source} into {target}. Follow the system's "
+            f"translation and layout rules. {output_script_rule(target_language)} "
+            f"{music}\n\nSource passage:\n{text}"
+        )
     source = LANGUAGE_NAMES.get(source_language, "the automatically detected language")
     target = LANGUAGE_NAMES.get(target_language, "Arabic")
     if source_language == "auto":
@@ -373,6 +406,7 @@ def user_prompt(
         f"Translate this passage{source_description} into "
         f"{target}. {source_instruction}"
         f"The required output language is {target}. "
+        f"{output_script_rule(target_language)} "
         f"It is the only permitted output language. Write every readable "
         f"sentence and paragraph in {target}; "
         f"translate complete ideas and phrases into clear, natural, idiomatic "
@@ -419,3 +453,8 @@ def user_prompt(
         f"{PARENTHESIS_RULES}\n\n"
         f"{text}"
     )
+
+
+def request_user_prompt(text, source_language="auto", target_language="ar"):
+    """Adapters already send system_instructions; do not repeat those rules."""
+    return user_prompt(text, source_language, target_language, include_rules=False)

@@ -70,7 +70,8 @@ from config.settings import (
     MAX_TRANSLATION_TOP_BOTTOM_MARGIN_PX, MIN_LINE_SPACING,
     MAX_TRANSLATION_FONT_SIZE, MIN_TRANSLATION_FONT_SIZE,
     MIN_TRANSLATION_SIDE_MARGIN_PX,
-    MIN_TRANSLATION_TOP_BOTTOM_MARGIN_PX, load, save,
+    MIN_TRANSLATION_TOP_BOTTOM_MARGIN_PX, configure_playback_volume,
+    load, save,
 )
 
 _POPUP_COLORS = {
@@ -111,6 +112,22 @@ _SETEXT_UNDERLINE = re.compile(r"^[ \t]{0,3}(?:=+|-{3,})[ \t]*$")
 _BLANK_LINE_RUN = re.compile(r"\n(?:[ \t]*\n){2,}")
 
 
+def _normalize_line_separators(text: str) -> str:
+    """Turn Unicode line separators into the newlines Markdown understands.
+
+    Models and PDF extractors sometimes emit U+2028 between source lines.
+    Qt treats that character as a forced line break even inside a paragraph,
+    which produces ragged Arabic lines that stop after every sentence. U+2029
+    is a real paragraph separator, so it becomes a blank line.
+    """
+    return (
+        text.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\u2028", "\n")
+        .replace("\u2029", "\n\n")
+    )
+
+
 def reflow_wrapped_prose(markdown: str, *, hold_trailing: bool = False) -> str:
     """Join prose that the model wrapped at the source page's line breaks.
 
@@ -119,10 +136,12 @@ def reflow_wrapped_prose(markdown: str, *, hold_trailing: bool = False) -> str:
     Left alone, each of those newlines becomes a block of its own and the
     paragraph renders as ragged short lines instead of flush right text.
 
-    Only soft wraps are merged. A blank line, an explicit Markdown hard break
-    (two trailing spaces or a trailing backslash), a fenced code block, and
-    any line that opens a heading, list, quote, table, or rule all keep their
-    break, so the finished document is unchanged.
+    Unicode U+2028 separators are treated as soft wraps and U+2029 as real
+    paragraph breaks before this runs. Only soft wraps are merged. A blank
+    line, an explicit Markdown hard break (two trailing spaces or a trailing
+    backslash), a fenced code block, and any line that opens a heading, list,
+    quote, table, or rule all keep their break, so the finished document is
+    unchanged.
 
     ``hold_trailing`` serves callers that grow the text one token at a time.
     Text that has not finished arriving cannot be classified yet: a trailing
@@ -131,6 +150,7 @@ def reflow_wrapped_prose(markdown: str, *, hold_trailing: bool = False) -> str:
     every result a prefix of the next, so the caller only ever appends and
     never retypes or drops a character it already showed.
     """
+    markdown = _normalize_line_separators(markdown)
     parts = re.split(r"(```.*?```|```.*\Z)", markdown, flags=re.DOTALL)
     for index in range(0, len(parts), 2):
         segments = re.split(r"(\n[ \t]*\n+)", parts[index])
@@ -173,6 +193,19 @@ def reflow_wrapped_prose(markdown: str, *, hold_trailing: bool = False) -> str:
         if without_fence != reflowed:
             reflowed = without_fence.rstrip(" \t")
     return reflowed[:-1] if reflowed.endswith("\n") else reflowed
+
+
+def retain_live_popups(popups, *, include_hidden=False):
+    """Keep hidden windows alive until their workers have finished closing."""
+    live = []
+    for popup in popups:
+        try:
+            visible = popup.isVisible()
+            if include_hidden or visible or getattr(popup, "_close_pending", False) is True:
+                live.append(popup)
+        except RuntimeError:
+            pass  # Its Qt object has already been deleted.
+    return live
 
 
 class TranslationTextEdit(QTextEdit):
@@ -631,6 +664,7 @@ class TranslatePopup(QDialog):
         layout.addWidget(self.content_splitter, 1)
 
         self._audio_output = QAudioOutput(self)
+        configure_playback_volume(self._audio_output)
         self._player = QMediaPlayer(self)
         self._player.setAudioOutput(self._audio_output)
         self._player.setPlaybackRate(self._speech_rate)
@@ -731,9 +765,12 @@ class TranslatePopup(QDialog):
         translated_text: str,
         badge: str,
         source_text: str | None = None,
+        pil_image=None,
     ) -> None:
+        generation = self._invalidate_translation()
         self._reset_speech_for_new_translation()
-        self._translation_generation += 1
+        if generation != self._translation_generation:
+            return
         self._chat_messages.clear()
         self._chat_entries.clear()
         self._chat_partial_text = ""
@@ -745,7 +782,7 @@ class TranslatePopup(QDialog):
         self._streamed_displayed = ""
         self._worker = None
         self._source_text = source_text
-        self._source_image = None
+        self._source_image = pil_image
         self.result.clear()
         self._apply_streamed_typography()
         self._on_done(translated_text, badge)
@@ -785,15 +822,20 @@ class TranslatePopup(QDialog):
 
     def _set_translation_language(self, kind: str, code: str) -> None:
         key = "source_language" if kind == "source" else "target_language"
+        if self.settings.get(key, "auto" if kind == "source" else "ar") == code:
+            return
         self.settings[key] = code
-        if kind == "target":
-            self._refresh_speech_rate()
         if self._float_language_preferences:
             float_key = (
                 "float_source_language" if kind == "source"
                 else "float_target_language"
             )
             self.settings[float_key] = code
+        # Invalidate before audio/settings callbacks can process queued Qt
+        # signals. Otherwise the preceding language can briefly repaint here.
+        generation = self._invalidate_translation()
+        if kind == "target":
+            self._refresh_speech_rate()
         self._update_language_control(kind, code)
         if self._language_change_callback is not None:
             self._language_change_callback(
@@ -801,7 +843,8 @@ class TranslatePopup(QDialog):
                 self.settings.get("target_language", "ar"),
                 self,
             )
-        self._retranslate_for_current_languages()
+        if generation == self._translation_generation:
+            self._retranslate_for_current_languages()
 
     def _update_language_control(self, kind: str, code: str) -> None:
         for language, action in self._language_actions[kind].items():
@@ -815,19 +858,36 @@ class TranslatePopup(QDialog):
 
     def sync_languages(self, source_language: str, target_language: str) -> None:
         """Apply toolbar languages without calling back to the application."""
+        changed = (
+            source_language != self.settings.get("source_language", "auto")
+            or target_language != self.settings.get("target_language", "ar")
+        )
         self.settings["source_language"] = source_language
         self.settings["target_language"] = target_language
+        if self._float_language_preferences:
+            self.settings["float_source_language"] = source_language
+            self.settings["float_target_language"] = target_language
+        generation = (self._invalidate_translation() if changed
+                      else self._translation_generation)
         self._refresh_speech_rate()
         self._update_language_control("source", source_language)
         self._update_language_control("target", target_language)
-        self._retranslate_for_current_languages()
+        if changed and generation == self._translation_generation:
+            self._retranslate_for_current_languages()
 
     def _retranslate_for_current_languages(self) -> None:
         if self._source_text:
             self._start_translation_worker(text=self._source_text)
-        elif (self._source_image is not None
-              and self.settings.get("selection_mode") == "image"):
-            self._start_translation_worker(pil_image=self._source_image)
+        elif self._source_image is not None:
+            # OCR may not have delivered text yet. Supersede that worker now,
+            # just as for direct image translation, using the new languages.
+            from translators.ocr import languages_for
+
+            self._start_translation_worker(
+                pil_image=self._source_image,
+                ocr_langs=languages_for(
+                    self.settings.get("source_language", "auto")),
+            )
 
     def _save_shared_settings(
         self, *, update_local: bool = True, **updates: object,
@@ -900,8 +960,8 @@ class TranslatePopup(QDialog):
         pil_image=None,
         ocr_langs=("ru", "en"),
     ) -> None:
+        generation = self._invalidate_translation()
         self._reset_speech_for_new_translation()
-        self._translation_generation += 1
         self._chat_messages.clear()
         self._chat_entries.clear()
         self._chat_partial_text = ""
@@ -909,9 +969,10 @@ class TranslatePopup(QDialog):
         self.chat_transcript.clear()
         self.chat_send_btn.setEnabled(False)
         self._toggle_chat_panel(False)
-        generation = self._translation_generation
-        self._streamed_partial = ""
-        self._streamed_displayed = ""
+        # A nested Qt event during audio reset may have selected another
+        # language. Only the newest intent is allowed to create a worker.
+        if generation != self._translation_generation:
+            return
         worker_settings = dict(self.settings)
         if self._full_page_translation:
             worker_settings["_full_page_translation"] = True
@@ -936,6 +997,30 @@ class TranslatePopup(QDialog):
         self._apply_streamed_typography()
         self.speak_btn.setEnabled(False)
         worker.start()
+
+    def _invalidate_translation(self) -> int:
+        """Retire the old reply before invoking anything that can reenter Qt."""
+        self._translation_generation += 1
+        generation = self._translation_generation
+        self._worker = None
+        self._cancel_running_translations()
+        self._streamed_partial = ""
+        self._streamed_displayed = ""
+        self._translation_text = ""
+        self._rendered_translation_text = None
+        self._translation_needs_render = False
+        self.result.clear()
+        self.speak_btn.setEnabled(False)
+        self.chat_send_btn.setEnabled(False)
+        self.spin.setText("Starting…")
+        self.spin.show()
+        return generation
+
+    def _cancel_running_translations(self) -> None:
+        """Stop superseded workers before another translation can start."""
+        for worker in self._translation_workers:
+            if worker.isRunning():
+                worker.requestInterruption()
 
     def _reset_speech_for_new_translation(self) -> None:
         self._speech_active = False
@@ -992,7 +1077,7 @@ class TranslatePopup(QDialog):
     def _on_worker_partial(self, partial_text: str) -> None:
         """Append streamed text cheaply; apply Markdown once the reply is done."""
         worker = self.sender()
-        if worker is None or getattr(
+        if worker is not self._worker or worker is None or getattr(
                 worker, "_popup_generation", -1) != self._translation_generation:
             return
         self.spin.setText("Translating…")
@@ -1042,6 +1127,7 @@ class TranslatePopup(QDialog):
         short lines for the whole request. Reflowing here makes the preview
         match the rendered result.
         """
+        text = _normalize_line_separators(text)
         if not self._reflows_wrapped_prose():
             return _BLANK_LINE_RUN.sub("\n\n", text)
         reflowed = reflow_wrapped_prose(text, hold_trailing=True)
@@ -1152,6 +1238,12 @@ class TranslatePopup(QDialog):
         self._continue_pending_close()
 
     def _on_source_ready(self, worker: TranslateWorker, source: str) -> None:
+        if (worker is not self._worker
+                or getattr(worker, "_popup_generation", -1)
+                != self._translation_generation):
+            # An OCR/worker result that lost its generation must not start a
+            # second translation or overwrite the current original text.
+            return
         self._source_text = source
         if (
             self.settings.get("source_language", "auto")
@@ -1168,7 +1260,8 @@ class TranslatePopup(QDialog):
         translated_text: str,
         badge: str,
     ) -> None:
-        if generation == self._translation_generation:
+        if (generation == self._translation_generation
+                and worker is self._worker):
             self._streamed_partial = ""
             self._streamed_displayed = ""
             self._worker = worker
@@ -1184,6 +1277,18 @@ class TranslatePopup(QDialog):
 
     def refresh_display(self, settings: dict | None = None) -> None:
         """Reapply saved typography after refreshing settings in-place."""
+        # Reader settings are mutable. Keep a popup-owned snapshot so a later
+        # toolbar change cannot silently change this popup before it can detect
+        # the language change and replace its worker.
+        if settings is not None:
+            settings = dict(settings)
+        languages_changed = settings is not None and any(
+            settings.get(key, default) != self.settings.get(key, default)
+            for key, default in (
+                ("source_language", "auto"), ("target_language", "ar"))
+        )
+        if languages_changed:
+            self._invalidate_translation()
         theme_changed = settings is not None and (
             settings.get("theme") != self.settings.get("theme")
             or settings.get("color_scheme")
@@ -1265,6 +1370,14 @@ class TranslatePopup(QDialog):
             if self._speech_active and speech_configuration_changed:
                 self._toggle_speech()
             self.settings = settings
+        if languages_changed:
+            source_language = self.settings.get("source_language", "auto")
+            target_language = self.settings.get("target_language", "ar")
+            self._update_language_control("source", source_language)
+            self._update_language_control("target", target_language)
+            if self._float_language_preferences:
+                self.settings["float_source_language"] = source_language
+                self.settings["float_target_language"] = target_language
         self._refresh_speech_controls()
         explain_mode = bool(self.settings.get("explain_mode", False))
         explain_instructions = self.settings.get("explain_instructions", "")
@@ -1275,7 +1388,8 @@ class TranslatePopup(QDialog):
         self._apply_chat_direction()
         if (
             settings is not None
-            and (old_explain_mode != explain_mode
+            and (languages_changed
+                 or old_explain_mode != explain_mode
                  or old_explain_instructions != explain_instructions
                  or old_arabic_tashkeel != bool(
                      self.settings.get("arabic_tashkeel", False)))
@@ -2273,7 +2387,7 @@ class TranslatePopup(QDialog):
     def _markdown_with_inline_notation(
         markdown: str, *, reflow_soft_line_breaks: bool = False,
     ) -> str:
-        markdown = markdown.replace("\r\n", "\n").replace("\r", "\n")
+        markdown = _normalize_line_separators(markdown)
         markdown_parts = re.split(r"(```.*?```)", markdown, flags=re.DOTALL)
 
         def split_table_row(line: str) -> list[str]:
@@ -3000,7 +3114,10 @@ class TranslatePopup(QDialog):
             return
 
         self._voice_actions = []
-        preferred_language_order = ("Fr", "Ar", "It", "En", "De", "Es", "Ru")
+        preferred_language_order = (
+            "Fr", "Ar", "It", "En", "De", "Es", "Ru",
+            "Pt", "Ja", "Ko", "Zh", "Hi",
+        )
         language_order = [
             language
             for language in preferred_language_order

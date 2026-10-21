@@ -378,7 +378,7 @@ class TestFreeLLMChain(unittest.TestCase):
         response = mock.Mock(status_code=200)
         response.headers = {}
         response.raise_for_status.return_value = None
-        response.iter_lines.return_value = []
+        response.iter_lines.return_value = [b"data: [DONE]"]
         response.json.return_value = {"choices": [{
             "message": {"content": "النص"},
             "finish_reason": "stop",

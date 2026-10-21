@@ -10,6 +10,9 @@ Design rules:
 from __future__ import annotations
 
 import json
+import copy
+import threading
+from contextlib import contextmanager
 import logging
 import os
 import secrets
@@ -44,6 +47,79 @@ _SETTINGS_READ_RETRIES = 3
 
 class SettingsLoadError(ValueError):
     """Settings could not be read safely, and no recovery copy was usable."""
+
+
+class Settings(dict):
+    """A normal settings mapping with a private, non-serialized edit baseline."""
+
+    def __init__(self, values=(), *, baseline=None):
+        super().__init__(copy.deepcopy(dict(values)))
+        self.baseline = copy.deepcopy(dict(self) if baseline is None else baseline)
+
+    def copy(self):
+        return Settings(self, baseline=self.baseline)
+
+
+def copy_settings(values: dict) -> Settings:
+    return Settings(values, baseline=getattr(values, "baseline", values))
+
+
+def _merge_edits(current, incoming, baseline):
+    if isinstance(incoming, dict) and isinstance(baseline, dict):
+        merged = copy.deepcopy(current) if isinstance(current, dict) else {}
+        for key in baseline.keys() - incoming.keys():
+            merged.pop(key, None)
+        for key, value in incoming.items():
+            if key not in baseline or value != baseline[key]:
+                merged[key] = _merge_edits(merged.get(key), value, baseline.get(key))
+        return merged
+    return copy.deepcopy(incoming)
+
+
+def _merge_provider_edits(current, incoming, baseline):
+    def by_id(entries):
+        return {entry["id"]: entry for entry in _sanitize_custom_providers(entries)}
+    live, edited, original = map(by_id, (current, incoming, baseline))
+    # A stale editor must not resurrect a provider removed by another window.
+    for provider_id in original.keys() - live.keys():
+        edited.pop(provider_id, None)
+    return list(_merge_edits(live, edited, original).values())
+
+
+_SETTINGS_LOCK = threading.RLock()
+
+
+@contextmanager
+def _settings_transaction():
+    """Serialize the reader and floating process, including read/merge/write."""
+    with _SETTINGS_LOCK:
+        with SETTINGS_PATH.with_suffix(".lock").open("a+b") as lock_file:
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.025)
+            else:
+                import fcntl
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _read_text_with_retry(path: Path) -> str:
@@ -118,6 +194,9 @@ DEFAULTS = {
     # Master switch for every speedup: live streaming display,
     # fastest-first bridge ordering, TTS disk cache, parallel synthesis.
     "fast_mode": True,
+    "allow_translation_fallback": True,
+    # One editable source=preferred-term glossary for each target language.
+    "translation_glossaries": {},
     # Additional logical pixels between wrapped translation lines.
     "line_spacing_px": DEFAULT_LINE_SPACING,
     # Equal inner margin on the left and right sides of translated text.
@@ -196,6 +275,16 @@ DEFAULTS = {
 }
 
 SETTINGS_PATH = Path.home() / ".harmony_translator.json"
+
+# Playback volume is deliberately not a setting. The OS mixer owns loudness,
+# and the user changes it outside Capio. Every new player therefore starts at
+# full scale instead of restoring an old app-level volume.
+PLAYBACK_VOLUME = 1.0
+
+
+def configure_playback_volume(audio_output) -> None:
+    """Keep app output at full scale so the OS mixer controls loudness."""
+    audio_output.setVolume(PLAYBACK_VOLUME)
 
 
 def _custom_providers_path() -> Path:
@@ -280,6 +369,11 @@ def _sanitize_vision_probes(raw, custom_providers) -> dict:
 
 
 def load() -> dict:
+    with _settings_transaction():
+        return Settings(_load_unlocked())
+
+
+def _load_unlocked() -> dict:
     """Read settings, filling in defaults without replacing unreadable data."""
     data = {}
     settings_file_loaded = False
@@ -331,7 +425,7 @@ def load() -> dict:
             data = recovered
             settings_file_loaded = True
             log.warning("Recovered settings from %s", recovered_path)
-    merged = dict(DEFAULTS)
+    merged = copy.deepcopy(DEFAULTS)
     merged.update({k: v for k, v in data.items() if k in DEFAULTS})
     for key in ("speech_rate_arabic", "speech_rate_other"):
         if key not in data:
@@ -608,6 +702,27 @@ def _working_fallback(settings: dict) -> str:
 
 
 def save(settings: dict) -> None:
+    with _settings_transaction():
+        baseline = getattr(settings, "baseline", None)
+        if baseline is not None:
+            current = _load_unlocked()
+            changes = {
+                key: value for key, value in settings.items()
+                if key in DEFAULTS and value != baseline.get(key)
+            }
+            for key, value in changes.items():
+                merger = _merge_provider_edits if key == "custom_providers" else _merge_edits
+                current[key] = merger(current.get(key), value, baseline.get(key))
+        else:
+            current = settings
+        _save_unlocked(current)
+        if isinstance(settings, Settings):
+            settings.clear()
+            settings.update(copy.deepcopy(current))
+            settings.baseline = copy.deepcopy(current)
+
+
+def _save_unlocked(settings: dict) -> None:
     """Write settings atomically, without a BOM (a BOM breaks `json.loads`)."""
     clean = {k: settings.get(k, DEFAULTS[k]) for k in DEFAULTS}
     # Sanitize custom_providers before saving

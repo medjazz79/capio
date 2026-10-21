@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 from ui.context_menu import style_context_menu
 
+from config.settings import configure_playback_volume
 from popup.chat_worker import ChatWorker
 from popup.speech_worker import (
     ARABIC_VOICE,
@@ -171,6 +172,7 @@ class ChatPanel(QWidget):
         self._messages: list[dict[str, str]] = []
         self._entries: list[tuple[str, str]] = []
         self._worker: ChatWorker | None = None
+        self._shutting_down = False
         self._translation_context = ""
         self._explanation_selection = ""
         try:
@@ -319,6 +321,7 @@ class ChatPanel(QWidget):
         ):
             widget.installEventFilter(self)
         self._audio_output = QAudioOutput(self)
+        configure_playback_volume(self._audio_output)
         self._player = QMediaPlayer(self)
         self._player.setAudioOutput(self._audio_output)
         self._player.setPlaybackRate(self._speech_rate)
@@ -832,7 +835,7 @@ class ChatPanel(QWidget):
         display_question: str | None = None,
     ) -> None:
         if (
-            not question
+            self._shutting_down or not question
             or self._worker is not None
             or self._streaming_active
         ):
@@ -1447,3 +1450,13 @@ class ChatPanel(QWidget):
 
     def stop_speech(self) -> None:
         self._stop_speech()
+
+    def shutdown(self) -> None:
+        """Stop playback and ask every owned worker, including superseded ones, to stop."""
+        from PySide6.QtCore import QThread
+        self._shutting_down = True
+        self._streaming_timer.stop()
+        self._stop_speech()
+        for worker in self.findChildren(QThread):
+            if worker.isRunning():
+                worker.requestInterruption()

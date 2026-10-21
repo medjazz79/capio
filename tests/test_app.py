@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from tests.transport_support import requires_loopback
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -205,11 +206,12 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
             "reasoning_enabled": False,
             "vision_enabled": False,
         }
-        return SettingsDialog(dict(
+        dialog = SettingsDialog(dict(
             DEFAULTS,
             model="custom:local",
             custom_providers=[provider],
-        )), provider
+        ))
+        return dialog, dialog._settings["custom_providers"][0]
 
     def _fill_credentials(self, dialog):
         card = next(
@@ -1115,7 +1117,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
                 for action in dialog.edge_speech_voice_menu.actions()
                 if action.menu() is not None
             ],
-            ["Ar", "Multilingual"],
+            ["Ar", "Ja", "Multilingual"],
         )
         voice_actions = [
             action
@@ -1127,11 +1129,11 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         ]
         self.assertEqual(
             {action.data() for action in voice_actions},
-            {"ar-DZ-AminaNeural", "ja-JP-EchoMultilingualNeural"},
-        )
-        self.assertNotIn(
-            "ja-JP-NanamiNeural",
-            {action.data() for action in voice_actions},
+            {
+                "ar-DZ-AminaNeural",
+                "ja-JP-NanamiNeural",
+                "ja-JP-EchoMultilingualNeural",
+            },
         )
         selected = next(
             action for action in voice_actions
@@ -1140,12 +1142,12 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         self.assertEqual(
             dialog.values()["speech_voice"], "ja-JP-EchoMultilingualNeural")
         self.assertEqual(
-            [
+            {
                 action.data()
                 for action in voice_actions
                 if action.isChecked()
-            ],
-            ["ja-JP-EchoMultilingualNeural"],
+            },
+            {"ja-JP-EchoMultilingualNeural"},
         )
 
     def test_tts_voice_control_matches_fields_and_menu_opens_upward(self):
@@ -1868,7 +1870,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         from unittest import mock
         from translators import chain
 
-        settings = dict(DEFAULTS, explain_mode=True, fast_mode=True)
+        settings = dict(DEFAULTS, model="google-translate", explain_mode=True, fast_mode=True)
         received = []
 
         def translate_chunk(text, chunk_settings):
@@ -2820,12 +2822,32 @@ def mock_chain_translate(*args, **kwargs):
     from unittest import mock
     if "return_value" in kwargs:
         text, badge = kwargs["return_value"]
-        stream_kwargs = dict(
-            kwargs, return_value=iter([("done", text, badge)]))
+        stream_kwargs = dict(kwargs)
+        stream_kwargs.pop("return_value")
+        stream_kwargs["side_effect"] = lambda *_args, **_kwargs: iter([("done", text, badge)])
+        from popup.worker import TranslateWorker
+        workers = []
+        original_start = TranslateWorker.start
+
+        def start(worker, *start_args, **start_kwargs):
+            workers.append(worker)
+            return original_start(worker, *start_args, **start_kwargs)
+
         with mock.patch("translators.chain.translate", *args, **kwargs):
             with mock.patch("translators.chain.translate_stream",
                             *args, **stream_kwargs):
-                yield
+                with mock.patch.object(TranslateWorker, "start", new=start):
+                    try:
+                        yield
+                    finally:
+                        # Keep mocks installed until the workers created in
+                        # this context finish, rather than racing their startup.
+                        for worker in workers:
+                            worker.wait(3000)
+                        from PySide6.QtWidgets import QApplication
+                        app = QApplication.instance()
+                        if app is not None:
+                            app.processEvents()
     elif "side_effect" in kwargs:
         fn = kwargs["side_effect"]
 
@@ -5474,6 +5496,7 @@ class TestReaderZoom(_GuiCase):
         self.assertEqual(
             len(worker._segment_word_spans), len(worker._segments))
 
+    @requires_loopback
     def test_speech_stream_delivers_chunks_before_it_is_finished(self):
         import threading
         from urllib.request import urlopen
@@ -6076,6 +6099,9 @@ class TestReaderZoom(_GuiCase):
         ):
             popup = TranslatePopup(dict(DEFAULTS), source_text="hello")
         try:
+            # Deliver the initial worker result before replacing it with the
+            # long synthetic transcript whose scrolling is under test.
+            self.app.processEvents()
             text = "word " * 500 + "target"
             popup.result.setPlainText(text)
             popup.resize(400, 220)
@@ -8139,7 +8165,8 @@ class TestReaderZoom(_GuiCase):
                 popup.refresh_display(updated)
 
             render.assert_not_called()
-            self.assertIs(popup.settings, updated)
+            self.assertIsNot(popup.settings, updated)
+            self.assertEqual(popup.settings, updated)
             self.assertEqual(popup.result.toPlainText(), "translated")
             self.assertEqual(popup.styleSheet(), original_popup_style)
             self.assertEqual(popup.result.styleSheet(), original_result_style)
@@ -8583,11 +8610,17 @@ class TestReaderZoom(_GuiCase):
                     action.text() for action in pop.voice_menu.actions()
                     if action.menu() is not None
                 ],
-                ["Fr", "Ar", "It", "En", "De", "Es", "Ru", "Multilingual"],
+                [
+                    "Fr", "Ar", "It", "En", "De", "Es", "Ru", "Ja",
+                    "Multilingual",
+                ],
             )
             self.assertEqual(
                 set(languages),
-                {"Ar", "Fr", "It", "En", "De", "Es", "Ru", "Multilingual"},
+                {
+                    "Ar", "Fr", "It", "En", "De", "Es", "Ru", "Ja",
+                    "Multilingual",
+                },
             )
             self.assertEqual(
                 pop.voice_menu.layoutDirection(),
@@ -8625,7 +8658,7 @@ class TestReaderZoom(_GuiCase):
             from config.settings import load
             self.assertEqual(load()["speech_voice"], "ar-DZ-AminaNeural")
             menu_voice_ids = {action.data() for action in voice_actions}
-            self.assertNotIn("ja-JP-NanamiNeural", menu_voice_ids)
+            self.assertIn("ja-JP-NanamiNeural", menu_voice_ids)
             multilingual_countries = {
                 action.text(): action.menu()
                 for action in languages["Multilingual"].actions()
@@ -12373,7 +12406,13 @@ class TestOneOCR(unittest.TestCase):
         finally:
             manager.reset_for_tests()
 
+    def _require_native_ocr(self):
+        from ocr_providers import oneocr_backend
+        if oneocr_backend.find_snipping_dir() is None:
+            self.skipTest("Windows Snipping Tool OCR files are unavailable in this environment")
+
     def test_locator_finds_snipping_files(self):
+        self._require_native_ocr()
         from ocr_providers import oneocr_backend as ob
         d = ob.find_snipping_dir()
         self.assertIsNotNone(d, "Snipping Tool not found on this machine")
@@ -12381,6 +12420,7 @@ class TestOneOCR(unittest.TestCase):
             self.assertTrue((d / f).is_file(), f"missing: {f}")
 
     def test_staging_dir_loads_dll(self):
+        self._require_native_ocr()
         import ctypes
         from ocr_providers import oneocr_backend as ob
         d = ob.ensure_usable_dir()
@@ -12414,6 +12454,7 @@ class TestOneOCR(unittest.TestCase):
                 self.assertLess(top, bottom)
 
     def test_end_to_end_russian_with_boxes(self):
+        self._require_native_ocr()
         from ocr_providers import manager
         img = self._sample_image(["Доминанта разрешается в тонику"])
         provider = manager.get_provider()
@@ -12426,6 +12467,7 @@ class TestOneOCR(unittest.TestCase):
         self.assertGreater(result.mean_confidence, 0.3)
 
     def test_end_to_end_italian_accents_unicode(self):
+        self._require_native_ocr()
         from ocr_providers import manager
         img = self._sample_image(["La cadenza verso la tonica",
                                   "L'accordo di settima à è"])
@@ -12435,6 +12477,7 @@ class TestOneOCR(unittest.TestCase):
         self._assert_boxes_sane(result, img)
 
     def test_facade_auto_uses_native_single_pass(self):
+        self._require_native_ocr()
         from translators import ocr
         img = self._sample_image(["Le principali cadenze sono"])
         text, langs = ocr.auto_read(img)
@@ -12462,6 +12505,7 @@ class TestOneOCR(unittest.TestCase):
             manager.reset_for_tests()
 
     def test_boxes_survive_facade(self):
+        self._require_native_ocr()
         from translators import ocr
         img = self._sample_image(["Hello harmony triad"])
         result = ocr.read_with_boxes(img)
@@ -13010,7 +13054,7 @@ class TestFloat(_GuiCase):
         finally:
             self._close_float(floating)
 
-    def test_float_language_dialog_has_auto_source_and_seven_targets(self):
+    def test_float_language_dialog_has_auto_source_and_twelve_targets(self):
         from ui.float_language_dialog import FloatLanguageDialog
 
         dialog = FloatLanguageDialog({
@@ -13018,13 +13062,16 @@ class TestFloat(_GuiCase):
             "float_target_language": "it",
         })
         try:
-            self.assertEqual(dialog.source_language.count(), 8)
-            self.assertEqual(dialog.target_language.count(), 7)
+            self.assertEqual(dialog.source_language.count(), 13)
+            self.assertEqual(dialog.target_language.count(), 12)
             self.assertEqual(dialog.values(), ("auto", "it"))
             self.assertEqual(
                 {dialog.source_language.itemData(i)
                  for i in range(dialog.source_language.count())},
-                {"auto", "ar", "fr", "en", "ru", "it", "es", "de"},
+                {
+                    "auto", "ar", "fr", "en", "ru", "it", "es", "de",
+                    "pt", "ja", "ko", "zh", "hi",
+                },
             )
         finally:
             dialog.close()
@@ -13081,8 +13128,8 @@ class TestFloat(_GuiCase):
                 )
             self.assertFalse(popup.source_language_btn.isHidden())
             self.assertFalse(popup.target_language_btn.isHidden())
-            self.assertEqual(len(popup._language_actions["source"]), 8)
-            self.assertEqual(len(popup._language_actions["target"]), 7)
+            self.assertEqual(len(popup._language_actions["source"]), 13)
+            self.assertEqual(len(popup._language_actions["target"]), 12)
             self.assertEqual(popup.source_language_btn.text(), "From: English")
             self.assertEqual(popup.target_language_btn.text(), "To: العربية")
             self.assertEqual(type(popup.source_language_btn).__name__, "QPushButton")
@@ -13818,7 +13865,9 @@ class TestFloat(_GuiCase):
         try:
             img = Image.new("RGB", (400, 200), "white")
             with mock.patch.object(f, "_pick_rect",
-                                   return_value=QRect(0, 0, 400, 200)):
+                                   return_value=QRect(0, 0, 400, 200)), mock.patch(
+                    "translators.ocr.is_available", return_value=True), mock.patch(
+                    "translators.ocr.auto_read", return_value=("selected text", ("en",))):
                 with mock.patch("main_02.capture_pil", return_value=img):
                     with mock_chain_translate(
                                     return_value=("نص", "T")):

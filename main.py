@@ -73,9 +73,9 @@ from PySide6.QtWidgets import (
 )
 
 from config.settings import (
-    SettingsLoadError, load, resolve_model, save,
+    SettingsLoadError, copy_settings, load, resolve_model, save,
 )
-from popup.translate_popup import TranslatePopup
+from popup.translate_popup import TranslatePopup, retain_live_popups
 from popup.worker import PageTranslationWorker, TranslateWorker
 from reader import continuous, pdf_utils
 from reader.bookview import BookView
@@ -663,7 +663,7 @@ class MainWindow(QMainWindow):
             TranslateWorker, tuple[BookView, int, str | None]
         ] = {}
         self._automatic_page_prefetch_result: (
-            tuple[BookView, int, str | None, str, str] | None
+            tuple[BookView, int, str | None, str, str, object | None] | None
         ) = None
         self._automatic_page_waiting_for_prefetch: int | None = None
         self._automatic_page_prefetch_error: tuple[int, str] | None = None
@@ -2057,10 +2057,11 @@ class MainWindow(QMainWindow):
         self, source_language: str, target_language: str,
         origin: TranslatePopup,
     ) -> None:
+        # Languages are shared by all reader popups, including the automatic
+        # reader's cached next page even when a different popup made the change.
+        self._cancel_automatic_page_prefetch()
         self.settings["source_language"] = source_language
         self.settings["target_language"] = target_language
-        if origin is self._automatic_page_reading_popup:
-            self._cancel_automatic_page_prefetch()
         self._sync_language_combos()
         for popup in self.popups:
             if popup is not origin and popup.isVisible():
@@ -2079,6 +2080,7 @@ class MainWindow(QMainWindow):
         self.target_combo.blockSignals(False)
 
     def _sync_popup_languages(self) -> None:
+        self._cancel_automatic_page_prefetch()
         source = self.settings.get("source_language", "auto")
         target = self.settings.get("target_language", "ar")
         for popup in self.popups:
@@ -2384,7 +2386,8 @@ class MainWindow(QMainWindow):
             self._automatic_page_prefetch_result = None
             self._automatic_page_prefetch_error = None
             popup.set_pretranslated_content(
-                prefetched[3], prefetched[4], prefetched[2])
+                prefetched[3], prefetched[4], prefetched[2],
+                pil_image=prefetched[5])
             return
 
         worker = self._automatic_page_prefetch_worker
@@ -2584,8 +2587,10 @@ class MainWindow(QMainWindow):
             return None, pdf_utils.qimage_to_pil(image), ()
 
         if not force_ocr:
-            kind, payload = book.extract(page_no, page_rect)
-            if kind == "text":
+            # This is a full page: avoid reading QPixmap/widget geometry from
+            # the prefetch thread just to reconstruct a whole-page rectangle.
+            payload = book.page_text(page_no)
+            if payload:
                 return payload, None, ("ru", "en")
         if not ocr.is_available():
             raise RuntimeError(
@@ -2636,7 +2641,8 @@ class MainWindow(QMainWindow):
                         )
             return
         self._automatic_page_prefetch_result = (
-            book, page_no, source_text, translated_text, badge)
+            book, page_no, source_text, translated_text, badge,
+            worker._pil_image if not source_text else None)
         popup = self._automatic_page_reading_popup
         if popup is not None:
             popup.prefetch_speech_markdown(translated_text)
@@ -2907,7 +2913,7 @@ class MainWindow(QMainWindow):
                     page_no: int | None = None,
                     full_page_translation: bool = False,
                     start_automatic_reading: bool = False) -> TranslatePopup:
-        self.popups = [p for p in self.popups if p.isVisible()]
+        self.popups = retain_live_popups(self.popups)
         for p in self.popups:
             if not getattr(p, "_pinned", False):
                 p.close()
@@ -3579,7 +3585,7 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_theme_preview_active", False):
             return settings
 
-        merged = dict(settings)
+        merged = copy_settings(settings)
         preview_keys = ("theme", "color_scheme", "pdf_canvas_theme_background")
         for key in preview_keys:
             if key in self.settings:
@@ -3597,6 +3603,9 @@ class MainWindow(QMainWindow):
                 self._sync_language_combos()
                 self._sync_selection_mode_button()
                 self._refresh_engine_label()
+                if (cur.get("source_language") != old.get("source_language")
+                        or cur.get("target_language") != old.get("target_language")):
+                    self._cancel_automatic_page_prefetch()
                 theme_changed = (
                     cur.get("theme") != old.get("theme")
                     or cur.get("color_scheme") != old.get("color_scheme")
@@ -3611,7 +3620,9 @@ class MainWindow(QMainWindow):
                     scheme = cur.get("color_scheme", "system")
                     self._sync_theme_button(theme)
                     self._apply_theme_skin(theme)
-                if (cur.get("font_size") != old.get("font_size")
+                if (cur.get("source_language") != old.get("source_language")
+                        or cur.get("target_language") != old.get("target_language")
+                        or cur.get("font_size") != old.get("font_size")
                         or cur.get("translation_font")
                         != old.get("translation_font")
                         or cur.get("translation_font_arabic")
@@ -3918,6 +3929,21 @@ class MainWindow(QMainWindow):
                         return
             self._shutdown_confirmed = True
 
+        # The dock's chat/speech workers and the cached Settings voice loader
+        # are children of this window. Do not destroy their QThreads on exit.
+        from PySide6.QtCore import QThread
+        if self._chat_panel is not None:
+            self._chat_panel.shutdown()
+        running_children = [worker for worker in self.findChildren(QThread)
+                            if worker.isRunning()]
+        if running_children:
+            for worker in running_children:
+                worker.requestInterruption()
+            e.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+
+        self.popups = retain_live_popups(self.popups, include_hidden=True)
         if self._shutdown_waiting:
             if any(
                 popup.isVisible() or getattr(popup, "_close_pending", False)

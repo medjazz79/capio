@@ -16,10 +16,10 @@ import json
 import random
 import string
 
-import requests
+from . import http_client as requests
 from PIL import Image
 
-from .prompt import output_token_budget, system_instructions, user_prompt
+from .prompt import output_token_budget, system_instructions, request_user_prompt
 from .vision import (
     encode_image, openai_image_messages, responses_image_input,
 )
@@ -297,7 +297,7 @@ def _iter_chat(
         if image_url else [
             {"role": "system", "content": system_instructions(
                 instructions, source_language, target_language)},
-            {"role": "user", "content": user_prompt(
+            {"role": "user", "content": request_user_prompt(
                 text, source_language, target_language)},
         ]
     )
@@ -426,7 +426,7 @@ def _iter_responses(
     else:
         prompt = system_instructions(
             instructions, source_language, target_language)
-        input_content = user_prompt(text, source_language, target_language)
+        input_content = request_user_prompt(text, source_language, target_language)
     payload = {
         "model": model,
         "instructions": prompt,

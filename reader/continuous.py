@@ -147,8 +147,9 @@ class PageRenderWorker(QThread):
     inline from the GUI-thread QTimer pump, so every page froze the UI for the
     whole render. PyMuPDF is not re-entrant across threads, so this is a single
     serialized worker and ContinuousReader dispatches at most one page at a
-    time (MAX_INFLIGHT): at most one raster is ever in flight, which preserves
-    the memory profile of the old synchronous pump.
+    time (MAX_INFLIGHT). BookView's production callback performs only IPC here:
+    its spawned PdfProcess owns the MuPDF document and performs the rendering.
+    The single in-flight job bounds image copies and avoids a render backlog.
 
     The QImage is built here and only here. QPixmap is a GUI resource and must
     be built on the GUI thread, which the reader does when the result arrives.

@@ -566,7 +566,7 @@ class TestImageStreamingFlow(unittest.TestCase):
 
         image = Image.new("RGB", (32, 24), "white")
         worker = TranslateWorker(
-            dict(DEFAULTS, selection_mode="ocr", fast_mode=True),
+            dict(DEFAULTS, selection_mode="ocr", fast_mode=True, target_language="en"),
             pil_image=image,
             ocr_langs=("en",),
         )
@@ -656,7 +656,8 @@ class TestImageStreamingFlow(unittest.TestCase):
     def test_worker_forwards_image_partials_to_popup(self):
         from popup.worker import TranslateWorker
 
-        settings = dict(DEFAULTS, selection_mode="image", fast_mode=True)
+        settings = dict(DEFAULTS, selection_mode="image", fast_mode=True,
+                        target_language="en")
         worker = TranslateWorker(
             settings, pil_image=Image.new("RGB", (32, 24), "white"))
         partials = []

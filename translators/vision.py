@@ -10,6 +10,7 @@ from .prompt import (
     DOMAIN_STYLE_RULES,
     LANGUAGE_NAMES,
     PERIPHERAL_TEXT_RULE,
+    output_script_rule,
 )
 
 
@@ -38,7 +39,8 @@ def image_translation_prompt(
     prompt = (
         f"Translate the complete image{source_description} into {target}. "
         "Preserve all body text, order, and examples; if all text is already "
-        f"in {target}, reproduce it unchanged. Output only the translation."
+        f"in {target}, reproduce it unchanged. Output only the translation. "
+        f"{output_script_rule(target_language)}"
     )
     return prompt
 
@@ -90,6 +92,12 @@ def image_system_instructions(
         )
     if instructions.strip():
         prompt += f"\n\nAdditional user instructions:\n{instructions.strip()}"
+    script_rule = output_script_rule(target_language)
+    if script_rule:
+        prompt += (
+            f"\n\nRequired output: {target}. {script_rule} "
+            "This overrides conflicting additional instructions."
+        )
     return prompt
 
 

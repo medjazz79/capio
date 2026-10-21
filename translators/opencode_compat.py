@@ -11,10 +11,10 @@ from decimal import Decimal, InvalidOperation
 from time import monotonic
 from urllib.parse import urlsplit
 
-import requests
+from . import http_client as requests
 from PIL import Image
 
-from .prompt import output_token_budget, system_instructions, user_prompt
+from .prompt import output_token_budget, system_instructions, request_user_prompt
 from .vision import encode_image, openai_image_messages
 
 TIMEOUT = 20
@@ -602,7 +602,7 @@ def _messages_for(text: str, instructions: str, source_language: str,
     return [
         {"role": "system", "content": system_instructions(
             instructions, source_language, target_language)},
-        {"role": "user", "content": user_prompt(
+        {"role": "user", "content": request_user_prompt(
             text, source_language, target_language)},
     ]
 
@@ -744,12 +744,14 @@ def _post_stream(payload: dict, base: str, api_key: str, timeout: int):
     response = send(payload)
     if "stream_options" not in payload or response.status_code == 200:
         return response
+    if response.status_code not in (400, 422):
+        return response
     error_text = ""
     try:
         error_text = response.text.casefold()
     except (AttributeError, TypeError, ValueError):
         pass
-    if not any(word in error_text for word in (
+    if "stream_options" not in error_text or not any(word in error_text for word in (
         "stream_options", "unsupported", "unrecognized", "unknown",
         "not support", "invalid",
     )):
@@ -807,7 +809,9 @@ def stream_translate(
     if report is not None:
         report["routed_via"] = routing_badge(response)
     truncated = False
+    completed = False
     pending_usage = None
+    earlier_tokens = dict(report.get("tokens") or {}) if report is not None else {}
     try:
         if response.status_code != 200:
             response.raise_for_status()
@@ -818,12 +822,17 @@ def stream_translate(
             if not chunk.startswith("data:"):
                 continue
             data = chunk[len("data:"):].strip()
-            if not data or data == "[DONE]":
+            if data == "[DONE]":
+                completed = True
+                continue
+            if not data:
                 continue
             try:
                 event = json.loads(data)
-            except ValueError:
-                continue
+            except ValueError as error:
+                raise RuntimeError("Invalid event in translation stream") from error
+            if not isinstance(event, dict) or event.get("error"):
+                raise RuntimeError("Provider reported an invalid translation stream event")
             # The usage frame carries an empty `choices` list, so it has to be
             # read before the choice lookup below would throw it away. A page
             # is split into chunks and each is its own request, so the counts
@@ -836,20 +845,20 @@ def stream_translate(
                 # record it once the stream ends.
                 pending_usage = usage
                 if report is not None:
-                    running = report.get("tokens")
-                    if isinstance(running, dict):
-                        report["tokens"] = {
-                            key: int(running.get(key, 0)) + int(totals.get(key, 0))
-                            for key in totals
-                        }
-                    else:
-                        report["tokens"] = totals
+                    report["tokens"] = {
+                        key: int(earlier_tokens.get(key, 0)) + int(totals.get(key, 0))
+                        for key in totals
+                    }
             try:
                 choice = event["choices"][0]
             except (KeyError, IndexError, TypeError, AttributeError):
                 continue
             if choice.get("finish_reason") == "length":
                 truncated = True
+            elif choice.get("finish_reason") == "stop":
+                completed = True
+            elif choice.get("finish_reason"):
+                raise RuntimeError(f"Translation stopped before completion ({choice['finish_reason']})")
             delta = (choice.get("delta") or {}).get("content")
             if delta:
                 yield delta
@@ -863,6 +872,8 @@ def stream_translate(
     if truncated:
         raise RuntimeError(
             "OpenAI-compatible reply was cut off — try a shorter selection")
+    if not completed:
+        raise RuntimeError("OpenAI-compatible stream ended before completion")
 
 
 def translate(
@@ -883,7 +894,7 @@ def translate(
         "messages": [
             {"role": "system", "content": system_instructions(
                 instructions, source_language, target_language)},
-            {"role": "user", "content": user_prompt(
+            {"role": "user", "content": request_user_prompt(
                 text, source_language, target_language)},
         ],
     }
@@ -992,6 +1003,7 @@ def stream_translate_image(
 
     received_text = False
     truncated = False
+    completed = False
     pending_usage = None
     try:
         if response.status_code != 200:
@@ -1006,12 +1018,17 @@ def stream_translate_image(
             if not chunk.startswith("data:"):
                 continue
             data = chunk[len("data:"):].strip()
-            if not data or data == "[DONE]":
+            if data == "[DONE]":
+                completed = True
+                continue
+            if not data:
                 continue
             try:
                 event = json.loads(data)
-            except ValueError:
-                continue
+            except ValueError as error:
+                raise RuntimeError("Invalid event in image translation stream") from error
+            if not isinstance(event, dict) or event.get("error"):
+                raise RuntimeError("Provider reported an invalid image translation stream event")
             # The usage frame carries an empty `choices` list, so read it
             # before the lookup below would skip it.
             block = event.get("usage") if isinstance(event, dict) else None
@@ -1025,6 +1042,10 @@ def stream_translate_image(
                 continue
             if choice.get("finish_reason") == "length":
                 truncated = True
+            elif choice.get("finish_reason") == "stop":
+                completed = True
+            elif choice.get("finish_reason"):
+                raise RuntimeError(f"Image translation stopped before completion ({choice['finish_reason']})")
             delta = (choice.get("delta") or {}).get("content")
             # reasoning models may send reasoning_content separately — ignore it
             if isinstance(delta, list):
@@ -1047,6 +1068,8 @@ def stream_translate_image(
         raise RuntimeError(
             "OpenAI-compatible image reply reached its output limit and was "
             "cut off; try a smaller image or check the provider's context limit")
+    if not completed:
+        raise RuntimeError("OpenAI-compatible image stream ended before completion")
     if not received_text:
         raise RuntimeError("The selected model returned no streamed image translation")
 

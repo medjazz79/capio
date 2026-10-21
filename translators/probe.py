@@ -238,7 +238,7 @@ def detect_vision(base_url: str, api_key: str, model: str) -> tuple[bool, str]:
     import base64
     from io import BytesIO
 
-    import requests
+    from . import http_client as requests
     from PIL import Image
 
     from .opencode_compat import TRANSLATION_TIMEOUT
@@ -319,7 +319,7 @@ def detect_reasoning(base_url: str, api_key: str, model: str) -> tuple[bool, str
     the parameters and the model produced a reasoning trace — the only
     outcome where ticking the box changes anything.
     """
-    import requests
+    from . import http_client as requests
 
     from .opencode_compat import TRANSLATION_TIMEOUT, _reasoning_parameters
 

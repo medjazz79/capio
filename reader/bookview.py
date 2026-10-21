@@ -5,6 +5,7 @@ import math
 import os
 import tempfile
 import time
+import threading
 from html import escape
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from reader import pdf_utils
 from reader.continuous import ContinuousReader
 from reader.document_import import prepare_document, text_direction
 from reader.thumbnails import ThumbPanel
+from reader.pdf_process import PdfProcess
 
 log = get_logger("reader.bookview")
 
@@ -65,6 +67,7 @@ class BookView(QWidget):
         self.pending_horizontal_scroll_position: int | None = None
         self.initial_fit_pending = False
         self._document: pymupdf.Document | None = None
+        self._pdf_process = None
         self._document_path = ""
         self._temporary_view_path: str | None = None
         self._page_sizes: list[tuple[float, float]] = []
@@ -151,6 +154,7 @@ class BookView(QWidget):
         open_ms = (time.perf_counter() - phase_started) * 1000
         self._document = document
         self._document_path = prepared.view_path
+        self._pdf_process = PdfProcess(prepared.view_path)
         self._temporary_view_path = prepared.temporary_path
         self.path = str(Path(path))
         self.title = Path(path).stem
@@ -221,6 +225,9 @@ class BookView(QWidget):
         thumbnail_worker = getattr(self.thumbs, "_worker", None)
         self.thumbs.clear_document()
         self.reader.clear_document()
+        if self._pdf_process is not None:
+            self._pdf_process.close()
+            self._pdf_process = None
         with self._doc_lock:
             document = self._document
             self._document = None
@@ -474,6 +481,8 @@ class BookView(QWidget):
             if previous_document is not None:
                 previous_document.close()
         self._document_path = str(destination)
+        if self._pdf_process is not None:
+            self._pdf_process.set_source(str(destination))
         self.path = str(destination)
         self.title = destination.stem
         self._modified = False
@@ -582,6 +591,8 @@ class BookView(QWidget):
                 raise RuntimeError("Cannot delete pages without an open PDF")
             for page in reversed(pages):
                 self._document.delete_page(page)
+            if self._pdf_process is not None:
+                self._pdf_process.set_source(self._document_path, self._document.tobytes())
         self._page_sizes = [
             size for index, size in enumerate(self._page_sizes)
             if index not in deleted
@@ -644,6 +655,8 @@ class BookView(QWidget):
         return self._view_rotations[page_index]
 
     def page_text(self, page_index: int) -> str:
+        if threading.current_thread() is not threading.main_thread():
+            return self._background_pdf("text", page_index)
         with self._doc_lock:
             if self._document is None:
                 raise RuntimeError("Cannot read text without an open PDF")
@@ -652,6 +665,8 @@ class BookView(QWidget):
             return pdf_utils.page_text(self._document[page_index])
 
     def page_body_text(self, page_index: int) -> tuple[str, str | None]:
+        if threading.current_thread() is not threading.main_thread():
+            return self._background_pdf("body", page_index)
         with self._doc_lock:
             if self._document is None:
                 raise RuntimeError("Cannot read text without an open PDF")
@@ -663,6 +678,8 @@ class BookView(QWidget):
         self.reader.scroll_to_page(page)
 
     def _render_page(self, page_index: int, zoom: float):
+        if threading.current_thread() is not threading.main_thread():
+            return self._background_page_image(page_index, self._raster_zoom(page_index, zoom))
         with self._doc_lock:
             if self._document is None:
                 raise RuntimeError("Cannot render a page without an open PDF")
@@ -676,6 +693,21 @@ class BookView(QWidget):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             return image
+
+    def _background_pdf(self, operation, page_index, *args):
+        worker = self._pdf_process
+        if worker is None:
+            raise RuntimeError("Cannot access a closed background PDF")
+        return worker.request(operation, page_index, *args)
+
+    def _background_page_image(self, page_index, zoom):
+        from PySide6.QtGui import QImage
+        width, height, stride, pixels = self._background_pdf("render", page_index, zoom)
+        image = QImage(pixels, width, height, stride, QImage.Format.Format_RGB888).copy()
+        if not 0 <= page_index < len(self._view_rotations):
+            raise RuntimeError("The PDF page changed during rendering")
+        rotation = self._view_rotations[page_index]
+        return image.transformed(QTransform().rotate(rotation)) if rotation else image
 
     def _raster_zoom(self, page_index: int, zoom: float) -> float:
         """Largest zoom whose raster for this page stays inside the budget.
@@ -798,6 +830,8 @@ class BookView(QWidget):
             return "image", ""
 
     def page_needs_full_page_ocr(self, page_index: int) -> bool:
+        if threading.current_thread() is not threading.main_thread():
+            return self._background_pdf("needs_ocr", page_index)
         with self._doc_lock:
             if self._document is None:
                 raise RuntimeError("Cannot inspect a page without an open PDF")
@@ -842,6 +876,8 @@ class BookView(QWidget):
         )
 
     def render_page_image(self, page_index: int, dpi: float = 150):
+        if threading.current_thread() is not threading.main_thread():
+            return self._background_page_image(page_index, dpi / 72.0)
         with self._doc_lock:
             if self._document is None:
                 raise RuntimeError("Cannot render a page without an open PDF")

@@ -96,4 +96,26 @@ build the reader instead, change the `["main_02.py"]` entry in
 
 ## Notes
 
+- Background page rendering and prefetch extraction now use `reader/pdf_process.py`.
+  Each lazy spawned process owns its PDF; QThreads only handle IPC and QImage
+  delivery. GUI-side editing stays on the GUI thread. Unsaved page deletions
+  update the child with a document snapshot. Closing a book terminates its
+  background process before deleting temporary source files.
+- `config.settings.Settings` carries a private edit baseline. Preserve it with
+  `copy_settings()` for editable copies. `save()` locks the shared store across
+  processes and merges changes, including provider fields and dictionary entries.
+  A plain dictionary remains an explicit full settings replacement.
+- Workers use `translators/http_client.py` cancellation scopes to interrupt
+  blocked HTTP sockets and CLI processes. Provider adapters must use that
+  transport rather than importing requests directly.
+- Text adapters use `request_user_prompt()` with `system_instructions()` to
+  avoid duplicating the shared rules. `user_prompt()` remains available as a
+  standalone prompt that includes its own rules.
+- Tests block external network access, so an unmocked provider cannot consume
+  API quota. Real local-TCP tests are skipped when loopback is unavailable.
+  In restricted Windows environments only, set `CAPIO_TEST_POLL_LOOP=1` for
+  mocked async I/O tests: a polling wakeup replaces asyncio's blocked socketpair.
+  This mode does not validate actual networking or OS signal delivery; run those
+  integration tests with the normal event-loop policy on a development machine.
+
 - Chord symbols, figured-bass numbers and measure numbers are never translated.
