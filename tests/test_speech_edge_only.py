@@ -1087,6 +1087,50 @@ class TestSpeechSynthesis(unittest.TestCase):
         )
         worker.cleanup_output()
 
+    def test_worker_marks_a_segment_when_its_stream_disconnects(self):
+        class FakeStreamServer:
+            def create_stream(self):
+                return "token", "http://127.0.0.1/token"
+
+            def write(self, _token, _audio):
+                return False
+
+            def finish(self, _token):
+                pass
+
+        class FakeCommunicate:
+            def __init__(self, text, *_args, **_kwargs):
+                self.text = text
+
+            async def stream(self):
+                yield {"type": "audio", "data": b"audio"}
+                yield {
+                    "type": "WordBoundary",
+                    "offset": 0,
+                    "duration": 1_000_000,
+                    "text": self.text,
+                }
+
+        worker = speech_worker.SpeechWorker(
+            "hello",
+            target_language="en",
+            fast=False,
+            stream_server=FakeStreamServer(),
+            stream_audio=True,
+        )
+        with (
+            mock.patch(
+                "popup.speech_worker.edge_tts",
+                type("Edge", (), {"Communicate": FakeCommunicate}),
+            ),
+            mock.patch.object(worker, "_read_cache", return_value=None),
+            mock.patch.object(worker, "_write_cache"),
+        ):
+            _path, _boundaries = asyncio.run(worker._make_segment(0))
+
+        self.assertEqual(worker.disconnected_segments, {0})
+        worker.cleanup_output()
+
     def test_continuous_playback_prefetches_without_reordering_audio(self):
         import asyncio
 

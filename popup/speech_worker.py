@@ -676,6 +676,7 @@ class SpeechWorker(QThread):
         self._owns_stream_server = stream_server is None
         self._stream_audio = bool(stream_audio)
         self._continuous_stream = continuous and len(self._segments) == 1
+        self.disconnected_segments: set[int] = set()
         self._prefetch_only = prefetch_only
         self._trace = trace
         self._event_loop: asyncio.AbstractEventLoop | None = None
@@ -871,11 +872,13 @@ class SpeechWorker(QThread):
             all_boundaries.extend(segment_boundaries)
             for boundary in segment_boundaries:
                 self.word_boundary_ready.emit(0, boundary)
-            await asyncio.to_thread(
+            accepted = await asyncio.to_thread(
                 stream_server.write,
                 token,
                 audio_path.read_bytes(),
             )
+            if accepted is False:
+                self.disconnected_segments.add(index)
             if self._trace is not None:
                 self._trace.mark(
                     "continuous_segment_handoff",
@@ -1024,11 +1027,13 @@ class SpeechWorker(QThread):
                                     boundary[3],
                                 ),
                             )
-                        await asyncio.to_thread(
+                        accepted = await asyncio.to_thread(
                             self._stream_server.write,
                             continuous_token,
                             audio_bytes,
                         )
+                        if accepted is False:
+                            self.disconnected_segments.add(index)
                     if first_audio_ready is not None:
                         first_audio_ready.set()
                     if self._trace is not None:
@@ -1078,15 +1083,17 @@ class SpeechWorker(QThread):
 
         async def write_audio(
             server: AudioStreamServer, stream_token: str, audio_data: bytes
-        ) -> None:
+        ) -> bool | None:
             nonlocal audio_write_total_ms, audio_write_max_ms
             write_started_ns = time.perf_counter_ns()
-            await asyncio.to_thread(server.write, stream_token, audio_data)
+            accepted = await asyncio.to_thread(
+                server.write, stream_token, audio_data)
             write_ms = (
                 time.perf_counter_ns() - write_started_ns
             ) / 1_000_000
             audio_write_total_ms += write_ms
             audio_write_max_ms = max(audio_write_max_ms, write_ms)
+            return accepted
 
         try:
             if getattr(edge_tts, "Communicate", None) is None:
@@ -1129,8 +1136,10 @@ class SpeechWorker(QThread):
                                 chunk_bytes=len(audio),
                             )
                     if continuous_token is not None:
-                        await write_audio(
+                        accepted = await write_audio(
                             self._stream_server, continuous_token, audio)
+                        if accepted is False:
+                            self.disconnected_segments.add(index)
                     elif (
                         self._stream_audio
                         and not self._prefetch_only
@@ -1143,7 +1152,10 @@ class SpeechWorker(QThread):
                         stream = (self._stream_server, token)
                         self.segment_stream_ready.emit(index, url)
                     if stream is not None:
-                        await write_audio(stream[0], stream[1], audio)
+                        accepted = await write_audio(
+                            stream[0], stream[1], audio)
+                        if accepted is False:
+                            self.disconnected_segments.add(index)
                 elif chunk["type"] == "WordBoundary":
                     if first_boundary:
                         first_boundary = False

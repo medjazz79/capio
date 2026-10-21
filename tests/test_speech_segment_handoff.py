@@ -224,7 +224,7 @@ class TestHandOffKeepsHighlight(unittest.TestCase):
         self.assertFalse(popup._speech_waiting)
         play.assert_called_once_with(1)
 
-    def test_segment_stream_end_advances_without_resolving_full_read(self):
+    def test_segment_stream_end_waits_for_final_file_before_advancing(self):
         from PySide6.QtMultimedia import QMediaPlayer
 
         popup = self._popup("first second")
@@ -235,19 +235,27 @@ class TestHandOffKeepsHighlight(unittest.TestCase):
         popup._speech_stream_urls[1] = "http://127.0.0.1/next"
         popup._speech_worker = mock.MagicMock()
         popup._speech_worker.isRunning.return_value = True
+        popup._speech_worker.disconnected_segments = set()
 
         with (
             mock.patch.object(popup, "_play_ready_speech_segment") as play,
             mock.patch.object(
                 popup, "_resolve_continuous_stream_end") as resolve,
+            mock.patch.object(
+                popup, "sender", return_value=popup._speech_worker),
         ):
             popup._on_media_status_changed(
                 QMediaPlayer.MediaStatus.EndOfMedia)
-
-        self.assertEqual(popup._speech_index, 1)
-        self.assertFalse(popup._speech_stream_end_pending)
-        play.assert_called_once_with(1)
-        resolve.assert_not_called()
+            self.assertEqual(popup._speech_index, 0)
+            self.assertEqual(popup._speech_segment_end_pending_index, 0)
+            self.assertTrue(popup._speech_waiting)
+            play.assert_not_called()
+            self.assertFalse(popup._speech_stream_end_pending)
+            resolve.assert_not_called()
+            popup._on_speech_segment_ready(0, "complete-segment.mp3")
+            self.assertEqual(popup._speech_index, 1)
+            self.assertIsNone(popup._speech_segment_end_pending_index)
+            play.assert_called_once_with(1)
 
     def test_ready_segment_stream_starts_after_the_previous_segment_ends(self):
         popup = self._popup("first second")
@@ -268,6 +276,50 @@ class TestHandOffKeepsHighlight(unittest.TestCase):
         self.assertEqual(popup._speech_playing_stream_index, 1)
         self.assertFalse(popup._speech_playing_continuous_stream)
         play.assert_called_once()
+
+    def test_disconnected_segment_waits_for_full_file_then_resumes(self):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        popup = self._popup("first second")
+        popup._speech_active = True
+        popup._speech_index = 0
+        popup._speech_playing_stream_index = 0
+        popup._speech_worker = mock.MagicMock()
+        popup._speech_worker.isRunning.return_value = True
+        popup._speech_worker.disconnected_segments = {0}
+        popup._speech_stream_urls[0] = "http://127.0.0.1/current"
+        popup._player.position = mock.Mock(return_value=740)
+
+        popup._on_media_status_changed(QMediaPlayer.MediaStatus.EndOfMedia)
+
+        self.assertTrue(popup._speech_active)
+        self.assertTrue(popup._speech_waiting)
+        self.assertEqual(popup._speech_index, 0)
+        self.assertEqual(popup._speech_stream_recovery_positions, {0: 740})
+        self.assertNotIn(0, popup._speech_stream_urls)
+
+        with (
+            mock.patch.object(popup, "sender", return_value=popup._speech_worker),
+            mock.patch.object(popup, "_play_speech_segment") as play_file,
+        ):
+            popup._on_speech_segment_ready(0, "complete-segment.mp3")
+        play_file.assert_called_once_with("complete-segment.mp3", 740)
+        self.assertEqual(popup._speech_index, 0)
+
+    def test_translation_stream_does_not_start_speech_prefetch(self):
+        popup = self._popup("source")
+        worker = mock.MagicMock()
+        worker._popup_generation = popup._translation_generation
+        popup._worker = worker
+        with (
+            mock.patch.object(popup, "sender", return_value=worker),
+            mock.patch.object(popup, "_queue_streamed_partial") as queue,
+            mock.patch.object(popup, "_start_speech_prefetch_text") as prefetch,
+        ):
+            popup._on_worker_partial("A streamed translation fragment.")
+
+        queue.assert_called_once_with("A streamed translation fragment.")
+        prefetch.assert_not_called()
 
     def test_continuous_stream_end_waits_for_worker_instead_of_advancing_segment(self):
         from PySide6.QtMultimedia import QMediaPlayer

@@ -835,6 +835,7 @@ class TestSpeechSegmentScheduling(unittest.TestCase):
         self.assertTrue(writer_finished.is_set())
         self.assertFalse(writer.is_alive())
         self.assertLessEqual(stream._queued_bytes, STREAM_QUEUE_MAX_BYTES)
+        self.assertFalse(server.write(token, b"rejected after close"))
 
     @requires_loopback
     def test_stream_buffers_multiple_synthesis_segments_before_backpressure(self):
@@ -885,19 +886,24 @@ class TestSpeechSegmentScheduling(unittest.TestCase):
 
     @requires_loopback
     def test_finished_stream_remains_available_until_first_get(self):
+        import time
         from urllib.request import urlopen
         from popup.audio_stream import AudioStreamServer
 
         server = AudioStreamServer()
         token, url = server.create_stream()
         try:
-            server.write(token, b"completed before GET")
+            self.assertTrue(server.write(token, b"completed before GET"))
             server.finish(token)
 
             with urlopen(url + "?player=probe", timeout=5) as response:
                 self.assertEqual(response.read(), b"completed before GET")
 
+            deadline = time.monotonic() + 1
+            while token in server._streams and time.monotonic() < deadline:
+                time.sleep(0.01)
             self.assertNotIn(token, server._streams)
+            self.assertFalse(server.write(token, b"after disconnect"))
         finally:
             server.close()
 

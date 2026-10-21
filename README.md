@@ -55,6 +55,8 @@ then translate its text with OCR or send the image to a vision-capable model.
 - Ask AI to explain difficult passages.
 - Listen to translations and follow word-by-word highlighting; resume where you
   stopped.
+- With Edge TTS and Fast mode, Capio can prepare completed translations for
+  quicker playback when you press **Read aloud**.
 - Translate pages and continue through a book with automatic page-by-page
   reading.
 - Use the floating translator outside the book reader.

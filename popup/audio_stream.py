@@ -17,7 +17,7 @@ class _AudioStream:
         self._finished = False
         self._queued_bytes = 0
 
-    def write(self, audio: bytes) -> None:
+    def write(self, audio: bytes) -> bool:
         for offset in range(0, len(audio), STREAM_QUEUE_MAX_BYTES):
             chunk = audio[offset:offset + STREAM_QUEUE_MAX_BYTES]
             with self._state_changed:
@@ -28,9 +28,10 @@ class _AudioStream:
                 ):
                     self._state_changed.wait()
                 if self._closed.is_set() or self._finished:
-                    return
+                    return False
                 self._queued_bytes += len(chunk)
                 self.queue.put_nowait(chunk)
+        return True
 
     def get(self) -> bytes | None:
         return self.queue.get()
@@ -139,15 +140,14 @@ class AudioStreamServer:
             self._streams[token] = _AudioStream()
         return token, f"http://127.0.0.1:{self._server.server_port}/{token}"
 
-    def write(self, token: str, audio: bytes) -> None:
+    def write(self, token: str, audio: bytes) -> bool:
         if not audio:
-            return
+            return True
         with self._lock:
             if self._closed:
-                return
+                return False
             stream = self._streams.get(token)
-        if stream is not None:
-            stream.write(audio)
+        return stream.write(audio) if stream is not None else False
 
     def finish(self, token: str) -> None:
         with self._lock:
