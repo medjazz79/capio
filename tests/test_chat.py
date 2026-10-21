@@ -1144,6 +1144,27 @@ class TestTranslationChat(unittest.TestCase):
         finally:
             popup.close()
 
+    def test_streamed_preview_coalesces_rapid_updates(self):
+        from config.settings import DEFAULTS
+        from popup.translate_popup import TranslatePopup
+
+        popup = TranslatePopup(dict(DEFAULTS, target_language="en"))
+        rendered = []
+        popup._append_streamed_partial = rendered.append
+        try:
+            popup._queue_streamed_partial("first")
+            popup._queue_streamed_partial("first second")
+            popup._queue_streamed_partial("first second third")
+
+            self.assertEqual(rendered, ["first"])
+            self.assertEqual(
+                popup._pending_streamed_partial, "first second third")
+            popup._streamed_update_timer.stop()
+            popup._flush_streamed_partial()
+            self.assertEqual(rendered, ["first", "first second third"])
+        finally:
+            popup.close()
+
     def test_streamed_preview_keeps_the_rendered_paragraph_spacing(self):
         """A plain-text preview must not open gaps the render collapses.
 

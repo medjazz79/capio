@@ -6667,7 +6667,7 @@ class TestReaderZoom(_GuiCase):
             panel.clear_document()
             panel.close()
 
-    def test_thumbnail_cache_tracks_the_visible_pages(self):
+    def test_thumbnail_cache_retains_prepared_pages_across_scrolling(self):
         import time
         from reader.thumbnails import ThumbPanel
 
@@ -6682,10 +6682,11 @@ class TestReaderZoom(_GuiCase):
                 page_count,
             )
             self.assertIsNotNone(panel._worker)
-            self.assertLess(len(panel._worker._indices), page_count)
+            self.assertEqual(len(panel._worker._indices), page_count)
 
             deadline = time.time() + 10
-            while panel._worker.isRunning() and time.time() < deadline:
+            worker = panel._worker
+            while worker.isRunning() and time.time() < deadline:
                 self.app.processEvents()
                 time.sleep(0.01)
             self.app.processEvents()
@@ -6701,8 +6702,8 @@ class TestReaderZoom(_GuiCase):
             self.app.processEvents()
 
             self.assertIn(last_page, panel._thumbnail_images)
-            self.assertNotIn(0, panel._thumbnail_images)
-            self.assertLess(len(panel._thumbnail_images), page_count)
+            self.assertIn(0, panel._thumbnail_images)
+            self.assertEqual(len(panel._thumbnail_images), page_count)
 
             worker = panel._worker
             # Every other wait loop in this file carries a deadline; this one
@@ -6721,7 +6722,7 @@ class TestReaderZoom(_GuiCase):
                              "ThumbWorker must stop before the panel is hidden")
             panel.hide()
             self.app.processEvents()
-            self.assertFalse(panel._thumbnail_images)
+            self.assertEqual(len(panel._thumbnail_images), page_count)
 
             panel.show()
             deadline = time.time() + 10
@@ -11566,7 +11567,7 @@ class TestMemoryZoom(_GuiCase):
 
     def test_reopen_requests_restart_and_launches_replacement(self):
         from unittest import mock
-        from main import MainWindow
+        from main import MainWindow, VENV_PYTHONW
 
         window = MainWindow()
         try:
@@ -11583,6 +11584,7 @@ class TestMemoryZoom(_GuiCase):
 
             popen.assert_called_once()
             command = popen.call_args.args[0]
+            self.assertEqual(command[0], str(VENV_PYTHONW))
             self.assertEqual(Path(command[-1]), Path(__file__).parents[1] / "main.py")
             self.assertTrue(window._closing)
             self.assertFalse(window.isVisible())

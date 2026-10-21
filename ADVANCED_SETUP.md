@@ -135,7 +135,11 @@ read-aloud speedups; OFF restores classic behavior:
   FreeLLMAPI, and configured OpenAI-compatible providers; image streaming is
   available only for models that accept images.
   Streaming improves time-to-first-text, not necessarily total completion
-  time.
+  time. The popup keeps the first update immediate and coalesces rapid
+  follow-up updates to reduce repeated document formatting. The translation
+  badge tooltip reports when the first text chunk reached the app and the
+  total request time; for non-streaming providers, that chunk may arrive only
+  after the first translation chunk completes.
 - **Router response window:** translation requests allow up to 120 seconds for
   a response, so a slow-starting local model is less likely to time out.
 - **Fast read-aloud:** playback can start from streamed audio before a complete

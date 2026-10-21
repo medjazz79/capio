@@ -25,7 +25,8 @@ class TranslateWorker(QThread):
         # worker must leave the single-request queue instead of spending one
         # more key while its replacement waits.
         self._settings["_cancelled"] = self.isInterruptionRequested
-        self.translate_secs: float = 0.0  # proof of which layer answered + how long
+        self.translate_secs: float = 0.0
+        self.first_text_secs: float | None = None
 
     def run(self) -> None:
         from translators.http_client import cancellation_scope, RequestCancelled
@@ -64,7 +65,7 @@ class TranslateWorker(QThread):
             self.stage.emit("Translating…")
             import time
             from translators import chain
-            t0 = time.time()
+            t0 = time.perf_counter()
             translated_text, badge = "", "—"
             stream = chain.translate_stream(self._text, self._settings)
             try:
@@ -73,6 +74,8 @@ class TranslateWorker(QThread):
                         return
                     if kind == "partial" and partial:
                         if chain.translation_preview_matches_target(partial, self._settings):
+                            if self.first_text_secs is None:
+                                self.first_text_secs = time.perf_counter() - t0
                             self.partial.emit(partial)
                     elif kind == "done":
                         translated_text, badge = partial, badge
@@ -82,7 +85,7 @@ class TranslateWorker(QThread):
                     close()
             if self.isInterruptionRequested():
                 return
-            self.translate_secs = time.time() - t0
+            self.translate_secs = time.perf_counter() - t0
             self.done.emit(translated_text, badge)
         except Exception as e:  # safety net
             from translators.chain import TranslationCancelled
@@ -98,7 +101,7 @@ class TranslateWorker(QThread):
 
         self.stage.emit(f"Sending image to {resolve_model(self._settings)}…")
         import time
-        started = time.time()
+        started = time.perf_counter()
         translated_text, badge = "", "—"
         stream = chain.translate_image_stream(
             self._pil_image, self._settings)
@@ -108,6 +111,8 @@ class TranslateWorker(QThread):
                     return
                 if kind == "partial" and partial:
                     if chain.translation_preview_matches_target(partial, self._settings):
+                        if self.first_text_secs is None:
+                            self.first_text_secs = time.perf_counter() - started
                         self.partial.emit(partial)
                 elif kind == "done":
                     translated_text, badge = partial, current_badge
@@ -126,7 +131,7 @@ class TranslateWorker(QThread):
             raise RuntimeError(
                 f"Image translation returned {wrong_language} instead of "
                 f"{target_name}; no additional request was made.")
-        self.translate_secs = time.time() - started
+        self.translate_secs = time.perf_counter() - started
         self.done.emit(translated_text, badge)
 
 

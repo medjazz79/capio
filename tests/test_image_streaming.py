@@ -570,3 +570,5 @@ class TestImageStreamingFlow(unittest.TestCase):
         self.assertEqual(partials, ["early words"])
         self.assertEqual(
             completed, [("early words and final text", "image model")])
+        self.assertIsNotNone(worker.first_text_secs)
+        self.assertLessEqual(worker.first_text_secs, worker.translate_secs)

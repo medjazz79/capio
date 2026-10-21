@@ -22,6 +22,7 @@ from reader.continuous import ContinuousReader
 from reader.document_import import prepare_document, text_direction
 from reader.thumbnails import ThumbPanel
 from reader.pdf_process import PdfProcess
+from reader.bookmarks import BookmarkStore
 
 log = get_logger("reader.bookview")
 
@@ -31,6 +32,7 @@ class BookView(QWidget):
     pageContextRequested = Signal(int, QPoint)
     viewChanged = Signal()
     zoomChanged = Signal(float)
+    bookmarkSaveFailed = Signal(str)
 
     MIN_ZOOM = 20.0
     MAX_ZOOM = 1000.0
@@ -61,6 +63,7 @@ class BookView(QWidget):
         self.speech_glossary: dict[str, str] = {}
         self.last_selection: tuple[int, QRect] | None = None
         self.bookmarked_pages: set[int] = set()
+        self._bookmark_store: BookmarkStore | None = None
         self.pending_page: int | None = None
         self.pending_scroll_position: int | None = None
         self.pending_scroll_offset: int | None = None
@@ -174,6 +177,7 @@ class BookView(QWidget):
             for page in document
         ]
         self._view_rotations = [0] * len(self._page_sizes)
+        self._load_bookmarks()
         geometry_ms = (time.perf_counter() - phase_started) * 1000
         self._zoom_percent = zoom_percent if zoom_percent is not None else 100.0
         self._zoom_percent = max(self.MIN_ZOOM, min(self.MAX_ZOOM, self._zoom_percent))
@@ -240,6 +244,7 @@ class BookView(QWidget):
         self._page_sizes = []
         self._view_rotations = []
         self.bookmarked_pages.clear()
+        self._bookmark_store = None
         self._modified = False
         self._source_text_modified = False
         self._pdf_view_modified = False
@@ -292,6 +297,7 @@ class BookView(QWidget):
                 raise RuntimeError(
                     "Save the edited text source separately from PDF page changes.")
             self._save_text_source()
+            self._rebind_bookmarks()
             was_editing = self._editing_source
             zoom = self._zoom_percent
             splitter_sizes = self.splitter.sizes()
@@ -306,6 +312,7 @@ class BookView(QWidget):
         if not self._modified:
             return
         self._save_document_to(self.path)
+        self._rebind_bookmarks()
         self._modified = False
         self._source_text_modified = False
         self._pdf_view_modified = False
@@ -484,6 +491,7 @@ class BookView(QWidget):
         if self._pdf_process is not None:
             self._pdf_process.set_source(str(destination))
         self.path = str(destination)
+        self._rebind_bookmarks()
         self.title = destination.stem
         self._modified = False
         self._source_text_modified = False
@@ -1026,6 +1034,7 @@ class BookView(QWidget):
             self.bookmarked_pages.remove(page)
         elif 0 <= page < self.page_count():
             self.bookmarked_pages.add(page)
+        self._persist_bookmarks()
         self._update_bookmark_ui()
         self.viewChanged.emit()
 
@@ -1040,7 +1049,39 @@ class BookView(QWidget):
             int(page) for page in pages
             if type(page) is int and 0 <= page < self.page_count()
         }
+        self._persist_bookmarks()
         self._update_bookmark_ui()
+
+    @property
+    def has_saved_bookmarks(self) -> bool:
+        return self._bookmark_store is not None and self._bookmark_store.exists
+
+    def _load_bookmarks(self) -> None:
+        try:
+            self._bookmark_store = BookmarkStore(self.path)
+            self.bookmarked_pages = {
+                page for page in self._bookmark_store.pages if page < self.page_count()}
+        except OSError as error:
+            self._bookmark_store = None
+            log.warning("Could not load bookmarks for %s", self.path, exc_info=True)
+            self.bookmarkSaveFailed.emit(str(error))
+
+    def _persist_bookmarks(self) -> None:
+        if not self.path:
+            return
+        try:
+            if self._bookmark_store is None:
+                self._bookmark_store = BookmarkStore(self.path)
+            self.bookmarked_pages = self._bookmark_store.save(self.bookmarked_pages)
+        except OSError as error:
+            log.exception("Could not save bookmarks for %s", self.path)
+            self.bookmarkSaveFailed.emit(str(error))
+
+    def _rebind_bookmarks(self) -> None:
+        pages = set(self.bookmarked_pages)
+        self._load_bookmarks()
+        self.bookmarked_pages = pages
+        self._persist_bookmarks()
 
     def _update_bookmark_ui(self) -> None:
         self.thumbs.set_bookmarks(self.bookmarked_pages)

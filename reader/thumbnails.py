@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import multiprocessing
 import multiprocessing.spawn
 import os
@@ -15,7 +16,7 @@ from PySide6.QtCore import (
     QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRectF, QSize, Qt, QThread,
     QTimer, Signal,
 )
-from PySide6.QtGui import QIcon, QPixmap, QImage, QPainter, QColor, QPainterPath
+from PySide6.QtGui import QIcon, QIconEngine, QPixmap, QImage, QPainter, QColor, QPainterPath
 from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QToolButton, QHBoxLayout, QVBoxLayout,
     QStackedWidget, QWidget, QMenu, QStyledItemDelegate, QStyle,
@@ -72,32 +73,55 @@ def _start_thumbnail_processes(processes) -> None:
             process.start()
         return
 
-    pythonw = Path(sys._base_executable).with_name("pythonw.exe")
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
     if not pythonw.is_file():
         log.warning(
             "pythonw.exe was not found beside %s; thumbnail workers may "
-            "show console windows", sys._base_executable)
+            "show console windows", sys.executable)
         for process in processes:
             process.start()
         return
 
-    launcher_variable = "__PYVENV_LAUNCHER__"
-    is_venv = sys.prefix != sys.base_prefix
     with _SPAWN_CONFIGURATION_LOCK:
         previous_executable = multiprocessing.spawn.get_executable()
-        previous_launcher = os.environ.get(launcher_variable)
         try:
             multiprocessing.set_executable(os.fsencode(pythonw))
-            if is_venv:
-                os.environ[launcher_variable] = sys.executable
             for process in processes:
                 process.start()
         finally:
             multiprocessing.set_executable(previous_executable)
-            if previous_launcher is None:
-                os.environ.pop(launcher_variable, None)
-            else:
-                os.environ[launcher_variable] = previous_launcher
+
+
+class _ThumbnailIconEngine(QIconEngine):
+    """Keep a small raster and scale only while painting, including zoom-in."""
+
+    def __init__(self, image: QImage):
+        super().__init__()
+        self._image = image
+
+    def clone(self):
+        return _ThumbnailIconEngine(self._image)
+
+    def actualSize(self, size, mode, state):
+        return self._image.size().scaled(size, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def paint(self, painter, rect, mode, state):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(rect), 6, 6)
+        painter.setClipPath(path)
+        painter.drawImage(rect, self._image)
+        painter.restore()
+
+    def pixmap(self, size, mode, state):
+        pixmap = QPixmap(self.actualSize(size, mode, state))
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        self.paint(painter, pixmap.rect(), mode, state)
+        painter.end()
+        return pixmap
 
 
 class _ThumbnailPositionDelegate(QStyledItemDelegate):
@@ -175,7 +199,13 @@ def _render_thumbnails(
                     page_width = page.rect.width
                     if rotation % 180:
                         page_width = page.rect.height
-                    scale = width / max(1.0, page_width)
+                    page_height = page.rect.height
+                    if rotation % 180:
+                        page_height = page.rect.width
+                    scale = min(
+                        width / max(1.0, page_width),
+                        width * 180 / 132 / max(1.0, page_height),
+                    )
                     pix = page.get_pixmap(
                         matrix=pymupdf.Matrix(scale, scale).prerotate(rotation),
                         colorspace=pymupdf.csRGB,
@@ -219,7 +249,7 @@ class ThumbWorker(QThread):
         self._view_rotations = list(view_rotations or ())
         self._indices = (
             list(range(count)) if indices is None
-            else sorted(set(i for i in indices if 0 <= i < count))
+            else list(dict.fromkeys(i for i in indices if 0 <= i < count))
         )
         self._stop_requested = False
         self._stop_event = None
@@ -399,6 +429,9 @@ class ThumbPanel(QWidget):
     MIN_ZOOM = 0.5
     MAX_ZOOM = 3.0
     PREFETCH_ROWS = 1
+    # RGB images and icon rasters, with slack for pixel padding. Large books
+    # use smaller previews instead of throwing offscreen previews away.
+    THUMBNAIL_PIXEL_BUDGET = 32 * 1024 * 1024
     VIEW_POSITION_ROLE = _VIEW_POSITION_ROLE
     # Total budget closeEvent gives live thumbnail workers to wind down.
     CLOSE_WORKER_WAIT_MS = 500
@@ -680,7 +713,7 @@ class ThumbPanel(QWidget):
                     source_item = self.list.item(page_index)
                     if page_list is self.list or source_item is None:
                         item.setIcon(
-                            self._scaled_thumbnail_icon(image, icon_size))
+                            self._scaled_thumbnail_icon(image, self._cache_icon_size(icon_size)))
                     else:
                         item.setIcon(source_item.icon())
             page_list.verticalScrollBar().setSingleStep(grid_size.height())
@@ -739,7 +772,6 @@ class ThumbPanel(QWidget):
         worker = self._worker
         if worker is not None and worker.isRunning():
             worker.stop()
-        self._prune_thumbnail_cache(set())
         super().hideEvent(event)
 
     @staticmethod
@@ -839,6 +871,7 @@ class ThumbPanel(QWidget):
         keep = self._visible_pages(page_list)
         if self._position_page is not None:
             keep.add(self._position_page)
+        self._thumbnail_failed.difference_update(keep - self._thumbnail_keep)
         self._thumbnail_keep = keep
         self._prune_thumbnail_cache(keep)
         self._start_worker()
@@ -854,11 +887,9 @@ class ThumbPanel(QWidget):
         current_worker = self._worker
         if current_worker is not None and current_worker.isRunning():
             return
-        indices = sorted(
-            self._thumbnail_keep
-            - self._thumbnail_images.keys()
-            - self._thumbnail_failed
-        )
+        missing = set(range(self._count)) - self._thumbnail_images.keys() - self._thumbnail_failed
+        # Visible pages first, then prepare the entire book in the background.
+        indices = sorted(missing & self._thumbnail_keep) + sorted(missing - self._thumbnail_keep)
         if not indices:
             return
         self._thumbnail_worker_started = True
@@ -866,7 +897,7 @@ class ThumbPanel(QWidget):
         worker = ThumbWorker(
             self._path,
             self._count,
-            width=max(1, self.list.iconSize().width()),
+            width=self._thumbnail_raster_width(),
             indices=indices,
             view_rotations=self._view_rotations,
         )
@@ -989,36 +1020,33 @@ class ThumbPanel(QWidget):
     ) -> None:
         if generation is not None and generation != self._document_generation:
             return
-        if generation is not None and index not in self._thumbnail_keep:
-            return
         if img.isNull() or not 0 <= index < self._count:
             return
+        img = img.scaled(
+            self._cache_icon_size(self.BASE_ICON_SIZE),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
         self._thumbnail_images[index] = img
         item = self.list.item(index)
         if item is not None:
-            icon = self._scaled_thumbnail_icon(img, self.list.iconSize())
+            icon = self._scaled_thumbnail_icon(img, self._cache_icon_size(self.list.iconSize()))
             item.setIcon(icon)
             bookmark_item = self._bookmark_items.get(index)
             if bookmark_item is not None:
                 bookmark_item.setIcon(icon)
 
     def _prune_thumbnail_cache(self, keep: set[int]) -> None:
-        for index in self._thumbnail_images.keys() - keep:
-            del self._thumbnail_images[index]
-            item = self.list.item(index)
-            if item is not None:
-                item.setIcon(self._placeholder_icon)
-            bookmark_item = self._bookmark_items.get(index)
-            if bookmark_item is not None:
-                bookmark_item.setIcon(self._placeholder_icon)
-        # A page whose thumbnail failed once is forgotten when it scrolls out
-        # of the kept range: the failure was often transient (a torn-down
-        # worker, a busy disk), and keeping it blacklisted meant the page
-        # stayed blank for the rest of the session. It is retried the next
-        # time the page becomes visible again. Pages still in view keep their
-        # mark so a permanently broken page is not retried on every tick.
-        if self._thumbnail_failed:
-            self._thumbnail_failed -= self._thumbnail_failed - keep
+        """Keep prepared previews until close_document; dimensions bound RAM."""
+
+    def _thumbnail_raster_width(self) -> int:
+        ratio = self.BASE_ICON_SIZE.height() / self.BASE_ICON_SIZE.width()
+        budget_width = math.sqrt(self.THUMBNAIL_PIXEL_BUDGET / (max(1, self._count) * 8 * ratio))
+        return max(1, min(self.BASE_ICON_SIZE.width(), int(budget_width)))
+
+    def _cache_icon_size(self, requested: QSize) -> QSize:
+        width = min(requested.width(), self._thumbnail_raster_width())
+        return QSize(width, max(1, int(width * 180 / 132)))
 
     @staticmethod
     def _scaled_thumbnail_icon(image: QImage, size: QSize) -> QIcon:
@@ -1027,17 +1055,7 @@ class ThumbPanel(QWidget):
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        rounded = QPixmap(scaled.size())
-        rounded.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(rounded)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        path = QPainterPath()
-        path.addRoundedRect(
-            QRectF(0, 0, scaled.width(), scaled.height()), 6, 6)
-        painter.setClipPath(path)
-        painter.drawImage(0, 0, scaled)
-        painter.end()
-        return QIcon(rounded)
+        return QIcon(_ThumbnailIconEngine(scaled))
 
     def mark_current(self, index: int) -> None:
         if 0 <= index < self.list.count() and self.list.currentRow() != index:

@@ -4,6 +4,26 @@ This guide covers the everyday use of Capio. For model providers and optional
 configuration, see [Advanced Setup](ADVANCED_SETUP.md). Developers can start
 with [Development](DEVELOPMENT.md).
 
+## Thumbnails and bookmarks
+
+Page previews load in the background, starting with the visible pages. Once
+prepared, they remain available while scrolling or hiding the sidebar. Large
+books use smaller preview rasters, targeting about 32 MiB per open book for the
+stored images and icons. This excludes widget overhead, Qt caches and temporary
+rendering processes. The first preparation still takes time.
+
+Bookmarks save immediately, independently of the session. Capio keeps records
+in `%USERPROFILE%\Capio\Bookmarks` and next to each book in
+`book.pdf.capio-bookmarks.json`, with `.bak` recovery copies. Removing the
+application folder does not remove these records. If moving a book to another
+computer, copy its sidecar too. On the same computer, an unchanged book is
+recognized by its contents even after renaming or moving it. Keep these files
+in your normal backups. Explicit bookmark removals are saved too.
+
+Existing session bookmarks migrate when their book is next opened. A read-only
+book folder can use the user-profile copy alone. If neither location can be
+written, Capio reports the save error.
+
 ## Preferred terms and fallback services
 
 In Settings, **PREFERRED TERMS** lets you keep a separate glossary for each

@@ -377,6 +377,7 @@ class TranslatePopup(QDialog):
         self._translation_generation = 0
         self._streamed_partial = ""
         self._streamed_displayed = ""
+        self._pending_streamed_partial: str | None = None
         self._translation_text = ""
         self._translation_needs_render = False
         self._rendered_translation_text: str | None = None
@@ -615,6 +616,11 @@ class TranslatePopup(QDialog):
         self._chat_render_timer.setSingleShot(True)
         self._chat_render_timer.setInterval(60)
         self._chat_render_timer.timeout.connect(self._render_chat_transcript)
+        self._streamed_update_timer = QTimer(self)
+        self._streamed_update_timer.setSingleShot(True)
+        self._streamed_update_timer.setInterval(30)
+        self._streamed_update_timer.timeout.connect(
+            self._flush_streamed_partial)
         for widget in (
             self.result,
             self.result.viewport(),
@@ -1004,6 +1010,8 @@ class TranslatePopup(QDialog):
         generation = self._translation_generation
         self._worker = None
         self._cancel_running_translations()
+        self._streamed_update_timer.stop()
+        self._pending_streamed_partial = None
         self._streamed_partial = ""
         self._streamed_displayed = ""
         self._translation_text = ""
@@ -1081,8 +1089,21 @@ class TranslatePopup(QDialog):
                 worker, "_popup_generation", -1) != self._translation_generation:
             return
         self.spin.setText("Translating…")
-        self._append_streamed_partial(partial_text)
+        self._queue_streamed_partial(partial_text)
         self.result.show()
+
+    def _queue_streamed_partial(self, text: str) -> None:
+        if not self._streamed_update_timer.isActive():
+            self._append_streamed_partial(text)
+            self._streamed_update_timer.start()
+            return
+        self._pending_streamed_partial = text
+
+    def _flush_streamed_partial(self) -> None:
+        text = self._pending_streamed_partial
+        self._pending_streamed_partial = None
+        if text is not None:
+            self._append_streamed_partial(text)
 
     def _append_streamed_partial(self, text: str) -> None:
         previous = self._streamed_partial
@@ -1262,6 +1283,8 @@ class TranslatePopup(QDialog):
     ) -> None:
         if (generation == self._translation_generation
                 and worker is self._worker):
+            self._streamed_update_timer.stop()
+            self._pending_streamed_partial = None
             self._streamed_partial = ""
             self._streamed_displayed = ""
             self._worker = worker
@@ -1270,6 +1293,8 @@ class TranslatePopup(QDialog):
 
     def _on_translation_failed(self, generation: int, error: str) -> None:
         if generation == self._translation_generation:
+            self._streamed_update_timer.stop()
+            self._flush_streamed_partial()
             self._streamed_partial = ""
             self._streamed_displayed = ""
             self._on_failed(error)
@@ -1901,8 +1926,17 @@ class TranslatePopup(QDialog):
             self._speech_available and self._speech_engine == "edge")
         try:
             secs = self._worker.translate_secs if self._worker else 0.0
+            first_text_secs = (
+                getattr(self._worker, "first_text_secs", None)
+                if self._worker else None)
         except RuntimeError:
             secs = 0.0
+            first_text_secs = None
+        timing_tooltip = (
+            f"\nFirst text received: {first_text_secs:.2f}s"
+            if first_text_secs is not None
+            else "\nNo text chunk was received before completion."
+        )
         # Keep model status compact; the full fallback reason stays on hover.
         # The token count is peeled off first: it is long, it does not
         # change between selections, and the main window shows it in its
@@ -1938,6 +1972,7 @@ class TranslatePopup(QDialog):
                     f"The selected model translated {used} of {total} chunks."
                     f"\nSelected model: {selected_model}."
                     f"\nMost common engine: {engine}.\n{badge.strip()}"
+                    f"{timing_tooltip}"
                 )
             else:
                 self.badge.setText(
@@ -1946,6 +1981,7 @@ class TranslatePopup(QDialog):
                     f"The selected model did not translate any chunks."
                     f"\nSelected model: {selected_model}."
                     f"\nMost common engine: {engine}.\n{badge.strip()}"
+                    f"{timing_tooltip}"
                 )
             self.badge.setProperty("warning", True)
         else:
@@ -1974,12 +2010,13 @@ class TranslatePopup(QDialog):
                     tooltip = (
                         f"{actual_engine} answered because the selected model "
                         f"{selected_model} failed.\n{why.strip()}"
+                        f"{timing_tooltip}"
                     )
                 else:
                     status = f"⚠ {actual_engine}"
                     tooltip = (
                         f"{actual_engine} is NOT the model you chose.\n"
-                        f"{why.strip()}"
+                        f"{why.strip()}{timing_tooltip}"
                     )
                 self.badge.setText(f"{status} · {secs:.1f}s")
                 self.badge.setToolTip(tooltip)
@@ -1987,7 +2024,10 @@ class TranslatePopup(QDialog):
                 engine = actual_engine
             else:
                 self.badge.setText(f"{engine} · {secs:.1f}s")
-                self.badge.setToolTip("Your chosen model translated this.")
+                self.badge.setToolTip(
+                    "Your chosen model translated this."
+                    f"{timing_tooltip}"
+                )
                 self.badge.setProperty("warning", False)
         self.badge.style().unpolish(self.badge)
         self.usageReported.emit(engine.strip(), self.token_line)

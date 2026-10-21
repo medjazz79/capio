@@ -46,8 +46,7 @@ class TestThumbnailWorkerConsoleVisibility(unittest.TestCase):
     def test_windows_thumbnail_workers_use_pythonw_and_restore_spawn_state(self):
         from reader import thumbnails
 
-        executable = r"C:\Python313\python.exe"
-        pythonw = os.fsencode(r"C:\Python313\pythonw.exe")
+        pythonw = os.fsencode(r"C:\app\.venv\Scripts\pythonw.exe")
         original_launcher = os.environ.get("__PYVENV_LAUNCHER__")
         starts = []
 
@@ -64,12 +63,9 @@ class TestThumbnailWorkerConsoleVisibility(unittest.TestCase):
         with (
             mock.patch.object(thumbnails.os, "name", "nt"),
             mock.patch.object(thumbnails.sys, "frozen", False, create=True),
-            mock.patch.object(thumbnails.sys, "_base_executable", executable),
             mock.patch.object(
                 thumbnails.sys, "executable",
                 r"C:\app\.venv\Scripts\python.exe"),
-            mock.patch.object(thumbnails.sys, "prefix", r"C:\app\.venv"),
-            mock.patch.object(thumbnails.sys, "base_prefix", r"C:\Python313"),
             mock.patch.object(thumbnails.Path, "is_file", return_value=True),
             mock.patch.object(
                 thumbnails.multiprocessing.spawn,
@@ -78,20 +74,14 @@ class TestThumbnailWorkerConsoleVisibility(unittest.TestCase):
             ),
             mock.patch.object(
                 thumbnails.multiprocessing, "set_executable") as set_executable,
-            mock.patch.dict(
-                os.environ, {"__PYVENV_LAUNCHER__": "previous-launcher"}),
         ):
             thumbnails._start_thumbnail_processes([FakeProcess()])
 
         self.assertEqual(
-            starts, [(pythonw, r"C:\app\.venv\Scripts\python.exe")])
+            starts, [(pythonw, original_launcher)])
         self.assertEqual(
             [call.args[0] for call in set_executable.call_args_list],
             [pythonw, b"previous-python.exe"],
-        )
-        self.assertEqual(
-            os.environ.get("__PYVENV_LAUNCHER__"), original_launcher,
-            "the previous virtual-environment launcher must be restored",
         )
 
 
@@ -857,7 +847,16 @@ class TestThumbnailQueueDrain(unittest.TestCase):
         panel = ThumbPanel()
         try:
             panel._thumbnail_failed.add(3)
-            panel._prune_thumbnail_cache({1, 2, 4})
+            panel._thumbnail_keep = {1, 2, 4}
+            panel._path = "book.pdf"
+            panel._count = 10
+            panel._populated = True
+            with (
+                mock.patch.object(panel, "isVisible", return_value=True),
+                mock.patch.object(panel, "_visible_pages", return_value={3}),
+                mock.patch.object(panel, "_start_worker"),
+            ):
+                panel._schedule_visible_thumbnails()
             self.assertNotIn(
                 3, panel._thumbnail_failed,
                 "a transient thumbnail failure stayed blacklisted",

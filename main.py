@@ -1557,6 +1557,8 @@ class MainWindow(QMainWindow):
         book.pageSelected.connect(lambda p, r, b=book: self.on_selected(b, p, r))
         book.viewChanged.connect(self._on_book_view_changed)
         book.zoomChanged.connect(lambda value, b=book: self._remember_zoom(b, value))
+        book.bookmarkSaveFailed.connect(
+            lambda error: QMessageBox.warning(self, "Could not save bookmarks", error))
         book.thumbs.translatePageRequested.connect(
             lambda page, b=book: self.translate_page(b, page))
         book.thumbs.extractPagesRequested.connect(
@@ -1588,7 +1590,9 @@ class MainWindow(QMainWindow):
         book.pinned = pinned
         if thumbnail_zoom is not None:
             book.thumbs.set_thumbnail_zoom(float(thumbnail_zoom))
-        if bookmarks is not None:
+        if book.has_saved_bookmarks:
+            pass  # Independent records take priority over old session snapshots.
+        elif bookmarks is not None:
             book.set_bookmarks(bookmarks)
         else:
             saved_bookmarks = self._saved_bookmarks(path)
