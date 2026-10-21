@@ -21,10 +21,7 @@ from . import (
     fallback,
     gemini,
     mymemory,
-    opencode_bridge,
-    opencode_cli,
-    opencode_compat,
-    opencode_zen,
+    openai_compat,
     registry,
 )
 
@@ -788,17 +785,6 @@ def _translate_image_once(
             source_language=source_language,
             target_language=target_language,
         )
-    elif provider == "bridge":
-        translated = opencode_bridge.translate_image(
-            image, model, instructions=instructions,
-            source_language=source_language, target_language=target_language,
-            settings=settings,
-        )
-    elif provider == "opencode":
-        translated = opencode_zen.translate_image(
-            image, model, instructions=instructions,
-            source_language=source_language, target_language=target_language,
-        )
     elif provider == "custom_provider":
         cfg = registry.custom_provider_config(model, settings)
         if cfg is None:
@@ -808,7 +794,7 @@ def _translate_image_once(
             raise RuntimeError("Custom provider is incomplete — fill Base URL, API Key and Model in Settings.")
         entry = registry.get_custom_provider(settings, model)
         reasoning = bool(entry.get("reasoning_enabled")) if entry else False
-        translated = opencode_compat.translate_image(
+        translated = openai_compat.translate_image(
             image, base, key, provider_model,
             instructions=instructions,
             source_language=source_language,
@@ -823,7 +809,7 @@ def _translate_image_once(
                 "Image translation for this model requires an OpenAI-compatible "
                 "base URL and API key in Settings."
             )
-        translated = opencode_compat.translate_image(
+        translated = openai_compat.translate_image(
             image, base, key, model,
             instructions=instructions,
             source_language=source_language,
@@ -839,7 +825,7 @@ def _translate_image_once(
         bare = model[len(registry.FLM_PREFIX):]
         try:
             report: dict = {}
-            translated = opencode_compat.translate_image(
+            translated = openai_compat.translate_image(
                 image, base, key, bare,
                 instructions=instructions,
                 source_language=source_language,
@@ -864,7 +850,7 @@ def _translate_image_once(
             "mistral": registry.MISTRAL_PREFIX,
         }
         bare = model[len(prefixes[provider]):]
-        translated = opencode_compat.translate_image(
+        translated = openai_compat.translate_image(
             image, base, key, bare,
             instructions=instructions,
             source_language=source_language,
@@ -872,9 +858,8 @@ def _translate_image_once(
         )
     else:
         raise RuntimeError(
-            "Direct image translation is not supported for OpenCode CLI models. "
-            "Choose Gemini, an OpenCode bridge model, or an OpenAI-compatible "
-            "vision model."
+            "Image translation is not configured for the selected provider. "
+            "Choose Gemini or an OpenAI-compatible vision model."
         )
 
     if provider == "freellm":
@@ -893,8 +878,7 @@ def translate_image_stream(image, settings: dict):
     model = resolve_model(settings)
     provider = registry.provider_of(model)
     if not settings.get("fast_mode", True) or provider not in (
-        "gemini", "bridge", "freellm", "opencode", "custom", "custom_provider", "groq", "cf",
-        "mistral",
+        "gemini", "freellm", "custom", "custom_provider", "groq", "cf", "mistral",
     ):
         translated, badge = translate_image(image, settings)
         yield ("done", translated, badge)
@@ -918,25 +902,13 @@ def translate_image_stream(image, settings: dict):
                 source_language=source_language,
                 target_language=target_language,
             )
-        if provider == "bridge":
-            return opencode_bridge.stream_image(
-                image, model, instructions=instructions_for_call,
-                source_language=source_language,
-                target_language=target_language, settings=settings,
-            )
-        if provider == "opencode":
-            return opencode_zen.stream_translate_image(
-                image, model, instructions=instructions_for_call,
-                source_language=source_language,
-                target_language=target_language,
-            )
         if provider == "freellm":
             base, key = registry.provider_creds("freellm", settings)
             if not key:
                 raise RuntimeError(
                     "Image translation needs your FreeLLMAPI unified key in "
                     "Settings (API Keys tab).")
-            return opencode_compat.stream_translate_image(
+            return openai_compat.stream_translate_image(
                 image, base, key, model[len(registry.FLM_PREFIX):],
                 instructions=instructions_for_call,
                 source_language=source_language,
@@ -951,7 +923,7 @@ def translate_image_stream(image, settings: dict):
                 raise RuntimeError("Custom provider is incomplete — fill Base URL, API Key and Model in Settings.")
             entry = registry.get_custom_provider(settings, model)
             reasoning = bool(entry.get("reasoning_enabled")) if entry else False
-            return opencode_compat.stream_translate_image(
+            return openai_compat.stream_translate_image(
                 image, base, key, provider_model, instructions=instructions_for_call,
                 source_language=source_language,
                 target_language=target_language,
@@ -965,7 +937,7 @@ def translate_image_stream(image, settings: dict):
                 raise RuntimeError(
                     "Image translation for this model requires an "
                     "OpenAI-compatible base URL and API key in Settings.")
-            return opencode_compat.stream_translate_image(
+            return openai_compat.stream_translate_image(
                 image, base, key, model, instructions=instructions_for_call,
                 source_language=source_language,
                 target_language=target_language,
@@ -981,7 +953,7 @@ def translate_image_stream(image, settings: dict):
             "cf": registry.CF_PREFIX,
             "mistral": registry.MISTRAL_PREFIX,
         }[provider]
-        return opencode_compat.stream_translate_image(
+        return openai_compat.stream_translate_image(
             image, base, key, model[len(prefix):],
             instructions=instructions_for_call,
             source_language=source_language,
@@ -1018,7 +990,7 @@ def translate_image_stream(image, settings: dict):
     # An image costs more than the text it produces, so saying what it cost
     # matters here at least as much as it does in the OCR path.
     provider_name = {
-        "gemini": "gemini", "bridge": "bridge", "opencode": "zen",
+        "gemini": "gemini",
         "freellm": "freellm", "custom_provider": "custom",
         "custom": "custom", "groq": "groq", "cf": "cf", "mistral": "mistral",
     }.get(provider, provider)
@@ -1080,7 +1052,7 @@ def translate_stream(text: str, settings: dict):
     chosen = resolve_model(settings)
     provider = registry.provider_of(chosen)
     streaming_providers = {
-        "gemini", "bridge", "freellm", "opencode", "opencode_cli", "custom_provider",
+        "gemini", "freellm", "custom_provider",
         "custom", "groq", "cf", "mistral",
     }
     if provider in streaming_providers:
@@ -1093,7 +1065,6 @@ def translate_stream(text: str, settings: dict):
                 chunk_settings = {**settings, "explain_mode": False}
             streamer = {
                 "gemini": _stream_single_gemini,
-                "bridge": _stream_single_bridge,
                 "freellm": _stream_single_router,
                 "custom_provider": _stream_single_custom_provider,
             }.get(provider, _stream_single_compatible)
@@ -1111,13 +1082,9 @@ def translate_stream(text: str, settings: dict):
                         )
                     elif kind == "done":
                         current = value
-                        wrong_language = (
-                            _wrong_output_language(chunk_settings, value)
-                            if provider != "bridge" else None)
-                        if (
-                            provider != "bridge"
-                            and wrong_language
-                        ):
+                        wrong_language = _wrong_output_language(
+                            chunk_settings, value)
+                        if wrong_language:
                             # One corrective request, not a second translation
                             # chain: the retry must not run its own language
                             # check and spend another key on the same chunk.
@@ -1176,7 +1143,7 @@ def translate_stream(text: str, settings: dict):
 
 
 def _stream_single_compatible(chunk: str, s: dict):
-    """Stream OpenAI-compatible, Zen, and OpenCode CLI text requests."""
+    """Stream text requests through OpenAI-compatible providers."""
     from config.settings import resolve_model
     from .prompt import LANGUAGE_NAMES
 
@@ -1190,46 +1157,32 @@ def _stream_single_compatible(chunk: str, s: dict):
     if target_language not in LANGUAGE_NAMES:
         target_language = "ar"
 
-    if provider == "opencode":
-        deltas = opencode_zen.stream_translate(
-            chunk, chosen, instructions=instructions,
-            source_language=source_language, target_language=target_language)
-        badge = f"◈ {chosen.replace('-free', '')}"
-    elif provider == "opencode_cli":
-        cli_model = chosen[len(registry.OPENCODE_CLI_PREFIX):]
-        deltas = opencode_cli.stream_translate(
-            chunk, cli_model, instructions=instructions,
-            source_language=source_language, target_language=target_language)
-        badge = f"◈ chosen: OpenCode CLI ({cli_model})"
+    if provider == "custom":
+        base = (s.get("openai_base") or "").strip()
+        key = (s.get("openai_key") or "").strip()
+        if not base or not key:
+            raise RuntimeError(
+                "OpenAI-compatible base URL and API key are not configured.")
+        deltas = openai_compat.stream_translate(
+            chunk, base, key, chosen, instructions=instructions,
+            source_language=source_language,
+            target_language=target_language)
+        badge = f"◈ chosen: {chosen}"
     else:
-        if provider == "custom":
-            base = (s.get("openai_base") or "").strip()
-            key = (s.get("openai_key") or "").strip()
-            if not base or not key:
-                deltas = iter(())
-                badge = f"◈ chosen: {chosen}"
-            else:
-                bare = chosen
-                deltas = opencode_compat.stream_translate(
-                    chunk, base, key, bare, instructions=instructions,
-                    source_language=source_language,
-                    target_language=target_language)
-                badge = f"◈ chosen: {chosen}"
-        else:
-            base, key = registry.provider_creds(provider, s)
-            prefixes = {
-                "groq": registry.GROQ_PREFIX,
-                "cf": registry.CF_PREFIX,
-                "mistral": registry.MISTRAL_PREFIX,
-            }
-            bare = chosen[len(prefixes[provider]):]
-            marks = {"groq": "⚡ groq", "cf": "☁ cf",
-                     "mistral": "🌀 mistral"}
-            deltas = opencode_compat.stream_translate(
-                chunk, base, key, bare, instructions=instructions,
-                source_language=source_language,
-                target_language=target_language)
-            badge = f"{marks[provider]}: {bare}"
+        base, key = registry.provider_creds(provider, s)
+        prefixes = {
+            "groq": registry.GROQ_PREFIX,
+            "cf": registry.CF_PREFIX,
+            "mistral": registry.MISTRAL_PREFIX,
+        }
+        bare = chosen[len(prefixes[provider]):]
+        marks = {"groq": "⚡ groq", "cf": "☁ cf",
+                 "mistral": "🌀 mistral"}
+        deltas = openai_compat.stream_translate(
+            chunk, base, key, bare, instructions=instructions,
+            source_language=source_language,
+            target_language=target_language)
+        badge = f"{marks[provider]}: {bare}"
 
     partial = ""
     try:
@@ -1405,41 +1358,6 @@ def _add_model_specific_instructions(
     )
 
 
-def _stream_single_bridge(chunk: str, s: dict):
-    from config.settings import resolve_model
-    from .prompt import LANGUAGE_NAMES
-
-    chosen = resolve_model(s)
-    chosen_short = chosen.replace("-free", "")
-    instructions = _translation_instructions(s, chosen, chunk)
-    source_language = s.get("source_language", "auto")
-    target_language = s.get("target_language", "ar")
-    if source_language != "auto" and source_language not in LANGUAGE_NAMES:
-        source_language = "auto"
-    if target_language not in LANGUAGE_NAMES:
-        target_language = "ar"
-    partial = ""
-    try:
-        for delta in opencode_bridge.stream(
-            chunk, chosen, instructions=instructions,
-            source_language=source_language, target_language=target_language,
-            settings=s,
-        ):
-            partial += delta
-            yield ("partial", _normalize_latex_partial(partial), "")
-        final = partial.strip()
-        if not final:
-            raise RuntimeError(f"Bridge {chosen} streamed no text")
-        final = _prepare_translation(final)
-    except Exception as error:
-        arabic, badge = _translate_free_fallback(
-            chunk, s, chosen, str(error)[:80])
-        yield ("partial", arabic, "")
-        yield ("done", arabic, badge)
-        return
-    yield ("done", final, f"◈ chosen bridge: {chosen_short}")
-
-
 def _stream_single_router(chunk: str, s: dict):
     """Stream a FreeLLMAPI request so the first words show up in ~1s.
 
@@ -1471,7 +1389,7 @@ def _stream_single_router(chunk: str, s: dict):
     partial = ""
     report: dict = {}
     try:
-        for delta in opencode_compat.stream_translate(
+        for delta in openai_compat.stream_translate(
             chunk, base, key, bare, instructions=instructions,
             source_language=source_language, target_language=target_language,
             report=report,
@@ -1587,7 +1505,7 @@ def _stream_single_custom_provider(chunk: str, s: dict):
     reasoning = bool(entry.get("reasoning_enabled")) if entry else False
     usage_report: dict = {}
     try:
-        for delta in opencode_compat.stream_translate(
+        for delta in openai_compat.stream_translate(
             chunk, base, key, provider_model, instructions=instructions,
             source_language=source_language, target_language=target_language,
             reasoning_enabled=reasoning,
@@ -1663,10 +1581,8 @@ def _merge_engine_badges(badges: list[str], chosen: str = "") -> str:
     your own model was used throughout.
 
     `chosen` is the model `resolve_model` settled on. It is compared against the
-    *engine each badge names*, structurally: a page answered by the bridge or by
-    the user's own router is their model answering, even though neither badge
-    contains the word "chosen" — the two shapes that made the old
-    `"chosen:" in badge` test report a false "(not your model)".
+    *engine each badge names*, structurally, so router responses are credited
+    to the selected gateway even when its badge names the routed upstream.
     """
     badges = [b for b in badges if b and b != "—"]
     if not badges:
@@ -1699,14 +1615,13 @@ def _merge_engine_badges(badges: list[str], chosen: str = "") -> str:
 # rather than searching the text for a word:
 #
 #   "<mark> chosen: <model>"           the model the user picked answered
-#   "<mark> chosen bridge: <model>"    ditto, through the streaming bridge
 #   "<mark> <engine>"                  a directly-keyed provider, or the router
 #   "<substitute>  ⚠ <reason>"         something else answered, and why
 #
 # The reason after the second ⚠ is prose and is never read as an engine, so
 # "⚠ chosen model X failed: …" cannot be mistaken for proof that X answered.
 _BADGE_MARKS = "✦◈🔀⚡☁🌀🔧🌐"
-_CHOSEN_HEADS = ("chosen:", "chosen bridge:")
+_CHOSEN_HEADS = ("chosen:",)
 
 
 def _badge_engine(badge: str) -> tuple[str, bool, bool]:
@@ -1717,7 +1632,7 @@ def _badge_engine(badge: str) -> tuple[str, bool, bool]:
     via_router = head.startswith("🔀")
     via_custom = head.startswith("🔧")
     if marked:
-        bare = re.sub(r"^chosen(?:\s+bridge)?:\s*", "", bare).strip()
+        bare = re.sub(r"^chosen:\s*", "", bare).strip()
     # For custom: "🔧 custom: My API (gpt-4o)" -> mark as chosen
     if via_custom:
         return bare, True, via_router
@@ -1750,8 +1665,6 @@ def _is_chosen_engine(engine: str, marked: bool, via_router: bool,
     if _same_model(engine, chosen) or _same_model(
             engine, chosen.replace("-free", "")):
         return True
-    if chosen_provider == "opencode_cli":
-        return chosen[len(registry.OPENCODE_CLI_PREFIX):] in engine
     return False
 
 
@@ -1848,17 +1761,10 @@ def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
                 chunk, s["gemini_key"], model, instructions=instructions,
                 source_language=source_language, target_language=target_language,
             ), f"✦ {model}"
-        if registry.provider_of(model) == "bridge":
-            return opencode_bridge.translate(
-                chunk, model, instructions=instructions,
-                source_language=source_language,
-                target_language=target_language,
-                settings=s,
-            ), f"◈ bridge: {model}"
         if registry.provider_of(model) == "freellm":
             base, key = registry.provider_creds("freellm", s)
             bare = model[len(registry.FLM_PREFIX):]
-            out, via = opencode_compat.translate_with_engine(
+            out, via = openai_compat.translate_with_engine(
                 chunk, base, key, bare, instructions=instructions,
                 source_language=source_language,
                 target_language=target_language,
@@ -1873,7 +1779,7 @@ def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
                 raise RuntimeError("Custom provider is incomplete — fill Base URL, API Key and Model in Settings.")
             entry = registry.get_custom_provider(s, model)
             reasoning = bool(entry.get("reasoning_enabled")) if entry else False
-            return opencode_compat.translate(
+            return openai_compat.translate(
                 chunk, base, key, provider_model, instructions=instructions,
                 source_language=source_language, target_language=target_language,
                 reasoning_enabled=reasoning,
@@ -1889,7 +1795,7 @@ def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
             badge_mark = {"groq": "⚡ groq", "cf": "☁ cf",
                           "mistral": "🌀 mistral"}[
                               registry.provider_of(model)]
-            return opencode_compat.translate(
+            return openai_compat.translate(
                 chunk, base, key, bare, instructions=instructions,
                 source_language=source_language, target_language=target_language,
             ), f"{badge_mark}: {bare}"
@@ -1899,21 +1805,12 @@ def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
             if not base or not key:
                 raise RuntimeError(
                     "OpenAI-compatible base URL and API key are not configured.")
-            return opencode_compat.translate(
+            return openai_compat.translate(
                 chunk, base, key, model, instructions=instructions,
                 source_language=source_language,
                 target_language=target_language,
             ), f"◈ chosen: {model}"
-        if registry.provider_of(model) == "opencode_cli":
-            cli_model = model[len(registry.OPENCODE_CLI_PREFIX):]
-            return opencode_cli.translate(
-                chunk, cli_model, instructions=instructions,
-                source_language=source_language, target_language=target_language,
-            ), f"◈ chosen: OpenCode CLI ({cli_model})"
-        return opencode_zen.translate(
-            chunk, model, instructions=instructions,
-            source_language=source_language, target_language=target_language,
-        ), f"◈ {chosen_short}"
+        raise RuntimeError(f"Unsupported translation provider for model {model}.")
 
     def _translated_call(model: str) -> tuple[str, str]:
         output, badge = _call(model)
@@ -1938,8 +1835,6 @@ def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
             return f"✦ {model}"
         if call_provider == "google_translate":
             return "🌐 chosen: Google Translate"
-        if call_provider == "bridge":
-            return f"◈ bridge: {model}"
         if call_provider == "freellm":
             return f"🔀 flm: {model[len(registry.FLM_PREFIX):]}"
         if call_provider == "custom_provider":
@@ -1954,10 +1849,7 @@ def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
             return f"{mark}: {bare}"
         if call_provider == "custom":
             return f"◈ chosen: {model}"
-        if call_provider == "opencode_cli":
-            cli_model = model[len(registry.OPENCODE_CLI_PREFIX):]
-            return f"◈ chosen: OpenCode CLI ({cli_model})"
-        return f"◈ {model.replace('-free', '')}"
+        return f"◈ chosen: {model}"
 
     # 1. The engine the user actually chose. If it cannot run, say why instead
     #    of pretending: the old code silently swapped in Gemini here.
@@ -1971,18 +1863,6 @@ def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
                 return arabic, f"✦ chosen: {chosen}"
             except Exception as e:
                 failure = str(e)[:80]
-    elif provider == "opencode":
-        try:
-            arabic, badge = _translated_call(chosen)
-            return arabic, f"◈ chosen: {chosen_short}"
-        except Exception as e:
-            failure = str(e)[:80]
-    elif provider == "bridge":
-        try:
-            arabic, badge = _translated_call(chosen)
-            return arabic, f"◈ chosen bridge: {chosen_short}"
-        except Exception as e:
-            failure = str(e)[:80]
     elif provider == "freellm":
         base, key = registry.provider_creds("freellm", s)
         if not key:
@@ -2012,11 +1892,6 @@ def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
                 return _translated_call(chosen)
             except Exception as e:
                 failure = str(e)[:80]
-    elif provider == "opencode_cli":
-        try:
-            return _translated_call(chosen)
-        except Exception as e:
-            failure = str(e)[:80]
     elif provider == "google_translate":
         try:
             return _translated_call(chosen)
@@ -2029,7 +1904,7 @@ def _translate_chunk_locked(chunk: str, s: dict) -> tuple[str, str]:
             failure = "OpenAI-compatible is not configured"
         else:
             try:
-                out = _prepare_translation(opencode_compat.translate(
+                out = _prepare_translation(openai_compat.translate(
                     chunk, base, key, chosen,
                     instructions=instructions,
                     source_language=source_language,

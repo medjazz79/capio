@@ -105,7 +105,7 @@ class TestHindiTranslationContract(unittest.TestCase):
         opts = settings(model="offline-compatible-model",
                         openai_base="https://offline.invalid/v1",
                         openai_key="offline-test-key")
-        with mock.patch("translators.opencode_compat.requests.post", side_effect=post):
+        with mock.patch("translators.openai_compat.requests.post", side_effect=post):
             events = list(chain.translate_stream("Original English passage", opts))
         self.assertEqual(events[-1][1], HINDI)
         self.assertEqual(len(payloads), 2)

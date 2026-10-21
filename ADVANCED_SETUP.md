@@ -6,13 +6,15 @@ to customize Capio. For daily workflows, see the [User Guide](USER_GUIDE.md).
 ## Translation providers (API keys are optional)
 
 1. **Gemini Flash:** get an API key from
-   https://aistudio.google.com/apikey → ⚙ Settings → API Keys tab → paste → Save.
+   https://aistudio.google.com/apikey → ⚙ Settings → API Keys → Add Provider →
+   Google Gemini → paste the key.
    Available models, quotas, and pricing depend on your Google account and plan.
 2. **FreeLLMAPI:** a local router you
    run on your own machine. It stacks dozens of free providers behind one
    OpenAI-compatible `/v1` endpoint and **fails over between them on its own**,
    so a rate-limited upstream never reaches this app. Start the router, copy
-   the unified key from its Keys page → ⚙ Settings → API Keys → FreeLLMAPI.
+   the unified key from its Keys page → ⚙ Settings → API Keys → Add Provider →
+   FreeLLMAPI.
    The router URL is read from the router's own `config.json`, so the port is
    never guessed. In the picker you get `auto`, `auto:fast`, `auto:smart`,
    `auto:reliable`, `auto:balanced`, `fusion`, plus every model currently `ready`.
@@ -22,28 +24,15 @@ to customize Capio. For daily workflows, see the [User Guide](USER_GUIDE.md).
    from the streamed response, never a second request. `auto` also handles
    image translation, because the router routes images to a vision model
    itself. Measured here: `auto:fast` 2.4s, `auto` 4.5s.
-3. **OpenCode bridge free, no key needed:** eight free models that answer
-   through an in-process streaming bridge (`translators/opencode_bridge.py`),
-   ordered fastest-first by measurement:
-   `space-bunny-free` (3.4s) · `muse-spark-1.3-contributor-free` (4.3s) ·
-   `mimo-v2.6-flash-free` (5.5s) · `fledge-alpha-free` (6.0s) ·
-   `muse-spark-1.2-contributor-free` · `longcat-2.5-preview-free` ·
-   `nemotron-3.5-lightning-free` · `nemotron-3-ultra-free`.
-   The bridge uses streaming SSE plus the OpenCode client fingerprint
-   (`stream:true` + shell/read tools + `opencode/` User-Agent + session id);
-   without it the free tier answers 403. Muse-spark ids go through the
-   `/responses` endpoint, the rest through `/chat/completions`. No API key
-   field is offered and dead `-free` ids are not listed: a model that cannot
-   answer only costs you a failed translation.
-4. **Pick ONE free model** in ⚙ Settings → Translation tab, grouped so
-   you always know what costs what:
-   ✦ Gemini (free) · 🔀 FreeLLMAPI (your router) · 🌉 OpenCode bridge free
-   (no key) · 🌐 Google Translate (unofficial, no key).
-   Models that failed verification stay visible but disabled, so you can see
-   why instead of discovering it mid-sentence.
-5. **Custom providers (optional):** add an OpenAI-compatible endpoint in
-   **Settings → Custom Providers**. After Base URL + API Key are entered, its
-   `/v1/models` list is fetched automatically and appears in the Model menu.
+3. **Custom providers:** add any number of OpenAI-compatible endpoints in
+   **Settings → API Keys → Add Provider**. Presets include OpenAI,
+   OpenRouter, DeepSeek, Together AI, Fireworks AI, Cerebras, xAI, NVIDIA NIM,
+   SiliconFlow, DeepInfra, Nebius Token Factory, SambaNova, and Hyperbolic;
+   you can also add a custom endpoint. Enter its key under **API Keys**, then
+   set its name, endpoint, and model options in **AI Providers**. Models load
+   from `/models` only after both the endpoint and key are configured. For
+   Cloudflare Workers AI, choose its preset and replace `<ACCOUNT_ID>`; Capio
+   loads its catalog from Cloudflare's account-level model-search endpoint.
    The **Reasoning** option controls reasoning on supported endpoints (for
    Ollama, it explicitly sends `think: true` or `think: false`); **Vision /
    Images** controls whether image selections are allowed and sent to that
@@ -128,28 +117,27 @@ image and full translation fit together.
 
 ## Settings layout and speed
 
-⚙ Settings uses a sidebar, with **Translation** and **Custom Providers** at
-the top, instead of one long list. The last opened section is saved as soon as
+⚙ Settings uses a sidebar instead of one long list. **API Keys** is a
+dedicated page for built-in credentials and keys for custom endpoints;
+**AI Providers** contains the global model picker and custom endpoint/model
+configuration. The last opened section is saved as soon as
 you select it, even if you later cancel; model favorites, provider model
-choices, and collapsed provider panels are saved with settings.
+choices, and collapsed provider panels are saved with settings. On both
+provider pages, drag a card with the left mouse button to change its order;
+the API Keys and AI Providers orders are saved independently.
 Resize or move the window as needed; both its size and position are remembered
 between opens.
 
-**Performance → ⚡ Fast mode (default ON)** is the single switch for every
-speedup; OFF restores classic behavior:
+**Speed & Usage → ⚡ Fast mode (default ON)** controls the streaming and
+read-aloud speedups; OFF restores classic behavior:
 - **Live word-by-word display:** selected models stream each translation
   chunk, including OCR text and supported vision requests. This covers Gemini,
-  FreeLLMAPI, OpenAI-compatible providers, OpenCode Zen/CLI text, and bridge
-  models; image streaming is available only for models that accept images.
+  FreeLLMAPI, and configured OpenAI-compatible providers; image streaming is
+  available only for models that accept images.
   Streaming improves time-to-first-text, not necessarily total completion
   time.
 - **Router response window:** translation requests allow up to 120 seconds for
   a response, so a slow-starting local model is less likely to time out.
-- **Fastest-first ordering:** bridge models are listed by measured speed.
-- **Per-model effort:** LongCat defaults to minimal after paired speed checks;
-  other models keep their existing effort because lower settings were slower
-  or returned incomplete/unsuitable output in checks. Each model's preset
-  remains editable.
 - **Fast read-aloud:** playback can start from streamed audio before a complete
   MP3 segment is ready; segments still synthesize in parallel and completed
   audio is cached for fast repeats and restarts (Multilingual voice kept for

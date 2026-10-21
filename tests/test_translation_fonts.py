@@ -68,7 +68,7 @@ class TestTranslationFonts(unittest.TestCase):
 
     def test_custom_provider_system_message_includes_tashkeel_instruction(self):
         from translators.chain import _translation_instructions
-        from translators.opencode_compat import _messages_for
+        from translators.openai_compat import _messages_for
 
         settings = {
             "target_language": "ar",

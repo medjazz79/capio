@@ -101,6 +101,6 @@ def glossary_partial(text: str) -> str:
         )
     return (
         "⚠️ Translation service unreachable (tried twice). "
-        "Partial glossary translation below — add a free Gemini or OpenCode key "
+        "Partial glossary translation below — connect an AI provider "
         "in ⚙ Settings for full quality:\n" + out
     )

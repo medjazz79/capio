@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from . import gemini, opencode_bridge, opencode_cli, opencode_compat, opencode_zen
+from . import gemini, openai_compat
 from . import registry
 from .prompt import LANGUAGE_NAMES
 
@@ -118,13 +118,6 @@ def reply(
                 use_google_search=False,
             )
             return answer
-    if provider == "bridge":
-        return opencode_bridge.chat(conversation, model, system, settings)
-    if provider == "opencode":
-        return opencode_zen.chat(conversation, model, system)
-    if provider == "opencode_cli":
-        return opencode_cli.chat(
-            conversation, model[len(registry.OPENCODE_CLI_PREFIX):], system)
     if provider in {"groq", "cf", "mistral"}:
         base, key = registry.provider_creds(provider, settings)
         if not base or not key:
@@ -135,7 +128,7 @@ def reply(
             "cf": registry.CF_PREFIX,
             "mistral": registry.MISTRAL_PREFIX,
         }[provider]
-        return opencode_compat.chat(
+        return openai_compat.chat(
             conversation, base, key, model[len(prefix):], system)
     if provider == "custom_provider":
         cfg = registry.custom_provider_config(model, settings)
@@ -146,7 +139,7 @@ def reply(
             raise RuntimeError("Custom provider is incomplete — fill Base URL, API Key and Model in Settings.")
         entry = registry.get_custom_provider(settings, model)
         reasoning = bool(entry.get("reasoning_enabled")) if entry else False
-        return opencode_compat.chat(conversation, base, key, provider_model, system, reasoning_enabled=reasoning)
+        return openai_compat.chat(conversation, base, key, provider_model, system, reasoning_enabled=reasoning)
 
     base = (settings.get("openai_base") or "").strip()
     key = (settings.get("openai_key") or "").strip()
@@ -154,7 +147,7 @@ def reply(
         raise RuntimeError(
             "Chat with this model requires an OpenAI-compatible base URL "
             "and API key in Settings.")
-    return opencode_compat.chat(conversation, base, key, model, system)
+    return openai_compat.chat(conversation, base, key, model, system)
 
 
 def reply_stream(
@@ -208,16 +201,6 @@ def reply_stream(
                 use_google_search=False,
             )
         return
-    if provider == "bridge":
-        yield from opencode_bridge.stream_chat(
-            conversation, model, system, settings)
-        return
-    if provider == "opencode":
-        yield from opencode_zen.stream_chat(conversation, model, system)
-        return
-    if provider == "opencode_cli":
-        yield reply(messages, settings, source_text, translated_text)
-        return
     if provider in {"groq", "cf", "mistral"}:
         base, key = registry.provider_creds(provider, settings)
         if not base or not key:
@@ -228,7 +211,7 @@ def reply_stream(
             "cf": registry.CF_PREFIX,
             "mistral": registry.MISTRAL_PREFIX,
         }[provider]
-        yield from opencode_compat.stream_chat(
+        yield from openai_compat.stream_chat(
             conversation, base, key, model[len(prefix):], system)
         return
     if provider == "custom_provider":
@@ -242,7 +225,7 @@ def reply_stream(
                 "Custom provider is incomplete — fill Base URL, API Key and Model in Settings.")
         entry = registry.get_custom_provider(settings, model)
         reasoning = bool(entry.get("reasoning_enabled")) if entry else False
-        yield from opencode_compat.stream_chat(
+        yield from openai_compat.stream_chat(
             conversation, base, key, provider_model, system,
             reasoning_enabled=reasoning)
         return
@@ -253,5 +236,5 @@ def reply_stream(
         raise RuntimeError(
             "Chat with this model requires an OpenAI-compatible base URL "
             "and API key in Settings.")
-    yield from opencode_compat.stream_chat(
+    yield from openai_compat.stream_chat(
         conversation, base, key, model, system)

@@ -10,7 +10,7 @@ from unittest import mock
 from tests.transport_support import requires_loopback
 
 from config import settings
-from translators import chain, opencode_compat
+from translators import chain, openai_compat
 
 
 def _edit_settings(path, key, value, barrier):
@@ -123,21 +123,21 @@ class TestTranslationIntegrity(unittest.TestCase):
 
     def test_incomplete_stream_is_rejected_and_closed(self):
         response = self._response()
-        with mock.patch.object(opencode_compat, "_post_stream", return_value=response):
+        with mock.patch.object(openai_compat, "_post_stream", return_value=response):
             with self.assertRaisesRegex(RuntimeError, "before completion"):
-                list(opencode_compat.stream_translate("text", "https://example.invalid", "fake", "model"))
+                list(openai_compat.stream_translate("text", "https://example.invalid", "fake", "model"))
         response.close.assert_called_once()
 
     def test_stop_or_done_completes_a_stream(self):
         for finish, done in [("stop", False), (None, True)]:
-            with mock.patch.object(opencode_compat, "_post_stream", return_value=self._response(finish, done)):
-                self.assertEqual(list(opencode_compat.stream_translate(
+            with mock.patch.object(openai_compat, "_post_stream", return_value=self._response(finish, done)):
+                self.assertEqual(list(openai_compat.stream_translate(
                     "text", "https://example.invalid", "fake", "model")), ["partial text"])
 
     def test_auth_failure_never_retries_stream_options(self):
         response = mock.Mock(status_code=401, text="invalid stream_options or API key")
-        with mock.patch.object(opencode_compat.requests, "post", return_value=response) as post:
-            self.assertIs(opencode_compat._post_stream({"stream_options": {}}, "https://example.invalid", "fake", 1), response)
+        with mock.patch.object(openai_compat.requests, "post", return_value=response) as post:
+            self.assertIs(openai_compat._post_stream({"stream_options": {}}, "https://example.invalid", "fake", 1), response)
         self.assertEqual(post.call_count, 1)
 
     def test_repeated_usage_frames_are_counted_once(self):
@@ -148,8 +148,8 @@ class TestTranslationIntegrity(unittest.TestCase):
             ('data: ' + json.dumps({"choices": [], "usage": usage})).encode(),
         ]
         report = {}
-        with mock.patch.object(opencode_compat, "_post_stream", return_value=response):
-            list(opencode_compat.stream_translate("text", "https://example.invalid", "fake", "model", report=report))
+        with mock.patch.object(openai_compat, "_post_stream", return_value=response):
+            list(openai_compat.stream_translate("text", "https://example.invalid", "fake", "model", report=report))
         self.assertEqual(report["tokens"]["total"], 15)
 
     def test_disabled_fallback_sends_nothing_to_other_services(self):

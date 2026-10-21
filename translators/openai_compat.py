@@ -1,10 +1,11 @@
-"""Generic OpenAI-compatible translator (OpenRouter / opencode / any free endpoint)."""
+"""Generic OpenAI-compatible client for user-configured providers."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from concurrent.futures import ThreadPoolExecutor
 import json
+import re
 import time
 from collections.abc import Iterator
 from decimal import Decimal, InvalidOperation
@@ -197,28 +198,56 @@ def _is_gateway_exhaustion(response) -> bool:
     return "models exhausted" in str(error.get("message", "")).lower()
 
 
+def _cloudflare_model_search_url(base_url: str) -> str | None:
+    """Map a Workers AI OpenAI-compatible URL to Cloudflare's model catalog."""
+    parsed = urlsplit(base_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "api.cloudflare.com"
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    match = re.fullmatch(
+        r"/client/v4/accounts/([0-9a-f]{32})/ai/v1",
+        parsed.path.rstrip("/"),
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return (
+        f"{parsed.scheme}://{parsed.netloc}/client/v4/accounts/"
+        f"{match.group(1)}/ai/models/search"
+    )
+
+
 def list_model_groups(
     base_url: str,
     api_key: str,
     timeout: int = TIMEOUT,
     explicitly_free_models: set[str] | None = None,
 ) -> list[tuple[str, list[str]]]:
-    """Text-model ids grouped by category metadata returned by `/models`.
+    """Text-model ids grouped by category metadata returned by the provider.
 
     Kilo Code tries base + /models then falls back to stripped/added /v1 variants;
     this does the same but without the old rstrip('/v1') character-set bug.
+    Cloudflare uses its account-level paginated model-search endpoint instead.
     """
     base = base_url.strip().rstrip("/")
+    cloudflare_url = _cloudflare_model_search_url(base)
     # Build candidates like Kilo Code: try exactly what the user typed first,
     # then the alternate with/without /v1 — never using str.rstrip('/v1').
-    candidates: list[str] = [f"{base}/models"]
-    if base.endswith("/v1"):
-        without_v1 = base[:-3].rstrip("/")
-        if without_v1:
-            candidates.append(f"{without_v1}/models")
-            candidates.append(f"{without_v1}/v1/models")
+    if cloudflare_url:
+        candidates = [cloudflare_url]
     else:
-        candidates.append(f"{base}/v1/models")
+        candidates = [f"{base}/models"]
+        if base.endswith("/v1"):
+            without_v1 = base[:-3].rstrip("/")
+            if without_v1:
+                candidates.append(f"{without_v1}/models")
+                candidates.append(f"{without_v1}/v1/models")
+        else:
+            candidates.append(f"{base}/v1/models")
     # Deduplicate preserving order
     seen: set[str] = set()
     urls: list[str] = []
@@ -235,6 +264,10 @@ def list_model_groups(
                 url,
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=timeout,
+                **(
+                    {"params": {"page": 1, "per_page": 100}}
+                    if cloudflare_url else {}
+                ),
             )
             if r.status_code == 404:
                 last_error = RuntimeError(f"404 Not Found at {url}")
@@ -245,6 +278,102 @@ def list_model_groups(
                 data = r.json()
             except ValueError as je:
                 raise RuntimeError(f"Invalid JSON from {url}: {je}") from je
+            if cloudflare_url:
+                if not isinstance(data, dict) or not data.get("success"):
+                    errors = (
+                        data.get("errors", data)
+                        if isinstance(data, dict) else data
+                    )
+                    raise RuntimeError(
+                        "Cloudflare model search failed: "
+                        f"{str(errors)[:300]}")
+                result = data.get("result")
+                if not isinstance(result, list):
+                    raise RuntimeError(
+                        "Cloudflare model search response has no result list")
+                models = []
+                for model in result:
+                    if not isinstance(model, dict):
+                        continue
+                    task = model.get("task")
+                    task_name = (
+                        str(task.get("name", "")).strip()
+                        if isinstance(task, dict) else ""
+                    )
+                    model_name = str(model.get("name", "")).strip()
+                    if (
+                        task_name.casefold() != "text generation"
+                        or not model_name
+                    ):
+                        continue
+                    models.append({
+                        **model,
+                        "id": model_name,
+                        "group": task_name,
+                    })
+                data = {"data": models}
+            cursor = ""
+            seen_cursors: set[str] = set()
+            for _page in range(1000):
+                if not isinstance(data, dict) or not data.get("has_more"):
+                    break
+                list_key = next(
+                    (
+                        key for key in ("data", "models", "items", "models_data")
+                        if isinstance(data.get(key), list)
+                    ),
+                    None,
+                )
+                if list_key is None:
+                    raise RuntimeError(
+                        f"Paginated /models response from {url} has no model list")
+                page_entries = data[list_key]
+                cursor = str(
+                    data.get("next_cursor") or data.get("last_id") or ""
+                ).strip()
+                if not cursor and page_entries:
+                    last_entry = page_entries[-1]
+                    if isinstance(last_entry, dict):
+                        cursor = str(
+                            last_entry.get(
+                                "id",
+                                last_entry.get(
+                                    "name", last_entry.get("model", "")),
+                            )
+                        ).strip()
+                if not cursor or cursor in seen_cursors:
+                    raise RuntimeError(
+                        f"Paginated /models response from {url} did not "
+                        "provide a usable next cursor")
+                seen_cursors.add(cursor)
+                if _page == 999:
+                    raise RuntimeError(
+                        f"Too many pages while listing models from {url}")
+                next_response = requests.get(
+                    url,
+                    headers={"Authorization": f"******"},
+                    timeout=timeout,
+                    params={"after": cursor},
+                )
+                next_response.raise_for_status()
+                try:
+                    next_data = next_response.json()
+                except ValueError as je:
+                    raise RuntimeError(
+                        f"Invalid JSON from {url}: {je}") from je
+                if (
+                    not isinstance(next_data, dict)
+                    or not isinstance(next_data.get(list_key), list)
+                ):
+                    raise RuntimeError(
+                        f"Unexpected paginated /models reply from {url}: "
+                        f"{str(next_data)[:300]}")
+                data[list_key].extend(next_data[list_key])
+                data["has_more"] = bool(next_data.get("has_more"))
+                data["next_cursor"] = (
+                    next_data.get("next_cursor")
+                    or next_data.get("last_id")
+                    or "")
             # OpenAI: {"data": [{"id": ...}]} ; some gateways: {"models": [...]} ; some return plain list
             entries = None
             if isinstance(data, dict):

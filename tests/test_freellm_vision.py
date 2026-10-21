@@ -85,7 +85,7 @@ class TestRouterImageFailureMessage(unittest.TestCase):
             "rate limits to reset. Soonest reset ~23m."
         )
         with mock.patch(
-            "translators.opencode_compat.translate_image",
+            "translators.openai_compat.translate_image",
             side_effect=RuntimeError(f"400 Client Error: {message}"),
         ):
             with self.assertRaises(RuntimeError) as caught:
@@ -101,7 +101,7 @@ class TestRouterImageFailureMessage(unittest.TestCase):
         from PIL import Image
         img = Image.new("RGB", (10, 10), "white")
         with mock.patch(
-            "translators.opencode_compat.translate_image",
+            "translators.openai_compat.translate_image",
             side_effect=RuntimeError("502 upstream_error"),
         ):
             with self.assertRaises(RuntimeError) as caught:
@@ -126,7 +126,7 @@ class TestRouterImageFailureMessage(unittest.TestCase):
         from unittest import mock
         from PIL import Image
         img = Image.new("RGB", (10, 10), "white")
-        with mock.patch("translators.opencode_compat.translate_image",
+        with mock.patch("translators.openai_compat.translate_image",
                         side_effect=always_429):
             with self.assertRaises(RuntimeError):
                 chain.translate_image(img, self._settings())

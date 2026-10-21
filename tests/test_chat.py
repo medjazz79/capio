@@ -1470,7 +1470,7 @@ class TestTranslationChat(unittest.TestCase):
 
     def test_openai_compatible_chat_sends_bearer_authorization(self):
         import requests
-        from translators import opencode_compat
+        from translators import openai_compat
 
         response = mock.Mock()
         response.raise_for_status.return_value = None
@@ -1478,7 +1478,7 @@ class TestTranslationChat(unittest.TestCase):
             "message": {"content": "Answer"}, "finish_reason": "stop"}]}
         api_key = "test-api-key"
         with mock.patch.object(requests, "post", return_value=response) as post:
-            result = opencode_compat.chat(
+            result = openai_compat.chat(
                 [{"role": "user", "content": "Question"}],
                 "https://api.groq.com/openai/v1",
                 api_key,
@@ -1492,57 +1492,7 @@ class TestTranslationChat(unittest.TestCase):
             f"Bearer {api_key}",
         )
 
-    def test_reply_uses_selected_bridge_and_translation_context(self):
-        from translators import chat
 
-        messages = [{"role": "user", "content": "Why is this chord here?"}]
-        settings = {
-            "model": "space-bunny-free",
-            "source_language": "en",
-            "target_language": "ar",
-        }
-        with mock.patch(
-            "translators.chat.opencode_bridge.chat", return_value="شرح"
-        ) as bridge_chat:
-            answer = chat.reply(
-                messages, settings, "Original passage", "Current translation")
-
-        self.assertEqual(answer, "شرح")
-        call_messages, model, system_prompt, _ = bridge_chat.call_args.args
-        self.assertEqual(call_messages, messages)
-        self.assertEqual(model, "space-bunny-free")
-        self.assertIn("Original passage", system_prompt)
-        self.assertIn("Current translation", system_prompt)
-        self.assertIn("Reply in Arabic", system_prompt)
-        self.assertIn("a book and document reader", system_prompt)
-        self.assertIn("do not ask which book", system_prompt)
-        self.assertNotIn("music-harmony textbook", system_prompt)
-
-    def test_popup_instructions_are_included_in_chat_system_prompt(self):
-        from translators import chat
-
-        settings = {
-            "model": "space-bunny-free",
-            "source_language": "en",
-            "target_language": "ar",
-            "explain_instructions": "Explain each cadence step by step.",
-        }
-        with mock.patch(
-            "translators.chat.opencode_bridge.chat", return_value="شرح"
-        ) as bridge_chat:
-            chat.reply(
-                [{"role": "user", "content": "Explain this."}],
-                settings,
-                "Original passage",
-                "Translation",
-            )
-
-        system_prompt = bridge_chat.call_args.args[2]
-        self.assertIn(
-            "Additional instructions from the translation window",
-            system_prompt,
-        )
-        self.assertIn("Explain each cadence step by step.", system_prompt)
 
     def test_gemini_reply_uses_selected_model_and_key(self):
         from translators import chat
@@ -1750,7 +1700,7 @@ class TestTranslationChat(unittest.TestCase):
         self.assertIn("Google Search", gemini_stream.call_args.args[3])
 
     def test_openai_compatible_chat_stream_requires_a_complete_reply(self):
-        from translators import opencode_compat
+        from translators import openai_compat
 
         response = mock.Mock()
         response.status_code = 200
@@ -1760,9 +1710,9 @@ class TestTranslationChat(unittest.TestCase):
             b"data: [DONE]",
         ]
         with mock.patch.object(
-            opencode_compat, "_post_stream", return_value=response
+            openai_compat, "_post_stream", return_value=response
         ) as post_stream:
-            chunks = list(opencode_compat.stream_chat(
+            chunks = list(openai_compat.stream_chat(
                 [{"role": "user", "content": "Question"}],
                 "https://example.test/v1",
                 "configured-key",
@@ -1777,63 +1727,6 @@ class TestTranslationChat(unittest.TestCase):
         )
         response.close.assert_called_once()
 
-    def test_opencode_zen_chat_stream_rejects_eof_without_finish_reason(self):
-        from translators import opencode_compat, opencode_zen
-
-        response = mock.Mock()
-        response.status_code = 200
-        response.iter_lines.return_value = [
-            b'data: {"choices":[{"delta":{"content":"Complete "},"finish_reason":null}]}',
-            b'data: {"choices":[{"delta":{"content":"reply."},"finish_reason":"stop"}]}',
-            b"data: [DONE]",
-        ]
-        with mock.patch.object(
-            opencode_zen.requests, "post", return_value=response
-        ):
-            chunks = list(opencode_zen.stream_chat(
-                [{"role": "user", "content": "Question"}],
-                "test-model",
-                "Reply in English.",
-            ))
-        self.assertEqual("".join(chunks), "Complete reply.")
-
-        response.close.reset_mock()
-        response.iter_lines.return_value = [
-            b'data: {"choices":[{"delta":{"content":"Incomplete"}}]}',
-            b"data: [DONE]",
-        ]
-        with mock.patch.object(
-            opencode_zen.requests, "post", return_value=response
-        ):
-            stream = opencode_zen.stream_chat(
-                [{"role": "user", "content": "Question"}],
-                "test-model",
-                "Reply in English.",
-            )
-            self.assertEqual(next(stream), "Incomplete")
-            with self.assertRaisesRegex(RuntimeError, "ended before"):
-                next(stream)
-        response.close.assert_called_once()
-
-        response.close.reset_mock()
-        response.iter_lines.return_value = [
-            b'data: {"choices":[{"delta":{"content":"Incomplete"}}]}',
-            b"data: [DONE]",
-        ]
-        with mock.patch.object(
-            opencode_compat, "_post_stream", return_value=response
-        ):
-            stream = opencode_compat.stream_chat(
-                [{"role": "user", "content": "Question"}],
-                "https://example.test/v1",
-                "configured-key",
-                "test-model",
-                "Reply in English.",
-            )
-            self.assertEqual(next(stream), "Incomplete")
-            with self.assertRaisesRegex(RuntimeError, "ended before"):
-                next(stream)
-        response.close.assert_called_once()
 
     def test_gemini_stream_preserves_all_deltas_and_rejects_truncation(self):
         import requests

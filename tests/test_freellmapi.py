@@ -15,7 +15,7 @@ import requests
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from config.settings import DEFAULTS
-from translators import chain, opencode_compat, registry
+from translators import chain, openai_compat, registry
 
 
 class TestFreeLLMCredentials(unittest.TestCase):
@@ -220,7 +220,7 @@ class TestFreeLLMChain(unittest.TestCase):
 
     def test_badge_names_the_provider_that_actually_answered(self):
         with mock.patch(
-            "translators.opencode_compat.translate_with_engine",
+            "translators.openai_compat.translate_with_engine",
             return_value=("النص", "groq/qwen3.8-27b"),
         ) as call:
             text, badge = chain.translate("The cadence", self._settings())
@@ -233,7 +233,7 @@ class TestFreeLLMChain(unittest.TestCase):
 
     def test_badge_says_router_only_when_it_reported_nothing(self):
         with mock.patch(
-            "translators.opencode_compat.translate_with_engine",
+            "translators.openai_compat.translate_with_engine",
             return_value=("النص", ""),
         ):
             _, badge = chain.translate("The cadence", self._settings())
@@ -243,7 +243,7 @@ class TestFreeLLMChain(unittest.TestCase):
         from PIL import Image
         img = Image.new("RGB", (10, 10), "white")
         with mock.patch(
-            "translators.opencode_compat.translate_image",
+            "translators.openai_compat.translate_image",
             return_value="صورة",
         ) as call:
             out, _badge = chain.translate_image(img, self._settings())
@@ -260,7 +260,7 @@ class TestFreeLLMChain(unittest.TestCase):
             return "صورة مترجمة"
 
         with mock.patch(
-            "translators.opencode_compat.translate_image",
+            "translators.openai_compat.translate_image",
             side_effect=fake_translate_image,
         ):
             translated, badge = chain.translate_image(
@@ -273,7 +273,7 @@ class TestFreeLLMChain(unittest.TestCase):
     def test_image_request_reports_the_router_response_header(self):
         import requests
         from PIL import Image
-        from translators import opencode_compat
+        from translators import openai_compat
 
         response = mock.Mock()
         response.status_code = 200
@@ -290,7 +290,7 @@ class TestFreeLLMChain(unittest.TestCase):
         report = {}
 
         with mock.patch.object(requests, "post", return_value=response):
-            translated = opencode_compat.translate_image(
+            translated = openai_compat.translate_image(
                 Image.new("RGB", (10, 10), "white"),
                 "http://localhost:31415/v1",
                 "K",
@@ -327,7 +327,7 @@ class TestFreeLLMChain(unittest.TestCase):
             return mixed if calls == 1 else arabic
 
         with mock.patch(
-            "translators.opencode_compat.translate_image",
+            "translators.openai_compat.translate_image",
             side_effect=fake_translate_image,
         ):
             translated, badge = chain.translate_image(
@@ -340,7 +340,7 @@ class TestFreeLLMChain(unittest.TestCase):
         self.assertIn("google/gemini-3.5-flash-lite", badge)
 
     def test_missing_token_says_so_instead_of_switching_engine(self):
-        with mock.patch("translators.opencode_compat.translate_with_engine",
+        with mock.patch("translators.openai_compat.translate_with_engine",
                         side_effect=AssertionError("must not be called")):
             text, badge = chain.translate(
                 "The cadence", self._settings(flm_key=""))
@@ -356,7 +356,7 @@ class TestFreeLLMChain(unittest.TestCase):
             return iter(deltas)
 
         with mock.patch(
-            "translators.opencode_compat.stream_translate",
+            "translators.openai_compat.stream_translate",
             side_effect=fake_stream,
         ) as stream:
             events = list(chain.translate_stream(
@@ -386,26 +386,26 @@ class TestFreeLLMChain(unittest.TestCase):
 
         with mock.patch.object(
                 requests, "post", return_value=response) as post:
-            list(opencode_compat.stream_translate(
+            list(openai_compat.stream_translate(
                 "source", "http://localhost:31415/v1", "K", "auto"))
             self.assertEqual(
                 post.call_args.kwargs["timeout"],
-                opencode_compat.TRANSLATION_TIMEOUT,
+                openai_compat.TRANSLATION_TIMEOUT,
             )
 
-            opencode_compat.translate_with_engine(
+            openai_compat.translate_with_engine(
                 "source", "http://localhost:31415/v1", "K", "auto")
             self.assertEqual(
                 post.call_args.kwargs["timeout"],
-                opencode_compat.TRANSLATION_TIMEOUT,
+                openai_compat.TRANSLATION_TIMEOUT,
             )
 
     def test_streaming_failure_falls_back_instead_of_raising(self):
         with mock.patch(
-            "translators.opencode_compat.stream_translate",
+            "translators.openai_compat.stream_translate",
             side_effect=RuntimeError("router down"),
         ), mock.patch(
-            "translators.opencode_compat.translate_with_engine",
+            "translators.openai_compat.translate_with_engine",
             return_value=("النص", "groq/x"),
         ):
             events = list(chain.translate_stream(
@@ -425,9 +425,9 @@ class TestFreeLLMChain(unittest.TestCase):
             return iter(["النص "])
 
         with mock.patch(
-            "translators.opencode_compat.stream_translate",
+            "translators.openai_compat.stream_translate",
             side_effect=fake_stream,
-        ), mock.patch("translators.opencode_compat.translate_with_engine",
+        ), mock.patch("translators.openai_compat.translate_with_engine",
                       side_effect=AssertionError("no second request")):
             events = list(chain.translate_stream(
                 "The cadence", self._settings(fast_mode=True)))
@@ -440,7 +440,7 @@ class TestFreeLLMChain(unittest.TestCase):
             return iter(["النص "])
 
         with mock.patch(
-            "translators.opencode_compat.stream_translate",
+            "translators.openai_compat.stream_translate",
             side_effect=fake_stream,
         ):
             events = list(chain.translate_stream(

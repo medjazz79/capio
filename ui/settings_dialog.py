@@ -14,10 +14,12 @@ import re
 import threading
 import copy
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt, QTimer, Signal,
+)
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIntValidator, QPainter
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
     QDoubleSpinBox, QInputDialog, QLineEdit, QMenu, QPushButton, QPlainTextEdit, QSizePolicy,
     QSpinBox, QSplitter, QStackedWidget,
     QScrollArea, QStyle, QStyleOptionButton, QStylePainter,
@@ -68,9 +70,14 @@ _CUSTOM_PROVIDER_STRIPE_COLORS = (
     "#39D353",
     "#B56CFF",
 )
+
+
 _CUSTOM_PROVIDER_PLACEHOLDERS = {
     "name": "e.g. My OpenRouter",
-    "base_url": "https://api.openai.com/v1  or  https://openrouter.ai/api/v1",
+    "base_url": (
+        "https://api.openai.com/v1  or  "
+        "https://api.cloudflare.com/client/v4/accounts/<ID>/ai/v1"
+    ),
     "model": "e.g. gpt-4o  or  anthropic/claude-3.5-sonnet",
 }
 
@@ -82,6 +89,90 @@ PAGE_APPEARANCE = 2
 PAGE_PERFORMANCE = 3
 PAGE_GENERAL = 4
 PAGE_TTS = 5
+
+_API_PROVIDER_PRESETS = {
+    "OpenAI": ("https://api.openai.com/v1", "https://platform.openai.com/api-keys"),
+    "OpenRouter": ("https://openrouter.ai/api/v1", "https://openrouter.ai/keys"),
+    "DeepSeek": ("https://api.deepseek.com/v1", "https://platform.deepseek.com/api_keys"),
+    "Together AI": ("https://api.together.xyz/v1", "https://api.together.xyz/settings/api-keys"),
+    "Fireworks AI": ("https://api.fireworks.ai/inference/v1", "https://fireworks.ai/account/api-keys"),
+    "Cerebras": ("https://api.cerebras.ai/v1", "https://cloud.cerebras.ai/platform"),
+    "xAI": ("https://api.x.ai/v1", "https://console.x.ai/"),
+    "NVIDIA NIM": ("https://integrate.api.nvidia.com/v1", "https://build.nvidia.com/settings/api-keys"),
+    "SiliconFlow": ("https://api.siliconflow.com/v1", "https://cloud.siliconflow.com/account/ak"),
+    "DeepInfra": ("https://api.deepinfra.com/v1/openai", "https://deepinfra.com/dash/api_keys"),
+    "Nebius Token Factory": ("https://api.tokenfactory.nebius.com/v1", "https://tokenfactory.nebius.com/"),
+    "SambaNova": ("https://api.sambanova.ai/v1", "https://docs.sambanova.ai/docs/en/get-started/api-keys-urls"),
+    "Hyperbolic": ("https://api.hyperbolic.ai/inference/v1", "https://www.hyperbolic.ai/docs/inference/quickstart"),
+}
+
+_CUSTOM_PROVIDER_PRESETS = {
+    "Cloudflare Workers AI": (
+        "https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1",
+        "https://developers.cloudflare.com/workers-ai/",
+    ),
+    "Google Gemini": (
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "https://aistudio.google.com/apikey",
+    ),
+    **_API_PROVIDER_PRESETS,
+}
+
+
+class _CardDragReorderFilter(QObject):
+    def __init__(self, dialog: SettingsDialog):
+        super().__init__(dialog)
+        self._dialog = dialog
+        self._card: QWidget | None = None
+        self._press_position: QPoint | None = None
+        self._dragging = False
+
+    def eventFilter(self, watched, event) -> bool:
+        if not isinstance(watched, QWidget):
+            return False
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                card = self._card_for_widget(watched)
+                if card is not None:
+                    self._card = card
+                    self._press_position = event.globalPosition().toPoint()
+                    self._dragging = False
+            return False
+        if event.type() == QEvent.Type.MouseMove and self._card is not None:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                position = event.globalPosition().toPoint()
+                if (
+                    self._press_position is not None
+                    and (position - self._press_position).manhattanLength()
+                    >= QApplication.startDragDistance()
+                ):
+                    self._dragging = True
+                    self._card.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return False
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            card = self._card
+            dragging = self._dragging
+            self._card = None
+            self._press_position = None
+            self._dragging = False
+            if card is not None:
+                card.setCursor(Qt.CursorShape.OpenHandCursor)
+            if dragging and card is not None:
+                self._dialog._on_settings_card_dropped(
+                    card, event.globalPosition().toPoint().y())
+            return False
+        return False
+
+    @staticmethod
+    def _card_for_widget(widget: QWidget) -> QWidget | None:
+        current: QWidget | None = widget
+        while current is not None:
+            if current.objectName() in (
+                "apiKeyProviderCard", "customProviderCard",
+            ):
+                return current
+            current = current.parentWidget()
+        return None
 
 
 class _ModelPickerDelegate(QStyledItemDelegate):
@@ -476,7 +567,7 @@ class _SafeModelComboBox(QComboBox):
 class SettingsDialog(QDialog):
     previewSettingsChanged = Signal(dict, bool)
     probeDone = Signal(list)
-    verifyDone = Signal()
+    providerModelsFetched = Signal(object, object, object)
     autoModelsFetched = Signal(str, str, str, list, object, object)
     customModelsFetched = Signal(str, list, object, object)
     customModelsAudited = Signal(str, str, str, object)
@@ -493,15 +584,53 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(520, 420)
         self.resize(1080, 700)
         self._probe_thread = None
-        self._verify_thread = None
-        self._live_cli: list[str] | None = None
-        self._live_groq: list[str] | None = None
-        self._live_cf: list[str] | None = None
-        self._live_flm: list[str] | None = None
-        self._cli_model_error: str | None = None
+        self._provider_refresh_thread = None
+        self._provider_refresh_in_progress = False
+        self._api_test_provider_id: str | None = None
         self._syncing = False
         self._settings = copy_settings(settings)
         self._initial_settings = copy.deepcopy(dict(settings))
+        saved_api_providers = self._settings.get("api_key_providers")
+        if isinstance(saved_api_providers, list):
+            self._api_key_provider_ids = {
+                str(provider_id).strip()
+                for provider_id in saved_api_providers
+                if isinstance(provider_id, str)
+                and provider_id.strip() in {
+                    "gemini", "groq", "cloudflare", "mistral", "freellm",
+                }
+            }
+        else:
+            self._api_key_provider_ids = set()
+        for provider_id, setting_key in (
+            ("gemini", "gemini_key"),
+            ("groq", "groq_key"),
+            ("cloudflare", "cloudflare_token"),
+            ("mistral", "mistral_key"),
+            ("freellm", "flm_key"),
+        ):
+            if str(self._settings.get(setting_key, "") or "").strip():
+                self._api_key_provider_ids.add(provider_id)
+        self._api_key_custom_providers = self._settings.get(
+            "api_key_custom_providers")
+        if not isinstance(self._api_key_custom_providers, list):
+            self._api_key_custom_providers = []
+        self._settings["api_key_custom_providers"] = (
+            self._api_key_custom_providers)
+        self._api_key_provider_ids.update(
+            str(entry.get("id", "")).strip()
+            for entry in self._api_key_custom_providers
+            if isinstance(entry, dict) and str(entry.get("id", "")).strip()
+        )
+        self._builtin_key_cards: dict[str, QWidget] = {}
+        self._custom_key_edits: dict[str, QLineEdit] = {}
+        self._custom_provider_key_edits: dict[str, QLineEdit] = {}
+        saved_key_order = self._settings.get("api_key_provider_order")
+        self._settings["api_key_provider_order"] = (
+            [item for item in saved_key_order if isinstance(item, str)]
+            if isinstance(saved_key_order, list) else []
+        )
+        self._card_drag_filter = _CardDragReorderFilter(self)
         for key in ("user_themes", "theme_schemes", "theme_grades"):
             self._settings.pop(key, None)
             self._initial_settings.pop(key, None)
@@ -529,7 +658,7 @@ class SettingsDialog(QDialog):
             self._settings.get("color_scheme", "system"),
         )
         self.probeDone.connect(self._on_probe_done)
-        self.verifyDone.connect(self._on_verify_done)
+        self.providerModelsFetched.connect(self._on_provider_models_fetched)
         self.autoModelsFetched.connect(self._on_auto_fetch_done)
         self.customModelsFetched.connect(self._on_custom_fetch_done)
         self.customModelsAudited.connect(self._on_custom_models_audited)
@@ -542,6 +671,11 @@ class SettingsDialog(QDialog):
         self._size_save_timer.setSingleShot(True)
         self._size_save_timer.setInterval(400)
         self._size_save_timer.timeout.connect(self._save_dialog_geometry)
+        self._provider_refresh_timer = QTimer(self)
+        self._provider_refresh_timer.setSingleShot(True)
+        self._provider_refresh_timer.setInterval(700)
+        self._provider_refresh_timer.timeout.connect(
+            self._start_provider_models_refresh)
         # ── Root layout ──
         root = QVBoxLayout(self)
         root.setSizeConstraint(QVBoxLayout.SizeConstraint.SetNoConstraint)
@@ -631,18 +765,33 @@ class SettingsDialog(QDialog):
         if saved_page_version == 1:
             legacy_pages = {
                 0: PAGE_PROVIDERS,
-                1: PAGE_KEYS,
+                1: PAGE_PROVIDERS,
                 2: PAGE_PROVIDERS,
                 3: PAGE_APPEARANCE,
                 4: PAGE_PERFORMANCE,
                 5: PAGE_GENERAL,
             }
             saved_page = legacy_pages.get(saved_page, PAGE_PROVIDERS)
-        elif saved_page_version == 2:
-            # The first five page indices stayed stable when the TTS page
-            # was added, so keep the saved destination unchanged.
-            pass
-        elif saved_page_version != 3:
+        elif saved_page_version in (2, 3):
+            legacy_pages = {
+                0: PAGE_PROVIDERS,
+                1: PAGE_PROVIDERS,
+                2: PAGE_APPEARANCE,
+                3: PAGE_PERFORMANCE,
+                4: PAGE_GENERAL,
+                5: PAGE_TTS,
+            }
+            saved_page = legacy_pages.get(saved_page, PAGE_PROVIDERS)
+        elif saved_page_version == 4:
+            legacy_pages = {
+                0: PAGE_PROVIDERS,
+                1: PAGE_APPEARANCE,
+                2: PAGE_PERFORMANCE,
+                3: PAGE_GENERAL,
+                4: PAGE_TTS,
+            }
+            saved_page = legacy_pages.get(saved_page, PAGE_PROVIDERS)
+        elif saved_page_version != 5:
             saved_page = PAGE_PROVIDERS
         if not isinstance(saved_page, int) or saved_page not in range(len(self._page_keys)):
             saved_page = PAGE_PROVIDERS
@@ -660,6 +809,9 @@ class SettingsDialog(QDialog):
         self._update_sidebar_badge()
 
         self._update_key_states()
+        self._provider_credentials_snapshot = (
+            self._provider_credentials_fingerprint(self._credentials()))
+        self._provider_refresh_timer.start()
         self._restore_dialog_geometry()
         for checkbox in self.findChildren(QCheckBox):
             if not checkbox.property("skipPersistentToggle"):
@@ -732,10 +884,10 @@ class SettingsDialog(QDialog):
         self._nav_group.setExclusive(True)
 
         items = [
-            ("Custom Providers", "Your OpenAI-compatible APIs", PAGE_PROVIDERS),
-            ("API Keys", "Gemini, Groq, Cloudflare…", PAGE_KEYS),
+            ("AI Providers", "Models and custom endpoints", PAGE_PROVIDERS),
+            ("API Keys", "Connect and manage provider credentials", PAGE_KEYS),
             ("Appearance", "Fonts, sizes, spacing & theme", PAGE_APPEARANCE),
-            ("Performance", "Speed, streaming & effort", PAGE_PERFORMANCE),
+            ("Speed & Usage", "Streaming, fallback & token usage", PAGE_PERFORMANCE),
             ("Application", "Behavior, shortcuts & storage", PAGE_GENERAL),
             ("Read Aloud / TTS", "Engine, speed & speech behavior", PAGE_TTS),
         ]
@@ -869,11 +1021,11 @@ class SettingsDialog(QDialog):
             return
         self._stack.setCurrentIndex(idx)
         self._settings["settings_last_page"] = idx
-        self._settings["settings_last_page_version"] = 3
+        self._settings["settings_last_page_version"] = 5
         parent_settings = getattr(self.parent(), "settings", None)
         if isinstance(parent_settings, dict):
             parent_settings["settings_last_page"] = idx
-            parent_settings["settings_last_page_version"] = 3
+            parent_settings["settings_last_page_version"] = 5
             try:
                 from config.settings import save
 
@@ -1294,7 +1446,7 @@ class SettingsDialog(QDialog):
     # ── Content builders ─────────────────────────────────────────────────────
 
     def _build_engine_group(self) -> QWidget:
-        """Build the global model picker, now shown at the top of Custom Providers."""
+        """Build the global model picker for configured providers."""
         card = QGroupBox("MODEL")
         card.setObjectName("globalModelPickerCard")
         card.setStyleSheet(
@@ -1326,9 +1478,9 @@ class SettingsDialog(QDialog):
         self.model_image_badge.setMinimumHeight(34)
         self.z_refresh = QPushButton("⟳")
         self.z_refresh.setObjectName("iconBtn")
-        self.z_refresh.setToolTip("Reload Gemini, OpenCode Zen, and OpenCode CLI model lists")
+        self.z_refresh.setToolTip("Refresh model lists for configured providers")
         self.z_refresh.setFixedSize(38, 38)
-        self.z_refresh.clicked.connect(self._refresh_zen_models)
+        self.z_refresh.clicked.connect(self._refresh_provider_models)
 
         model_row = QHBoxLayout()
         model_row.setSpacing(8)
@@ -1354,64 +1506,57 @@ class SettingsDialog(QDialog):
         outer = QWidget()
         lay = QVBoxLayout(outer)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(16)
-        lay.addWidget(self._section_header("CREDENTIALS", "API Keys", "Add the keys you use. Everything stays on your machine and is only sent to the provider that needs it."))
+        lay.setSpacing(12)
+        lay.addWidget(self._section_header(
+            "CONNECTIONS", "API Keys",
+            "Connect providers securely. Keys stay on this device and are sent only to the selected provider.",
+        ))
 
         s = self._settings
-        box = QGroupBox("PROVIDERS")
-        form = QFormLayout(box)
-        form.setSpacing(14)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
         self.gemini_key = QLineEdit(s.get("gemini_key", "") or "")
         self.gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.gemini_key.setPlaceholderText("Paste Gemini API Key")
+        self.gemini_key.setPlaceholderText("Paste your Gemini API key")
         self.gemini_state = self._key_state_label()
-        form.addRow("Gemini", self._key_row(self.gemini_key, self.gemini_state, "https://aistudio.google.com/apikey"))
 
         self.groq_key = QLineEdit(s.get("groq_key", "") or "")
         self.groq_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.groq_key.setPlaceholderText("gsk-... (optional if shared slot set)")
+        self.groq_key.setPlaceholderText("Paste your Groq API key")
         self.groq_state = self._key_state_label()
-        form.addRow("Groq", self._key_row(self.groq_key, self.groq_state, "https://console.groq.com/keys"))
 
         self.cf_account = QLineEdit(s.get("cloudflare_account_id", "") or "")
         self.cf_account.setPlaceholderText("Account ID from dash.cloudflare.com")
         self.cf_account_state = self._key_state_label()
-        form.addRow("Cloudflare ID", self._key_row(self.cf_account, self.cf_account_state, "https://dash.cloudflare.com/"))
         self.cf_token = QLineEdit(s.get("cloudflare_token", "") or "")
         self.cf_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.cf_token.setPlaceholderText("API token (Workers AI)")
+        self.cf_token.setPlaceholderText("Workers AI API token")
         self.cf_token_state = self._key_state_label()
-        form.addRow("Cloudflare Token", self._key_row(self.cf_token, self.cf_token_state, "https://dash.cloudflare.com/"))
 
         self.mistral_key = QLineEdit(s.get("mistral_key", "") or "")
         self.mistral_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.mistral_key.setPlaceholderText("Mistral key (optional if shared slot set)")
+        self.mistral_key.setPlaceholderText("Paste your Mistral API key")
         self.mistral_state = self._key_state_label()
-        form.addRow("Mistral", self._key_row(self.mistral_key, self.mistral_state, "https://console.mistral.ai/"))
 
         self._flm_detected = detect_flm_base()
         self.flm_base = QLineEdit(s.get("flm_base", "") or "")
-        self.flm_base.setPlaceholderText(self._flm_detected)
+        if "freellm" in self._api_key_provider_ids and not self.flm_base.text().strip():
+            self.flm_base.setText(self._flm_detected)
+        self.flm_base.setPlaceholderText(f"Detected: {self._flm_detected}")
         self.flm_base.setToolTip(f"FreeLLMAPI's base URL. Detected from its own config: {self._flm_detected}")
         self.flm_key = QLineEdit(s.get("flm_key", "") or "")
         self.flm_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.flm_key.setPlaceholderText("freellmapi-… (Keys page)")
+        self.flm_key.setPlaceholderText("Paste your FreeLLMAPI router key")
         self.flm_state = self._key_state_label()
-        flm_hint = QLabel("Router URL + unified key")
-        flm_hint.setStyleSheet("color: #94A3B8; font-size: 14px; background: transparent; border: none;")
-        flm_box = QWidget()
-        flm_form = QFormLayout(flm_box)
-        flm_form.setContentsMargins(0, 4, 0, 0)
-        flm_form.setSpacing(6)
-        flm_form.addRow("Router", self.flm_base)
         self.flm_key.textChanged.connect(self._on_credentials_changed)
         self.flm_base.textChanged.connect(self._on_credentials_changed)
-        flm_key_row = QWidget()
-        flm_key_row.setLayout(self._key_row_layout(self.flm_key, self.flm_state))
-        flm_form.addRow("Key", flm_key_row)
-        form.addRow("FreeLLMAPI", flm_box)
+
+        self._api_key_card_layout = QVBoxLayout()
+        self._api_key_card_layout.setContentsMargins(0, 0, 0, 0)
+        self._api_key_card_layout.setSpacing(10)
+        self._api_key_cards: dict[str, QWidget] = {}
+        self._api_key_state_labels: dict[str, QLabel] = {}
+        self._builtin_key_states: dict[str, QLabel] = {}
+        cards_holder = QWidget()
+        cards_holder.setLayout(self._api_key_card_layout)
 
         # Legacy single OpenAI-compatible slot (hidden but preserved for migration)
         self.o_base = QLineEdit(s.get("openai_base", "") or "")
@@ -1420,11 +1565,619 @@ class SettingsDialog(QDialog):
         self.advanced_box = QFrame()
         self.advanced_toggle = QPushButton()
 
-        lay.addWidget(box)
-        # Helpful hint box
-        hint = _hint_frame("Keys are stored locally in your home directory and never sent anywhere except the matching provider.", "default")
+        self._api_key_add_button = QPushButton("＋  Add Provider")
+        self._api_key_add_button.setObjectName("primaryBtn")
+        self._api_key_add_button.setMinimumHeight(38)
+        self._api_key_add_button.clicked.connect(
+            self._show_add_api_provider_menu)
+        lay.addWidget(self._api_key_add_button, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self._api_key_empty = QLabel(
+            "No providers connected yet. Add a provider to get started.")
+        self._api_key_empty.setObjectName("apiKeysEmpty")
+        self._api_key_empty.setWordWrap(True)
+        self._api_key_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._api_key_empty.setMinimumHeight(84)
+        self._api_key_empty.setStyleSheet(
+            f"color: {self._theme_colors()['muted']}; "
+            f"background: {self._theme_colors()['surface']}; "
+            f"border: 1px dashed {self._theme_colors()['border']}; "
+            "border-radius: 10px; padding: 18px;")
+        lay.addWidget(self._api_key_empty)
+        lay.addWidget(cards_holder)
+
+        self._register_builtin_api_key_card(
+            "gemini", "Google Gemini", self.gemini_state,
+            [("API key", self.gemini_key, True)],
+            "https://aistudio.google.com/apikey",
+        )
+        self._register_builtin_api_key_card(
+            "groq", "Groq", self.groq_state,
+            [("API key", self.groq_key, True)],
+            "https://console.groq.com/keys",
+        )
+        self._register_builtin_api_key_card(
+            "cloudflare", "Cloudflare Workers AI", self.cf_token_state,
+            [("Account ID", self.cf_account, False),
+             ("API token", self.cf_token, True)],
+            "https://dash.cloudflare.com/",
+        )
+        self._register_builtin_api_key_card(
+            "mistral", "Mistral", self.mistral_state,
+            [("API key", self.mistral_key, True)],
+            "https://console.mistral.ai/api-keys/",
+        )
+        self._register_builtin_api_key_card(
+            "freellm", "FreeLLMAPI", self.flm_state,
+            [("Router URL", self.flm_base, False),
+             ("API key", self.flm_key, True)],
+            self._flm_detected,
+        )
+        self._rebuild_api_key_cards()
+
+        hint = _hint_frame(
+            "API keys are stored locally. Remove a provider to disconnect it "
+            "and clear its saved credentials.", "default")
         lay.addWidget(hint)
         return outer
+
+    def _register_builtin_api_key_card(
+        self,
+        provider_id: str,
+        title: str,
+        state: QLabel,
+        fields: list[tuple[str, QLineEdit, bool]],
+        docs_url: str,
+    ) -> None:
+        for field in fields:
+            edit = field[1]
+            if edit is not self.flm_base and edit is not self.flm_key:
+                edit.textChanged.connect(self._on_credentials_changed)
+        card = self._make_api_key_card(
+            provider_id, title, state, fields, docs_url)
+        self._builtin_key_cards[provider_id] = card
+        self._api_key_cards[provider_id] = card
+        self._api_key_state_labels[provider_id] = state
+        self._builtin_key_states[provider_id] = state
+
+    def _make_api_key_card(
+        self,
+        provider_id: str,
+        title: str,
+        state: QLabel,
+        fields: list[tuple[str, QLineEdit, bool]],
+        docs_url: str,
+        *,
+        remove_custom: bool = False,
+    ) -> QFrame:
+        colors = self._theme_colors()
+        card = QFrame()
+        card.setObjectName("apiKeyProviderCard")
+        card.setProperty("provider_id", provider_id)
+        card.setToolTip("Drag with the left mouse button to reorder")
+        card.setStyleSheet(
+            "QFrame#apiKeyProviderCard {"
+            f"background: {colors['panel']}; border: 1px solid "
+            f"{colors['border']}; border-radius: 12px; }}"
+            "QFrame#apiKeyProviderCard QLabel {"
+            "background: transparent; border: none; }"
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 13, 16, 14)
+        layout.setSpacing(9)
+        header = QHBoxLayout()
+        name = QLabel(title)
+        name.setObjectName("apiKeyProviderName")
+        name.setStyleSheet(
+            f"color: {colors['text']}; font-size: 16px; "
+            "font-weight: 700;")
+        header.addWidget(name)
+        header.addWidget(state)
+        header.addStretch(1)
+        remove = QPushButton("Remove")
+        remove.setObjectName("apiKeyRemoveButton")
+        remove.setToolTip(f"Remove {title} and clear its saved credentials")
+        if remove_custom:
+            remove.clicked.connect(
+                lambda _checked=False, _id=provider_id:
+                self._remove_api_custom_provider(_id))
+        else:
+            remove.clicked.connect(
+                lambda _checked=False, _id=provider_id:
+                self._remove_builtin_api_provider(_id))
+
+        for label, edit, secret in fields:
+            row = QHBoxLayout()
+            row.setSpacing(7)
+            field_label = QLabel(label)
+            field_label.setMinimumWidth(86)
+            field_label.setStyleSheet(
+                f"color: {colors['muted']}; font-size: 13px;")
+            row.addWidget(field_label)
+            edit.setMinimumHeight(34)
+            row.addWidget(edit, 1)
+            if secret:
+                reveal = QPushButton("Show")
+                reveal.setCheckable(True)
+                reveal.setFixedWidth(58)
+                reveal.toggled.connect(
+                    lambda visible, target=edit, button=reveal:
+                    self._toggle_api_key_visibility(
+                        target, button, visible))
+                row.addWidget(reveal)
+                copy_button = QPushButton("Copy")
+                copy_button.setFixedWidth(58)
+                copy_button.clicked.connect(
+                    lambda _checked=False, target=edit:
+                    self._copy_api_key(target))
+                row.addWidget(copy_button)
+            layout.addLayout(row)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        test_button = QPushButton("Test")
+        test_button.setObjectName("apiKeyTestButton")
+        test_button.setToolTip(
+            "Check the provider connection and refresh its model catalogue")
+        test_button.clicked.connect(
+            lambda _checked=False, _id=provider_id:
+            self._test_api_provider(_id))
+        actions.addWidget(test_button)
+        docs = QLabel(
+            f'<a href="{docs_url}">Documentation ↗</a>')
+        docs.setObjectName("apiKeyDocumentationLink")
+        docs.setOpenExternalLinks(True)
+        docs.setStyleSheet(
+            f"color: {colors['accent_light']}; font-size: 13px;")
+        actions.addWidget(docs)
+        header.addLayout(actions)
+        header.addWidget(remove)
+        layout.insertLayout(0, header)
+        self._install_card_drag_handles(card)
+        return card
+
+    def _install_card_drag_handles(self, card: QWidget) -> None:
+        interactive = (
+            QPushButton, QCheckBox, QComboBox, QLineEdit, QPlainTextEdit,
+            QSpinBox, QDoubleSpinBox, QTextEdit, QToolButton,
+        )
+        for widget in (card, *card.findChildren(QWidget)):
+            if isinstance(widget, interactive):
+                continue
+            if (
+                isinstance(widget, QLabel)
+                and widget.openExternalLinks()
+            ):
+                continue
+            widget.setCursor(Qt.CursorShape.OpenHandCursor)
+            widget.installEventFilter(self._card_drag_filter)
+
+    def _on_settings_card_dropped(
+        self, card: QWidget, global_y: int,
+    ) -> None:
+        if card.objectName() == "apiKeyProviderCard":
+            self._reorder_api_key_card(card, global_y)
+        elif card.objectName() == "customProviderCard":
+            self._reorder_custom_provider_card(card, global_y)
+
+    @staticmethod
+    def _drop_index(cards: list[QWidget], dragged: QWidget, global_y: int) -> int:
+        return sum(
+            global_y >= other.mapToGlobal(
+                QPoint(0, other.height() // 2)).y()
+            for other in cards
+            if other is not dragged
+        )
+
+    def _reorder_api_key_card(
+        self, dragged: QWidget, global_y: int,
+    ) -> None:
+        layout = self._api_key_card_layout
+        cards = [
+            item.widget()
+            for index in range(layout.count())
+            if (item := layout.itemAt(index)) is not None
+            and item.widget() is not None
+            and not item.widget().isHidden()
+        ]
+        if dragged not in cards:
+            return
+        remaining = [card for card in cards if card is not dragged]
+        target = self._drop_index(remaining, dragged, global_y)
+        ordered = [*remaining[:target], dragged, *remaining[target:]]
+        if ordered == cards:
+            return
+
+        hidden_builtins = [
+            card for card in self._builtin_key_cards.values()
+            if card not in ordered
+        ]
+        while layout.count():
+            layout.takeAt(0)
+        for item in (*ordered, *hidden_builtins):
+            layout.addWidget(item)
+        self._settings["api_key_provider_order"] = [
+            str(item.property("provider_id")) for item in ordered
+        ]
+
+    def _reorder_custom_provider_card(
+        self, dragged: QWidget, global_y: int,
+    ) -> None:
+        cards = [
+            card for card in self._custom_cards
+            if isinstance(card, QFrame)
+        ]
+        if dragged not in cards:
+            return
+        remaining = [card for card in cards if card is not dragged]
+        target = self._drop_index(remaining, dragged, global_y)
+        ordered = [*remaining[:target], dragged, *remaining[target:]]
+        if ordered == cards:
+            return
+
+        while self._custom_container.count():
+            self._custom_container.takeAt(0)
+        for item in ordered:
+            self._custom_container.addWidget(item)
+        self._custom_cards = list(ordered)
+
+        providers = self._settings.get("custom_providers") or []
+        by_id = {
+            str(entry.get("id", "")).strip(): entry
+            for entry in providers
+            if isinstance(entry, dict) and str(entry.get("id", "")).strip()
+        }
+        ordered_ids = [
+            str(item.property("cp_id")) for item in ordered
+        ]
+        reordered = [by_id[item] for item in ordered_ids if item in by_id]
+        reordered.extend(
+            entry for entry in providers
+            if not isinstance(entry, dict)
+            or str(entry.get("id", "")).strip() not in ordered_ids
+        )
+        self._settings["custom_providers"] = reordered
+
+    def _rebuild_api_key_cards(self) -> None:
+        while self._api_key_card_layout.count():
+            item = self._api_key_card_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None and widget.property("provider_id") not in self._builtin_key_cards:
+                widget.hide()
+                widget.deleteLater()
+        self._api_key_cards = dict(self._builtin_key_cards)
+        self._api_key_state_labels = dict(self._builtin_key_states)
+        self._custom_key_edits.clear()
+
+        visible_count = 0
+        for provider_id, card in self._builtin_key_cards.items():
+            self._api_key_card_layout.addWidget(card)
+            if provider_id in self._api_key_provider_ids:
+                card.show()
+                visible_count += 1
+            else:
+                card.hide()
+
+        providers = self._api_key_custom_providers
+        if not isinstance(providers, list):
+            providers = []
+        for entry in providers:
+            if not isinstance(entry, dict):
+                continue
+            provider_id = str(entry.get("id", "")).strip()
+            if not provider_id:
+                continue
+            self._api_key_provider_ids.add(provider_id)
+            key_edit = QLineEdit(str(entry.get("api_key", "")).strip())
+            key_edit.setObjectName("customProviderApiKey")
+            key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            key_edit.setPlaceholderText("API key or bearer token")
+            key_edit.textChanged.connect(
+                lambda value, _id=provider_id:
+                self._on_api_custom_key_changed(_id, value))
+            self._custom_key_edits[provider_id] = key_edit
+            state = self._key_state_label()
+            name = str(entry.get("name", "")).strip() or provider_id
+            base_url = str(entry.get("base_url", "")).strip()
+            docs_url = next(
+                (docs for base, docs in _API_PROVIDER_PRESETS.values()
+                 if base_url.rstrip("/") == base.rstrip("/")),
+                "https://platform.openai.com/docs",
+            )
+            card = self._make_api_key_card(
+                provider_id, name, state,
+                [("API key", key_edit, True)], docs_url,
+                remove_custom=True,
+            )
+            self._api_key_cards[provider_id] = card
+            self._api_key_state_labels[provider_id] = state
+            self._api_key_card_layout.addWidget(card)
+            visible_count += 1
+
+        self._reorder_api_key_card_layout()
+        self._api_key_empty.setVisible(visible_count == 0)
+
+    def _reorder_api_key_card_layout(self) -> None:
+        layout = self._api_key_card_layout
+        visible = [
+            item.widget()
+            for index in range(layout.count())
+            if (item := layout.itemAt(index)) is not None
+            and item.widget() is not None
+            and not item.widget().isHidden()
+        ]
+        cards_by_id = {
+            str(card.property("provider_id")): card for card in visible
+        }
+        saved_order = self._settings.get("api_key_provider_order") or []
+        ordered_ids = [
+            provider_id for provider_id in saved_order
+            if provider_id in cards_by_id
+        ]
+        ordered_ids.extend(
+            provider_id for provider_id in cards_by_id
+            if provider_id not in ordered_ids
+        )
+        ordered = [cards_by_id[provider_id] for provider_id in ordered_ids]
+        hidden = [
+            item.widget()
+            for index in range(layout.count())
+            if (item := layout.itemAt(index)) is not None
+            and item.widget() is not None
+            and item.widget().isHidden()
+        ]
+        while layout.count():
+            layout.takeAt(0)
+        for item in (*ordered, *hidden):
+            layout.addWidget(item)
+        self._settings["api_key_provider_order"] = ordered_ids
+
+    def _show_add_api_provider_menu(self) -> None:
+        menu = self._create_api_provider_add_menu()
+        self._show_provider_add_menu(menu, self._api_key_add_button)
+
+    def _create_api_provider_add_menu(self) -> QMenu:
+        menu = QMenu(self)
+        builtin_options = (
+            ("Google Gemini", "gemini"),
+            ("Groq", "groq"),
+            ("Cloudflare Workers AI", "cloudflare"),
+            ("Mistral", "mistral"),
+            ("FreeLLMAPI", "freellm"),
+        )
+        available = [
+            (title, provider_id)
+            for title, provider_id in builtin_options
+            if provider_id not in self._api_key_provider_ids
+        ]
+        if available:
+            menu.addSection("Built-in providers")
+            for title, provider_id in available:
+                action = menu.addAction(title)
+                action.triggered.connect(
+                    lambda _checked=False, _id=provider_id:
+                    self._add_builtin_api_provider(_id))
+        menu.addSection("OpenAI-compatible providers")
+        for name in _API_PROVIDER_PRESETS:
+            base_url = _API_PROVIDER_PRESETS[name][0]
+            action = menu.addAction(name)
+            action.triggered.connect(
+                lambda _checked=False, _name=name, _base=base_url:
+                self._add_custom_api_provider(_name, _base))
+        custom = menu.addAction("Custom OpenAI-compatible endpoint")
+        custom.triggered.connect(
+            lambda: self._add_custom_api_provider(
+                "Custom Provider", "https://api.openai.com/v1"))
+        return menu
+
+    def _show_provider_add_menu(
+        self, menu: QMenu, button: QPushButton,
+    ) -> None:
+        menu.setStyleSheet(
+            "QMenu { font-size: 15px; }"
+            "QMenu::item { padding: 8px 18px; min-height: 24px; }"
+            "QMenu::separator { height: 1px; margin: 6px 10px; }"
+        )
+        menu.ensurePolished()
+        menu_size = menu.sizeHint()
+        button_top = button.mapToGlobal(QPoint(0, 0))
+        screen = QApplication.screenAt(button_top)
+        if screen is None:
+            screen = self.screen()
+        available = screen.availableGeometry()
+        x = min(
+            max(button_top.x(), available.left()),
+            available.right() - menu_size.width() + 1,
+        )
+        preferred_y = button_top.y() - menu_size.height()
+        if preferred_y >= available.top():
+            y = preferred_y
+        else:
+            y = min(
+                button_top.y() + button.height(),
+                available.bottom() - menu_size.height() + 1,
+            )
+        menu.exec(QPoint(x, y))
+
+    def _add_builtin_api_provider(self, provider_id: str) -> None:
+        self._api_key_provider_ids.add(provider_id)
+        if provider_id == "freellm" and not self.flm_base.text().strip():
+            self.flm_base.setText(self._flm_detected)
+        self._rebuild_api_key_cards()
+        self._on_credentials_changed()
+
+    def _add_custom_api_provider(
+        self, name: str, base_url: str,
+    ) -> None:
+        import secrets
+
+        provider_id = f"custom-{secrets.token_hex(4)}"
+        providers = list(self._api_key_custom_providers)
+        providers.append({
+            "id": provider_id,
+            "name": name,
+            "base_url": base_url,
+            "api_key": "",
+            "model": "",
+            "enabled": True,
+            "reasoning_enabled": False,
+            "vision_enabled": False,
+        })
+        self._api_key_custom_providers = providers
+        self._api_key_provider_ids.add(provider_id)
+        self._settings["api_key_custom_providers"] = providers
+        self._rebuild_api_key_cards()
+
+    def _remove_builtin_api_provider(self, provider_id: str) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        if provider_id not in self._builtin_key_cards:
+            self._remove_api_custom_provider(provider_id)
+            return
+
+        titles = {
+            "gemini": "Google Gemini",
+            "groq": "Groq",
+            "cloudflare": "Cloudflare Workers AI",
+            "mistral": "Mistral",
+            "freellm": "FreeLLMAPI",
+        }
+        answer = QMessageBox.question(
+            self, "Remove provider",
+            f"Remove {titles.get(provider_id, provider_id)} and clear its saved credentials?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        fields = {
+            "gemini": (self.gemini_key,),
+            "groq": (self.groq_key,),
+            "cloudflare": (self.cf_account, self.cf_token),
+            "mistral": (self.mistral_key,),
+            "freellm": (self.flm_base, self.flm_key),
+        }
+        for field in fields.get(provider_id, ()):
+            field.clear()
+        shared_base = self.o_base.text().casefold()
+        provider_hosts = {
+            "groq": "groq",
+            "cloudflare": "cloudflare",
+            "mistral": "mistral",
+        }
+        if provider_id in provider_hosts and provider_hosts[provider_id] in shared_base:
+            self.o_base.clear()
+            self.o_key.clear()
+            self.o_model.clear()
+        self._api_key_provider_ids.discard(provider_id)
+        catalogues = dict(self._settings.get("provider_models") or {})
+        catalogue_id = {"cloudflare": "cf"}.get(provider_id, provider_id)
+        catalogues.pop(catalogue_id, None)
+        self._settings["provider_models"] = catalogues
+        if provider_id == "freellm":
+            self._settings["flm_models_ready"] = []
+        self._rebuild_api_key_cards()
+        self._on_credentials_changed()
+
+    def _remove_api_custom_provider(self, provider_id: str) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        entry = next(
+            (
+                item for item in self._api_key_custom_providers
+                if isinstance(item, dict)
+                and str(item.get("id", "")).strip() == provider_id
+            ),
+            None,
+        )
+        if entry is None:
+            return
+        name = str(entry.get("name", "")).strip() or provider_id
+        answer = QMessageBox.question(
+            self, "Remove provider",
+            f"Remove {name} and clear its saved credentials?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._api_key_custom_providers = [
+            item for item in self._api_key_custom_providers
+            if not isinstance(item, dict)
+            or str(item.get("id", "")).strip() != provider_id
+        ]
+        self._settings["api_key_custom_providers"] = (
+            self._api_key_custom_providers)
+        self._api_key_provider_ids.discard(provider_id)
+        self._rebuild_api_key_cards()
+
+    def _on_api_custom_key_changed(self, provider_id: str, value: str) -> None:
+        entry = next(
+            (item for item in self._api_key_custom_providers
+             if isinstance(item, dict)
+             and str(item.get("id", "")).strip() == provider_id),
+            None,
+        )
+        if entry is None:
+            return
+        entry["api_key"] = value.strip()
+        self._settings["api_key_custom_providers"] = (
+            self._api_key_custom_providers)
+        self._update_key_states()
+
+    def _test_api_provider(self, provider_id: str) -> None:
+        if provider_id in self._builtin_key_cards:
+            ready = {
+                "gemini": bool(self.gemini_key.text().strip()),
+                "groq": bool(self.groq_key.text().strip()),
+                "cloudflare": bool(
+                    self.cf_account.text().strip()
+                    and self.cf_token.text().strip()),
+                "mistral": bool(self.mistral_key.text().strip()),
+                "freellm": bool(
+                    self.flm_base.text().strip()
+                    and self.flm_key.text().strip()),
+            }.get(provider_id, False)
+            if not ready:
+                self.results.setPlainText(
+                    "Enter the required credentials before testing this provider.")
+                self._show_plain_results()
+                return
+            self._api_test_provider_id = provider_id
+            self.results.setPlainText(
+                f"Testing {provider_id} and refreshing its model list…")
+            self._show_plain_results()
+            self._refresh_provider_models()
+            return
+        entry = next(
+            (item for item in self._settings.get("custom_providers", [])
+             if isinstance(item, dict)
+             and str(item.get("id", "")).strip() == provider_id),
+            None,
+        )
+        if entry is None:
+            return
+        if (not self._custom_provider_base_url(entry)
+                or not str(entry.get("api_key", "")).strip()):
+            self.results.setPlainText(
+                f"Add a Base URL and API key for {entry.get('name', provider_id)} "
+                "on the AI Providers page before testing.")
+            self._show_plain_results()
+            return
+        self._on_fetch_one_provider(provider_id)
+
+    @staticmethod
+    def _toggle_api_key_visibility(
+        edit: QLineEdit, button: QPushButton, visible: bool,
+    ) -> None:
+        edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if visible
+            else QLineEdit.EchoMode.Password)
+        button.setText("Hide" if visible else "Show")
+
+    @staticmethod
+    def _copy_api_key(edit: QLineEdit) -> None:
+        QApplication.clipboard().setText(edit.text())
 
     def _build_appearance_group(self) -> QWidget:
         s = self._settings
@@ -1690,7 +2443,9 @@ class SettingsDialog(QDialog):
         lay = QVBoxLayout(outer)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(16)
-        lay.addWidget(self._section_header("SPEED", "Performance", "Control streaming, ordering and synthesis. Fast mode enables every speedup at once."))
+        lay.addWidget(self._section_header(
+            "SPEED & USAGE", "Speed & Usage",
+            "Control streaming, fallback behavior and token tracking."))
 
         box = QGroupBox("SPEED & STREAMING")
         blay = QVBoxLayout(box)
@@ -1703,11 +2458,10 @@ class SettingsDialog(QDialog):
         blay.addWidget(self.fast_check)
 
         self.fast_details = QLabel(
-            "ON → live word-by-word display (~1s to first words) · bridge models ordered fastest-first · "
+            "ON → live word-by-word display (~1s to first words) · "
             "read-aloud replays from disk (~0s repeats) · speech segments synthesize in parallel.\n"
-            "OFF → spinner until the full reply · alphabetical model order · "
-            "speech re-synthesizes every click, one segment at a time.\n\n"
-            "Measured short-sentence times: space-bunny 3.4s · muse-spark-1.3 4.3s · mimo 5.5s · fledge-alpha 6.0s."
+            "OFF → spinner until the full reply · "
+            "speech re-synthesizes every click, one segment at a time."
         )
         self.fast_details.setWordWrap(True)
         self.fast_details.setStyleSheet("font-size: 14px; padding-top: 2px; background: transparent; border: none;")
@@ -1719,27 +2473,6 @@ class SettingsDialog(QDialog):
             "and MyMemory. Turn off to use only your selected provider.")
         blay.addWidget(self.fallback_check)
 
-        from translators.opencode_bridge import BRIDGE_FREE, DEFAULT_EFFORT, EFFORT_ORDER, MODEL_DEFAULT_EFFORTS, effort_for
-        effort_form = QFormLayout()
-        effort_form.setSpacing(8)
-        effort_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.effort_default_combo = QComboBox()
-        self.effort_default_combo.addItems(EFFORT_ORDER)
-        default = self._settings.get("effort_default")
-        self.effort_default_combo.setCurrentIndex(EFFORT_ORDER.index(default if default in EFFORT_ORDER else DEFAULT_EFFORT))
-        self.effort_default_combo.setToolTip("Global preset for future models and models without a tuned default.")
-        effort_form.addRow("Global default effort", self.effort_default_combo)
-        self.effort_combos: dict[str, QComboBox] = {}
-        for model in BRIDGE_FREE:
-            combo = QComboBox()
-            combo.addItems(EFFORT_ORDER)
-            combo.setCurrentIndex(EFFORT_ORDER.index(effort_for(model, self._settings)))
-            combo.setToolTip("Output ceiling + reasoning effort for this model. Lower = faster, higher = more room for long passages.")
-            effort_form.addRow(f"{model}", combo)
-            self.effort_combos[model] = combo
-        effort_box = QWidget()
-        effort_box.setLayout(effort_form)
-        blay.addWidget(effort_box)
         lay.addWidget(box)
         lay.addWidget(self._build_token_group())
         return outer
@@ -2593,7 +3326,7 @@ class SettingsDialog(QDialog):
             "font-weight: 800; letter-spacing: 1px; background: transparent;"
         )
         title_row.addWidget(eyebrow)
-        title = QLabel("Custom Providers")
+        title = QLabel("AI Providers")
         title.setObjectName("customProvidersTitle")
         title.setProperty("theme_color_role", "text")
         title.setStyleSheet(
@@ -2646,7 +3379,8 @@ class SettingsDialog(QDialog):
         self._add_custom_btn.setObjectName("primaryBtn")
         self._add_custom_btn.setMinimumHeight(30)
         self._add_custom_btn.setToolTip("Add a new custom API endpoint")
-        self._add_custom_btn.clicked.connect(self._on_add_custom_provider)
+        self._add_custom_btn.clicked.connect(
+            self._show_add_custom_provider_menu)
         btn_row.addWidget(self._add_custom_btn)
         btn_row.addStretch(1)
         self._fetch_models_btn = QPushButton("⟳  Fetch Models")
@@ -2665,8 +3399,10 @@ class SettingsDialog(QDialog):
             item = self._custom_container.takeAt(0)
             w = item.widget()
             if w:
+                w.hide()
                 w.deleteLater()
         self._custom_cards.clear()
+        self._custom_provider_key_edits.clear()
         providers = self._settings.get("custom_providers") or []
         if not providers:
             empty = QLabel("No providers yet. Add one to connect your API endpoint.")
@@ -2693,7 +3429,9 @@ class SettingsDialog(QDialog):
             self._custom_cards.append(card)
             card_index += 1
         for entry in providers:
-            if isinstance(entry, dict) and str(entry.get("base_url", "")).strip() and str(entry.get("api_key", "")).strip():
+            if (isinstance(entry, dict)
+                    and self._custom_provider_base_url(entry)
+                    and str(entry.get("api_key", "")).strip()):
                 _pid = str(entry.get("id", "")).strip()
                 QTimer.singleShot(600, lambda _pid=_pid: self._schedule_auto_fetch(_pid))
 
@@ -2759,6 +3497,7 @@ class SettingsDialog(QDialog):
         colors = self._theme_colors()
         card = QFrame()
         card.setObjectName("customProviderCard")
+        card.setToolTip("Drag with the left mouse button to reorder")
         card.setFrameShape(QFrame.Shape.StyledPanel)
         card.setStyleSheet(
             self._custom_provider_card_stylesheet(colors, stripe_color))
@@ -2791,6 +3530,7 @@ class SettingsDialog(QDialog):
         name_edit.textChanged.connect(lambda _v, _id=cid: self._on_custom_field_changed(_id))
         name_edit.editingFinished.connect(self._on_custom_providers_edited)
         name_label = QLabel("Provider name")
+        name_label.setObjectName("providerDragHandle")
         name_label.setProperty("theme_color_role", "muted")
         name_label.setStyleSheet(f"color: {colors['muted']}; font-size: 14px; font-weight: 600; background: transparent; border: none;")
         header.addWidget(name_label)
@@ -2843,31 +3583,38 @@ class SettingsDialog(QDialog):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         base_edit = QLineEdit(str(entry.get("base_url", "")).strip())
         base_edit.setPlaceholderText(_CUSTOM_PROVIDER_PLACEHOLDERS["base_url"])
+        base_edit.setToolTip(
+            "Enter the provider Base URL. For Cloudflare, you can enter "
+            "the Account ID by itself or use the full URL, for example "
+            "https://api.cloudflare.com/client/v4/accounts/<ID>/ai/v1."
+        )
         base_edit.setProperty("cp_id", cid)
         base_edit.setProperty("cp_field", "base_url")
         base_edit.textChanged.connect(lambda _v, _id=cid: self._on_custom_field_changed(_id))
         base_edit.editingFinished.connect(self._on_custom_providers_edited)
-        form.addRow("Base URL", base_edit)
+        form.addRow("Base URL / ID", base_edit)
 
         key_edit = QLineEdit(str(entry.get("api_key", "")).strip())
+        key_edit.setObjectName("customProviderSettingsApiKey")
         key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        key_edit.setPlaceholderText("sk-...  or  bearer token")
-        key_edit.setProperty("cp_id", cid)
-        key_edit.setProperty("cp_field", "api_key")
-        key_edit.textChanged.connect(lambda _v, _id=cid: self._on_custom_field_changed(_id))
+        key_edit.setPlaceholderText("API key or bearer token")
+        key_edit.setMinimumHeight(34)
+        key_edit.textChanged.connect(
+            lambda _value, _id=cid:
+            self._on_custom_field_changed(_id))
         key_edit.editingFinished.connect(self._on_custom_providers_edited)
+        self._custom_provider_key_edits[cid] = key_edit
         key_row = QHBoxLayout()
-        key_row.setSpacing(4)
+        key_row.setSpacing(7)
         key_row.addWidget(key_edit, 1)
-        show_btn = QPushButton("Show")
-        show_btn.setFixedSize(54, 30)
-        show_btn.setCheckable(True)
-        show_btn.setToolTip("Show / hide API key")
-        show_btn.toggled.connect(lambda checked, w=key_edit: w.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password))
-        show_btn.toggled.connect(
-            lambda checked, button=show_btn:
-            button.setText("Hide" if checked else "Show"))
-        key_row.addWidget(show_btn)
+        reveal_key = QPushButton("Show")
+        reveal_key.setObjectName("customProviderApiKeyVisibilityButton")
+        reveal_key.setCheckable(True)
+        reveal_key.setFixedWidth(64)
+        reveal_key.toggled.connect(
+            lambda visible, target=key_edit, button=reveal_key:
+            self._toggle_api_key_visibility(target, button, visible))
+        key_row.addWidget(reveal_key)
         key_holder = QWidget()
         key_holder.setLayout(key_row)
         form.addRow("API key", key_holder)
@@ -3036,13 +3783,33 @@ class SettingsDialog(QDialog):
         card._cp_details = details  # type: ignore[attr-defined]
         card._cp_capabilities = caps_panel  # type: ignore[attr-defined]
         card._cp_content_layout = content_layout  # type: ignore[attr-defined]
+        self._install_card_drag_handles(card)
         return card
 
-    def _on_add_custom_provider(self) -> None:
+    def _show_add_custom_provider_menu(self) -> None:
+        menu = self._create_custom_provider_add_menu()
+        self._show_provider_add_menu(menu, self._add_custom_btn)
+
+    def _create_custom_provider_add_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addSection("Providers")
+        for name, (base_url, _docs_url) in _CUSTOM_PROVIDER_PRESETS.items():
+            action = menu.addAction(name)
+            action.triggered.connect(
+                lambda _checked=False, _name=name, _base=base_url:
+                self._on_add_custom_provider(_name, _base))
+        custom = menu.addAction("Custom provider")
+        custom.triggered.connect(
+            lambda: self._on_add_custom_provider("Custom Provider", ""))
+        return menu
+
+    def _on_add_custom_provider(
+        self, name: str = "New Provider", base_url: str = "",
+    ) -> None:
         import secrets as _secrets
         cid = f"custom-{_secrets.token_hex(4)}"
         providers = list(self._settings.get("custom_providers") or [])
-        providers.append({"id": cid, "name": "New Provider", "base_url": "", "api_key": "", "model": "", "enabled": True, "reasoning_enabled": False, "vision_enabled": False})
+        providers.append({"id": cid, "name": name, "base_url": base_url, "api_key": "", "model": "", "enabled": True, "reasoning_enabled": False, "vision_enabled": False})
         self._settings["custom_providers"] = providers
         self._rebuild_custom_cards()
         self._on_credentials_changed()
@@ -3180,12 +3947,14 @@ class SettingsDialog(QDialog):
         self._on_credentials_changed()
 
     def _on_custom_field_changed(self, provider_id: str) -> None:
+        entry_name = ""
         for card in self._custom_cards:
             if isinstance(card, QFrame) and card.property("cp_id") == provider_id:
                 for entry in (self._settings.get("custom_providers") or []):
                     if isinstance(entry, dict) and str(entry.get("id", "")) == provider_id:
                         try:
                             entry["name"] = card._cp_name.text().strip()  # type: ignore[attr-defined]
+                            entry_name = entry["name"]
                             entry["base_url"] = card._cp_base.text().strip()  # type: ignore[attr-defined]
                             entry["api_key"] = card._cp_key.text().strip()  # type: ignore[attr-defined]
                             entry["model"] = card._cp_model.currentText().strip()  # type: ignore[attr-defined]
@@ -3199,6 +3968,13 @@ class SettingsDialog(QDialog):
                             pass
                         break
                 break
+        key_card = self._api_key_cards.get(provider_id)
+        key_name = (
+            key_card.findChild(QLabel, "apiKeyProviderName")
+            if key_card is not None else None
+        )
+        if key_name is not None and entry_name:
+            key_name.setText(entry_name)
         if not self._syncing:
             chosen = self._current_model()
             self._fill_model_combo()
@@ -3210,11 +3986,17 @@ class SettingsDialog(QDialog):
     def _on_custom_providers_edited(self) -> None:
         self._on_credentials_changed()
 
+    @staticmethod
+    def _custom_provider_base_url(entry: dict) -> str:
+        from translators.registry import custom_provider_base_url
+
+        return custom_provider_base_url(entry)
+
     def _schedule_auto_fetch(self, provider_id: str) -> None:
         entry = next((e for e in (self._settings.get("custom_providers") or []) if isinstance(e, dict) and str(e.get("id", "")) == provider_id), None)
         if entry is None:
             return
-        base = str(entry.get("base_url", "")).strip()
+        base = self._custom_provider_base_url(entry)
         key = str(entry.get("api_key", "")).strip()
         if not base or not key:
             return
@@ -3235,7 +4017,7 @@ class SettingsDialog(QDialog):
         entry = next((e for e in (self._settings.get("custom_providers") or []) if isinstance(e, dict) and str(e.get("id", "")) == provider_id), None)
         if entry is None:
             return
-        base = str(entry.get("base_url", "")).strip()
+        base = self._custom_provider_base_url(entry)
         key = str(entry.get("api_key", "")).strip()
         if not base or not key:
             return
@@ -3257,8 +4039,8 @@ class SettingsDialog(QDialog):
 
         def job():
             try:
-                from translators import opencode_compat
-                model_groups = opencode_compat.list_model_groups(base, key)
+                from translators import openai_compat
+                model_groups = openai_compat.list_model_groups(base, key)
                 models = [
                     model for _, grouped_models in model_groups
                     for model in grouped_models
@@ -3295,7 +4077,10 @@ class SettingsDialog(QDialog):
         entry = next((e for e in (self._settings.get("custom_providers") or []) if isinstance(e, dict) and str(e.get("id", "")) == provider_id), None)
         if entry is None:
             return
-        current_credentials = (str(entry.get("base_url", "")).strip(), str(entry.get("api_key", "")).strip())
+        current_credentials = (
+            self._custom_provider_base_url(entry),
+            str(entry.get("api_key", "")).strip(),
+        )
         if current_credentials != (base, key):
             self._schedule_auto_fetch(provider_id)
             return
@@ -3313,7 +4098,16 @@ class SettingsDialog(QDialog):
                 try:
                     combo = card._cp_model  # type: ignore[attr-defined]
                     previous = combo.currentText().strip()
-                    if not previous and models:
+                    if models and (
+                        not previous
+                        or (
+                            base.startswith(
+                                "https://api.cloudflare.com/client/v4/"
+                                "accounts/"
+                            )
+                            and previous not in models
+                        )
+                    ):
                         previous = models[0]
                         entry["model"] = previous
                     self._populate_custom_model_combo(
@@ -3337,10 +4131,16 @@ class SettingsDialog(QDialog):
         self._on_custom_field_changed(provider_id)
         entry = next((e for e in (self._settings.get("custom_providers") or []) if isinstance(e, dict) and str(e.get("id", "")) == provider_id), None)
         assert entry is not None
-        base = str(entry.get("base_url", "")).strip()
+        base = self._custom_provider_base_url(entry)
         key = str(entry.get("api_key", "")).strip()
         if not base or not key:
-            self.results.setPlainText(f"Provider '{entry.get('name', provider_id)}' يحتاج Base URL و API Key قبل جلب النماذج.")
+            detail = (
+                "Replace <ACCOUNT_ID> with the Cloudflare Account ID."
+                if "<account_id>" in str(entry.get("base_url", "")).casefold()
+                else "Provider needs a valid Base URL and API key."
+            )
+            self.results.setPlainText(
+                f"Provider '{entry.get('name', provider_id)}': {detail}")
             self.results.setVisible(True)
             return
         for card in self._custom_cards:
@@ -3357,8 +4157,8 @@ class SettingsDialog(QDialog):
 
         def job():
             try:
-                from translators import opencode_compat
-                model_groups = opencode_compat.list_model_groups(base, key)
+                from translators import openai_compat
+                model_groups = openai_compat.list_model_groups(base, key)
                 models = [
                     model for _, grouped_models in model_groups
                     for model in grouped_models
@@ -3396,7 +4196,7 @@ class SettingsDialog(QDialog):
         )
         if entry is None:
             return
-        base = str(entry.get("base_url", "")).strip()
+        base = self._custom_provider_base_url(entry)
         key = str(entry.get("api_key", "")).strip()
         if not base or not key:
             self.results.setPlainText(
@@ -3418,10 +4218,10 @@ class SettingsDialog(QDialog):
         def job() -> None:
             result: dict = {}
             try:
-                from translators import opencode_compat
+                from translators import openai_compat
 
                 explicitly_free: set[str] = set()
-                groups = opencode_compat.list_model_groups(
+                groups = openai_compat.list_model_groups(
                     base, key, explicitly_free_models=explicitly_free
                 )
                 models = list(dict.fromkeys(
@@ -3429,7 +4229,7 @@ class SettingsDialog(QDialog):
                     for _, grouped_models in groups
                     for model in grouped_models
                 ))
-                checks = opencode_compat.probe_models(base, key, models)
+                checks = openai_compat.probe_models(base, key, models)
                 result = {
                     "groups": groups,
                     "explicitly_free": explicitly_free,
@@ -3454,7 +4254,7 @@ class SettingsDialog(QDialog):
         if entry is None:
             return
         self._on_custom_field_changed(provider_id)
-        base = str(entry.get("base_url", "")).strip()
+        base = self._custom_provider_base_url(entry)
         key = str(entry.get("api_key", "")).strip()
         name = str(entry.get("name", provider_id)).strip() or provider_id
         # Fall back to the last fetch, but do not require one: asking the
@@ -3489,7 +4289,7 @@ class SettingsDialog(QDialog):
         def job() -> None:
             payload = {}
             try:
-                from translators.opencode_compat import list_model_groups
+                from translators.openai_compat import list_model_groups
 
                 # Ask the gateway for its catalog when nothing was cached, so
                 # this button works on a provider that was never refreshed.
@@ -3617,7 +4417,7 @@ class SettingsDialog(QDialog):
         if entry is None:
             return
         self._on_custom_field_changed(provider_id)
-        base = str(entry.get("base_url", "")).strip()
+        base = self._custom_provider_base_url(entry)
         key = str(entry.get("api_key", "")).strip()
         model = str(entry.get("model", "")).strip()
         name = str(entry.get("name", provider_id)).strip() or provider_id
@@ -3679,7 +4479,7 @@ class SettingsDialog(QDialog):
             return
         # The card may have been edited mid-flight; a verdict about a
         # different endpoint or model would be about something else.
-        if (str(entry.get("base_url", "")).strip(),
+        if (self._custom_provider_base_url(entry),
                 str(entry.get("model", "")).strip()) != (base, model):
             self.results.setPlainText(
                 "The provider changed while testing. Press Detect again."
@@ -3729,7 +4529,7 @@ class SettingsDialog(QDialog):
         if entry is None:
             return
         self._on_custom_field_changed(provider_id)
-        base = str(entry.get("base_url", "")).strip()
+        base = self._custom_provider_base_url(entry)
         key = str(entry.get("api_key", "")).strip()
         model = str(entry.get("model", "")).strip()
         name = str(entry.get("name", provider_id)).strip() or provider_id
@@ -3787,7 +4587,7 @@ class SettingsDialog(QDialog):
         )
         if entry is None:
             return
-        if (str(entry.get("base_url", "")).strip(),
+        if (self._custom_provider_base_url(entry),
                 str(entry.get("model", "")).strip()) != (base, model):
             self.results.setPlainText(
                 "The provider changed while testing. Press Detect again."
@@ -3841,7 +4641,7 @@ class SettingsDialog(QDialog):
         if entry is None:
             return
         credentials = (
-            str(entry.get("base_url", "")).strip(),
+            self._custom_provider_base_url(entry),
             str(entry.get("api_key", "")).strip(),
         )
         if credentials != (base, key):
@@ -3979,7 +4779,18 @@ class SettingsDialog(QDialog):
                 try:
                     combo = card._cp_model  # type: ignore[attr-defined]
                     previous = combo.currentText().strip()
-                    if not previous and models:
+                    provider_base = self._custom_provider_base_url(
+                        provider_entry)
+                    if models and (
+                        not previous
+                        or (
+                            provider_base.startswith(
+                                "https://api.cloudflare.com/client/v4/"
+                                "accounts/"
+                            )
+                            and previous not in models
+                        )
+                    ):
                         previous = models[0]
                         for entry in (self._settings.get("custom_providers") or []):
                             if isinstance(entry, dict) and str(entry.get("id", "")) == provider_id:
@@ -4295,9 +5106,8 @@ class SettingsDialog(QDialog):
                 header_item.setData(label, _MODEL_GROUP_ROLE)
 
         def display_model(label: str) -> tuple[str, str]:
-            is_cli_model = label.startswith(registry.OPENCODE_CLI_PREFIX)
             is_custom = label.startswith(registry.CUSTOM_PROVIDER_PREFIX)
-            display = (f"⌘ {label[len(registry.OPENCODE_CLI_PREFIX):]}" if is_cli_model else label)
+            display = label
             if registry.provider_of(label) == "google_translate":
                 display = "🌐 Google Translate"
             provider_label = ""
@@ -4328,7 +5138,6 @@ class SettingsDialog(QDialog):
                 ("cf:", "Cloudflare"),
                 ("mistral:", "Mistral"),
                 ("flm:", "FreeLLMAPI"),
-                (registry.OPENCODE_CLI_PREFIX, "OpenCode CLI"),
             ):
                 if normalized.startswith(prefix):
                     return provider
@@ -4366,9 +5175,7 @@ class SettingsDialog(QDialog):
                 favorite_key=label,
             )
 
-        model_rows = registry.model_groups(
-            probe, live, self._live_cli, self._live_groq,
-            self._live_cf, self._live_flm)
+        model_rows = registry.model_groups(probe)
         model_sections: dict[str, str] = {}
         current_section = ""
         for model_label, _enabled in model_rows:
@@ -4413,9 +5220,8 @@ class SettingsDialog(QDialog):
             self.z_model.setCurrentIndex(idx)
         elif current:
             from translators import registry
-            is_cli_model = current.startswith(registry.OPENCODE_CLI_PREFIX)
             is_custom = current.startswith(registry.CUSTOM_PROVIDER_PREFIX)
-            display = (f"⌘ {current[len(registry.OPENCODE_CLI_PREFIX):]}" if is_cli_model else current)
+            display = current
             if is_custom:
                 display = f"🔧 {registry.custom_provider_label(current, self._credentials())}"
             self.z_model.addItem(display, current)
@@ -4449,10 +5255,43 @@ class SettingsDialog(QDialog):
     def _on_credentials_changed(self, *_args) -> None:
         if self._syncing:
             return
+        credentials = self._credentials()
+        current_fingerprint = self._provider_credentials_fingerprint(
+            credentials)
+        previous_fingerprint = getattr(
+            self, "_provider_credentials_snapshot", {})
+        changed = {
+            provider for provider, signature in current_fingerprint.items()
+            if previous_fingerprint.get(provider) != signature
+        }
+        if changed:
+            catalogues = dict(self._settings.get("provider_models") or {})
+            for provider in changed:
+                catalogues.pop(provider, None)
+            self._settings["provider_models"] = catalogues
+            if "freellm" in changed:
+                self._settings["flm_models_ready"] = []
+        self._provider_credentials_snapshot = current_fingerprint
         chosen = self._current_model()
         self._fill_model_combo()
         self._select_model(chosen)
         self._update_key_states()
+        self._provider_refresh_timer.start()
+
+    @staticmethod
+    def _provider_credentials_fingerprint(credentials: dict) -> dict:
+        from translators import registry
+
+        return {
+            "gemini": (str(credentials.get("gemini_key", "")).strip(),),
+            "groq": registry.provider_creds("groq", credentials),
+            "cf": registry.provider_creds("cf", credentials),
+            "mistral": registry.provider_creds("mistral", credentials),
+            "freellm": (
+                str(credentials.get("flm_base", "")).strip(),
+                str(credentials.get("flm_key", "")).strip(),
+            ),
+        }
 
     def _on_model_changed(self, *_args) -> None:
         self._mark_active_model(self.z_model, self._current_model())
@@ -4551,18 +5390,37 @@ class SettingsDialog(QDialog):
 
     def _update_key_states(self) -> None:
         creds = self._credentials()
-        states = (
+        states = [
             (self.gemini_state, creds["gemini_key"]),
             (self.groq_state, creds["groq_key"]),
-            (self.cf_token_state, creds["cloudflare_token"]),
+            (
+                self.cf_token_state,
+                creds["cloudflare_account_id"]
+                and creds["cloudflare_token"],
+            ),
             (self.mistral_state, creds["mistral_key"]),
-            (self.flm_state, creds["flm_key"]),
+            (
+                self.flm_state,
+                creds["flm_base"] and creds["flm_key"],
+            ),
             (self.cf_account_state, creds["cloudflare_account_id"]),
-        )
+        ]
+        api_custom_providers = self._api_key_custom_providers
+        if isinstance(api_custom_providers, list):
+            for entry in api_custom_providers:
+                if not isinstance(entry, dict):
+                    continue
+                provider_id = str(entry.get("id", "")).strip()
+                state = self._api_key_state_labels.get(provider_id)
+                if state is not None:
+                    states.append((state, str(entry.get("api_key", "")).strip()))
         colors = self._theme_colors()
         for state, filled in states:
             role = "success" if filled else "warning"
             state.setText("●" if filled else "○")
+            state.setToolTip(
+                "Credentials configured" if filled
+                else "Credentials not configured")
             state.setProperty("theme_color_role", role)
             self._invalidate_theme_role_widget_cache()
             state.setStyleSheet(
@@ -4575,18 +5433,11 @@ class SettingsDialog(QDialog):
         model = self._current_model()
         creds = dict(self._credentials())
         ok, reason = registry.availability(model, creds)
-        is_cli_model = registry.provider_of(model) == "opencode_cli"
-        if is_cli_model and self._cli_model_error:
-            reason = self._cli_model_error
-            ok = False
         status = ("Ready — this model will translate." if ok else reason)
-        if self._cli_model_error and not is_cli_model:
-            status += f"\n⌘ OpenCode CLI unavailable: {self._cli_model_error}"
         self.engine_hint.setText(status)
         colors = self._theme_colors()
         role = (
-            "success"
-            if ok and not self._cli_model_error else "warning")
+            "success" if ok else "warning")
         self.engine_hint.setProperty("theme_color_role", role)
         self._invalidate_theme_role_widget_cache()
         self.engine_hint.setStyleSheet(
@@ -4596,81 +5447,122 @@ class SettingsDialog(QDialog):
         # sync header badge
         try:
             self.header_status.setText(
-                "Ready" if ok and not self._cli_model_error
-                else "Action needed")
-            self.header_status.setObjectName("badgeSuccess" if ok and not self._cli_model_error else "badgeWarning")
+                "Ready" if ok else "Action needed")
+            self.header_status.setObjectName(
+                "badgeSuccess" if ok else "badgeWarning")
             self.header_status.style().unpolish(self.header_status)
             self.header_status.style().polish(self.header_status)
         except Exception:
             pass
 
-    def _refresh_zen_models(self) -> None:
-        from translators import gemini as gemini_api
-        from translators import opencode_cli, opencode_compat
-        chosen = self._current_model()
+    def _refresh_provider_models(self) -> None:
+        self._start_provider_models_refresh()
+
+    def _start_provider_models_refresh(self) -> None:
+        if self._provider_refresh_in_progress:
+            return
+        credentials = copy.deepcopy(self._credentials())
+        if not any((
+            credentials["gemini_key"],
+            credentials["groq_key"],
+            credentials["cloudflare_account_id"]
+            and credentials["cloudflare_token"],
+            credentials["mistral_key"],
+            credentials["flm_base"] and credentials["flm_key"],
+        )):
+            return
+
+        self._provider_refresh_in_progress = True
         self.z_refresh.setEnabled(False)
-        self._cli_model_error = None
-        try:
-            gemini_api.known_models(refresh=True, api_key=self.gemini_key.text().strip())
-        except Exception as error:
-            log.warning("Could not refresh Gemini model list: %s", error)
-        base = self.o_base.text().strip()
-        key = self.o_key.text().strip()
-        if base and key:
-            if "groq" in base:
+
+        def job() -> None:
+            from translators import gemini as gemini_api
+            from translators import openai_compat, registry
+
+            catalogues: dict[str, list[str]] = {}
+            errors: dict[str, str] = {}
+            gemini_key = credentials["gemini_key"]
+            if gemini_key:
                 try:
-                    self._live_groq = opencode_compat.list_models(base, key)
+                    catalogues["gemini"] = gemini_api.known_models(
+                        refresh=True, api_key=gemini_key)
                 except Exception as error:
-                    log.info("Groq model list unavailable: %s", error)
-                    self._live_groq = None
-            if "cloudflare" in base:
+                    errors["Gemini"] = str(error)
+            for provider in ("groq", "cf", "mistral"):
+                base, key = registry.provider_creds(provider, credentials)
+                if not (base and key):
+                    continue
                 try:
-                    self._live_cf = opencode_compat.list_models(base, key)
+                    catalogues[provider] = openai_compat.list_models(
+                        base, key)
                 except Exception as error:
-                    log.info("Cloudflare model list unavailable: %s", error)
-                    self._live_cf = None
-        flm_base = self.flm_base.text().strip()
-        flm_key = self.flm_key.text().strip()
-        if flm_base and flm_key:
-            try:
-                self._live_flm = opencode_compat.list_ready_models(flm_base, flm_key)
-            except Exception as error:
-                log.info("FreeLLMAPI model list unavailable: %s", error)
-                self._live_flm = None
-        else:
-            self._live_flm = None
-        try:
-            self._live_cli = opencode_cli.list_models()
-            self._settings["opencode_cli_models"] = list(self._live_cli)
-        except opencode_cli.OpenCodeCLIError as error:
-            self._cli_model_error = str(error)
-            log.info("OpenCode CLI models unavailable: %s", error)
-            self._live_cli = list(self._settings.get("opencode_cli_models") or [])
-        finally:
-            self.z_refresh.setEnabled(True)
+                    errors[provider] = str(error)
+            flm_base = credentials["flm_base"]
+            flm_key = credentials["flm_key"]
+            if flm_base and flm_key:
+                try:
+                    catalogues["freellm"] = (
+                        openai_compat.list_ready_models(flm_base, flm_key))
+                except Exception as error:
+                    errors["FreeLLMAPI"] = str(error)
+            self.providerModelsFetched.emit(credentials, catalogues, errors)
+
+        self._provider_refresh_thread = threading.Thread(
+            target=job, daemon=True)
+        self._provider_refresh_thread.start()
+
+    def _on_provider_models_fetched(
+        self,
+        credentials: dict,
+        catalogues: dict,
+        errors: dict,
+    ) -> None:
+        self._provider_refresh_in_progress = False
+        self.z_refresh.setEnabled(True)
+        if credentials != self._credentials():
+            self._provider_refresh_timer.start()
+            return
+        stored = dict(self._settings.get("provider_models") or {})
+        stored.update(catalogues)
+        self._settings["provider_models"] = stored
+        if "freellm" in catalogues:
+            self._settings["flm_models_ready"] = list(catalogues["freellm"])
+        chosen = self._current_model()
         self._fill_model_combo()
         self._select_model(chosen)
-        self._verify_cli_models()
-
-    def _verify_cli_models(self) -> None:
-        if self._verify_thread is not None and self._verify_thread.is_alive():
-            return
-        if not self._live_cli:
-            return
-        models = list(self._live_cli)
-        snapshot = self._settings
-
-        def job():
-            from translators import verify
-            try:
-                snapshot["model_status"] = verify.verify_cli_models(models, snapshot)
-            except Exception as error:
-                log.warning("Could not verify OpenCode CLI models: %s", error)
-                return
-            self.verifyDone.emit()
-
-        self._verify_thread = threading.Thread(target=job, daemon=True)
-        self._verify_thread.start()
+        if errors:
+            detail = "\n".join(
+                f"{provider}: {message}" for provider, message in errors.items())
+            self.engine_hint.setText(
+                f"Some model lists could not be refreshed:\n{detail}")
+            self.engine_hint.setToolTip(detail)
+            self.engine_hint.setProperty("theme_color_role", "warning")
+        else:
+            self.engine_hint.setToolTip("")
+        if self._api_test_provider_id:
+            provider_id = self._api_test_provider_id
+            self._api_test_provider_id = None
+            catalogue_id = {
+                "cloudflare": "cf",
+            }.get(provider_id, provider_id)
+            error_name = {
+                "gemini": "Gemini",
+                "cloudflare": "cf",
+                "freellm": "FreeLLMAPI",
+            }.get(provider_id, provider_id)
+            error = errors.get(error_name)
+            if error:
+                message = f"{provider_id} connection failed:\n{error}"
+            elif catalogue_id in catalogues:
+                model_count = len(catalogues[catalogue_id])
+                message = (
+                    f"{provider_id} connection succeeded; "
+                    f"refreshed {model_count} model(s).")
+            else:
+                message = (
+                    f"{provider_id} did not return a model catalogue.")
+            self.results.setPlainText(message)
+            self._show_plain_results()
 
     def _credentials(self) -> dict:
         def text(name: str) -> str:
@@ -4684,7 +5576,8 @@ class SettingsDialog(QDialog):
             "mistral_key": text("mistral_key"),
             "flm_base": text("flm_base"),
             "flm_key": text("flm_key"),
-            "opencode_cli_models": list(self._settings.get("opencode_cli_models") or []),
+            "provider_models": copy.deepcopy(
+                self._settings.get("provider_models") or {}),
             "model_status": dict(self._settings.get("model_status") or {}),
             "openai_base": text("o_base"),
             "openai_key": text("o_key"),
@@ -4712,11 +5605,6 @@ class SettingsDialog(QDialog):
         self._probe_thread = threading.Thread(target=job, daemon=True)
         self._probe_thread.start()
 
-    def _on_verify_done(self) -> None:
-        chosen = self._current_model()
-        self._fill_model_combo()
-        self._select_model(chosen)
-
     def _on_probe_done(self, results: list) -> None:
         from translators import probe
         self.test_btn.setEnabled(True)
@@ -4727,9 +5615,12 @@ class SettingsDialog(QDialog):
 
     def values(self) -> dict:
         from config.settings import DEFAULTS
-        from translators.opencode_bridge import MODEL_DEFAULT_EFFORTS
         from config.settings import _sanitize_custom_providers
         out = copy_settings(self._settings)
+        for retired_key in (
+            "opencode_cli_models", "effort_default", "effort_levels",
+        ):
+            out.pop(retired_key, None)
         for key, value in DEFAULTS.items():
             out.setdefault(key, value)
         self._glossaries[self._glossary_language] = self.glossary_text.toPlainText()
@@ -4753,17 +5644,22 @@ class SettingsDialog(QDialog):
                 self.pdf_canvas_theme_check.isChecked(),
             "model": self._current_model(),
             "gemini_key": self.gemini_key.text().strip(),
-            "opencode_cli_models": list(self._live_cli if self._live_cli is not None else self._settings.get("opencode_cli_models") or []),
             "openai_base": self.o_base.text().strip(),
             "openai_key": self.o_key.text().strip(),
             "openai_model": self.o_model.text().strip(),
             "groq_key": groq_key,
             "flm_base": self.flm_base.text().strip(),
             "flm_key": self.flm_key.text().strip(),
-            "flm_models_ready": list(self._live_flm if self._live_flm is not None else self._settings.get("flm_models_ready") or []),
+            "flm_models_ready": list(
+                self._settings.get("flm_models_ready") or []),
             "cloudflare_account_id": self.cf_account.text().strip(),
             "cloudflare_token": self.cf_token.text().strip(),
             "mistral_key": self.mistral_key.text().strip(),
+            "api_key_providers": sorted(self._api_key_provider_ids),
+            "api_key_custom_providers": _sanitize_custom_providers(
+                self._api_key_custom_providers),
+            "api_key_provider_order": list(
+                self._settings.get("api_key_provider_order") or []),
             "custom_providers": _sanitize_custom_providers(self._settings.get("custom_providers") or []),
             "model_favorites": _normalize_model_favorites(
                 self._settings.get("model_favorites")),
@@ -4772,7 +5668,7 @@ class SettingsDialog(QDialog):
             "custom_provider_collapsed": _normalize_custom_provider_collapsed(
                 self._settings.get("custom_provider_collapsed")),
             "settings_last_page": self._stack.currentIndex(),
-            "settings_last_page_version": 3,
+            "settings_last_page_version": 5,
             "email": self.email.text().strip(),
             "selection_mode": self.selection_mode.currentData(),
             "chat_reply_language": (
@@ -4817,8 +5713,6 @@ class SettingsDialog(QDialog):
             "model_status": dict(self._settings.get("model_status") or {}),
             "model_instructions": self.model_instructions.toPlainText().strip(),
             "fast_mode": self.fast_check.isChecked(),
-            "effort_default": self.effort_default_combo.currentText(),
-            "effort_levels": {model: combo.currentText() for model, combo in self.effort_combos.items() if combo.currentText() != MODEL_DEFAULT_EFFORTS.get(model, self.effort_default_combo.currentText())},
         })
         # header theme combo is authoritative if user changed it there
         try:

@@ -116,8 +116,8 @@ Works on **both** kinds of PDFs:
   fallback to install and no language list to configure.
 - **Direct image translation** — choose **Settings → Application → Selection
   reading → Send selection image to vision model** to send the selected page
-  area directly to the selected model, without local OCR. Gemini, OpenCode
-  bridge/Zen, and OpenAI-compatible vision endpoints use their native image
+  area directly to the selected model, without local OCR. Gemini and
+  OpenAI-compatible vision endpoints use their native image
   request formats. The selected model must support images; unsupported models
   report their provider error. Image mode always sends the rendered selection
   to the vision model, even when the PDF also has a text layer. OCR mode remains

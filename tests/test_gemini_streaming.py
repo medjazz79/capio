@@ -109,7 +109,7 @@ class TestGeminiStreaming(unittest.TestCase):
             ),
             mock.patch.object(chain.registry, "provider_of", return_value="custom"),
             mock.patch(
-                "translators.opencode_compat.stream_translate",
+                "translators.openai_compat.stream_translate",
                 side_effect=failed_stream,
             ) as stream,
             mock.patch(
@@ -129,41 +129,6 @@ class TestGeminiStreaming(unittest.TestCase):
         stream.assert_called_once()
         fallback.assert_called_once_with("source", "en", "ar")
 
-    def test_bridge_stream_failure_falls_back_without_retrying_model(self):
-        settings = dict(
-            DEFAULTS,
-            model="space-bunny-free",
-            source_language="en",
-            target_language="ar",
-        )
-
-        def failed_stream(*_args, **_kwargs):
-            def deltas():
-                raise RuntimeError("stream disconnected")
-                yield ""
-            return deltas()
-
-        with (
-            mock.patch(
-                "translators.opencode_bridge.stream",
-                side_effect=failed_stream,
-            ) as stream,
-            mock.patch(
-                "translators.fallback.gtx_translate",
-                return_value="free translation",
-            ) as fallback,
-            mock.patch.object(
-                chain,
-                "_translate_chunk",
-                side_effect=AssertionError("must not repeat the selected model"),
-            ),
-        ):
-            events = list(chain._stream_single_bridge("source", settings))
-
-        self.assertEqual(events[-1][1], "free translation")
-        self.assertIn("stream disconnected", events[-1][2])
-        stream.assert_called_once()
-        fallback.assert_called_once_with("source", "en", "ar")
 
     def test_nonstream_translate_reserves_8192_output_tokens(self):
         response = mock.Mock(status_code=200)

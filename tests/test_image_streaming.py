@@ -8,9 +8,7 @@ import requests
 from PIL import Image
 
 from config.settings import DEFAULTS
-from translators import (
-    chain, gemini, opencode_bridge, opencode_cli, opencode_compat, opencode_zen,
-)
+from translators import chain, gemini, openai_compat
 from translators.vision import image_system_instructions
 
 
@@ -27,7 +25,7 @@ class TestImageStreamingAdapters(unittest.TestCase):
         with mock.patch.object(
             requests, "post", return_value=response,
         ) as post:
-            deltas = list(opencode_compat.stream_translate_image(
+            deltas = list(openai_compat.stream_translate_image(
                 Image.new("RGB", (32, 24), "white"),
                 "http://localhost:11434/v1",
                 "ollama",
@@ -52,7 +50,7 @@ class TestImageStreamingAdapters(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError, "Ollama's context length to at least 16K",
             ):
-                list(opencode_compat.stream_translate_image(
+                list(openai_compat.stream_translate_image(
                     Image.new("RGB", (32, 24), "white"),
                     "http://localhost:11434/v1",
                     "ollama",
@@ -163,7 +161,7 @@ class TestImageStreamingAdapters(unittest.TestCase):
         report = {}
 
         with mock.patch.object(requests, "post", return_value=response) as post:
-            deltas = list(opencode_compat.stream_translate_image(
+            deltas = list(openai_compat.stream_translate_image(
                 Image.new("RGB", (32, 24), "white"),
                 "http://localhost:31415/v1",
                 "test-key",
@@ -178,58 +176,8 @@ class TestImageStreamingAdapters(unittest.TestCase):
         self.assertEqual(report["routed_via"], "google/gemini-3.5-flash-lite")
         response.close.assert_called_once()
 
-    def test_bridge_streams_image_through_its_existing_sse_transport(self):
-        image = Image.new("RGB", (32, 24), "white")
-        with mock.patch.object(
-            opencode_bridge, "_iter_chat", return_value=iter(["partial"]),
-        ) as iter_chat:
-            self.assertEqual(
-                list(opencode_bridge.stream_image(image, "space-bunny-free")),
-                ["partial"],
-            )
 
-        self.assertTrue(iter_chat.call_args.kwargs["image_url"].startswith(
-            "data:image/jpeg;base64,"))
 
-    def test_opencode_zen_streams_an_image_over_sse(self):
-        response = mock.Mock(status_code=200)
-        response.iter_lines.return_value = [
-            ("data: " + json.dumps({"choices": [{
-                "delta": {"content": "first"},
-                "finish_reason": "stop",
-            }]})).encode(),
-        ]
-        response.raise_for_status.return_value = None
-        with mock.patch.object(requests, "post", return_value=response) as post:
-            deltas = list(opencode_zen.stream_translate_image(
-                Image.new("RGB", (32, 24), "white"), "vendor/vision"))
-
-        self.assertEqual(deltas, ["first"])
-        self.assertTrue(post.call_args.kwargs["json"]["stream"])
-        response.close.assert_called_once()
-
-    def test_opencode_cli_yields_json_text_events_as_they_arrive(self):
-        stdout = "\n".join([
-            json.dumps({"type": "text", "part": {"text": "first "}}),
-            json.dumps({"type": "text", "part": {"text": "second"}}),
-            json.dumps({"type": "step_finish", "part": {}}),
-        ]) + "\n"
-        process = mock.Mock()
-        process.stdin = io.StringIO()
-        process.stdout = io.StringIO(stdout)
-        process.poll.return_value = 0
-        process.wait.return_value = 0
-
-        with mock.patch.object(
-            opencode_cli, "find_executable", return_value="opencode",
-        ), mock.patch.object(
-            opencode_cli.subprocess, "Popen", return_value=process,
-        ):
-            self.assertEqual(
-                list(opencode_cli.stream_translate(
-                    "source", "opencode/model")),
-                ["first ", "second"],
-            )
 
 
 class TestImageStreamingFlow(unittest.TestCase):
@@ -429,34 +377,6 @@ class TestImageStreamingFlow(unittest.TestCase):
         self.assertIn("scale = [1, 2, 3]", code)
         self.assertIn("matrix = [[1, 0], [0, 1]]", code)
         self.assertIn(r"\\frac{1}{2}", code)
-    def test_streamed_latex_is_normalized_before_partial_emission(self):
-        settings = dict(
-            DEFAULTS,
-            model="mimo-v2.6-flash-free",
-            source_language="en",
-            target_language="ar",
-            fast_mode=True,
-        )
-        latex = (
-            "المثال الموسيقي: "
-            r"\begin{array}{|c|c|}\hline \text{G Clef} & "
-            r"\text{F Clef} \\ \hline \end{array}"
-        )
-        with (
-            mock.patch(
-                "translators.opencode_bridge.stream",
-                return_value=iter([latex[:45], latex[45:]]),
-            ),
-        ):
-            events = list(chain.translate_stream("source text", settings))
-
-        self.assertGreaterEqual(
-            sum(event[0] == "partial" for event in events), 2)
-        self.assertEqual(events[-1][0], "done")
-        self.assertTrue(all(
-            event[0] == "partial" for event in events[:-1]))
-        self.assertTrue(all("\\" not in event[1] for event in events))
-        self.assertIn("```music", events[-1][1])
 
     def test_image_stream_emits_partials_then_normalized_final(self):
         settings = dict(
@@ -504,7 +424,7 @@ class TestImageStreamingFlow(unittest.TestCase):
             return iter([translation])
 
         with mock.patch(
-            "translators.opencode_compat.stream_translate_image",
+            "translators.openai_compat.stream_translate_image",
             side_effect=fake_stream,
         ):
             events = list(chain.translate_image_stream(
@@ -523,7 +443,7 @@ class TestImageStreamingFlow(unittest.TestCase):
         )
         translation = "هذه ترجمة عربية واضحة للنص الذي قرأه OCR."
         with mock.patch(
-            "translators.opencode_compat.stream_translate",
+            "translators.openai_compat.stream_translate",
             return_value=iter(["هذه ترجمة ", "عربية واضحة للنص الذي قرأه OCR."]),
         ) as stream:
             events = list(chain.translate_stream("OCR source text", settings))
@@ -533,33 +453,6 @@ class TestImageStreamingFlow(unittest.TestCase):
         self.assertEqual(events[-1][1], translation)
         stream.assert_called_once()
 
-    def test_ocr_text_streams_with_custom_and_cli_models(self):
-        translation = "هذه ترجمة عربية ممتازة للنص المستخرج من الصورة."
-        cases = [
-            (
-                dict(model="vendor/custom-model", openai_base="https://api.example/v1",
-                     openai_key="key"),
-                "translators.opencode_compat.stream_translate",
-                ("https://api.example/v1", "key", "vendor/custom-model"),
-            ),
-            (
-                dict(model="opencode-cli:openai/model"),
-                "translators.opencode_cli.stream_translate",
-                ("openai/model",),
-            ),
-        ]
-        for options, target, expected_args in cases:
-            with self.subTest(model=options["model"]):
-                settings = dict(
-                    DEFAULTS, target_language="ar", fast_mode=True, **options)
-                with mock.patch(target, return_value=iter([translation])) as stream:
-                    events = list(chain.translate_stream(
-                        "recognized OCR text", settings))
-
-                self.assertEqual(events[-1][1], translation)
-                self.assertTrue(stream.called)
-                self.assertEqual(stream.call_args.args[1:1 + len(expected_args)],
-                                 expected_args)
 
     def test_ocr_worker_forwards_streamed_translation(self):
         from popup.worker import TranslateWorker

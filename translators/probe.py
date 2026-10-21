@@ -28,10 +28,7 @@ def probe_all(settings: dict) -> list[tuple[str, bool, str]]:
     from . import (
         fallback,
         gemini,
-        opencode_bridge,
-        opencode_cli,
-        opencode_compat,
-        opencode_zen,
+        openai_compat,
     )
 
     results: list[tuple[str, bool, str]] = []
@@ -61,13 +58,6 @@ def probe_all(settings: dict) -> list[tuple[str, bool, str]]:
     elif provider == "google_translate":
         run(f"★ Your model ({model})",
             lambda t: fallback.gtx_translate(t, "en", "en"))
-    elif provider == "bridge":
-        run(f"★ Your model ({model})",
-            lambda t: opencode_bridge.translate(
-                t, model, max_tokens=30, timeout=PROBE_TIMEOUT))
-    elif provider == "opencode":
-        run(f"★ Your model ({model})",
-            lambda t: opencode_zen.translate(t, model))
     elif provider == "freellm":
         base, key = registry.provider_creds("freellm", s)
         bare = model[len(registry.FLM_PREFIX):]
@@ -77,7 +67,7 @@ def probe_all(settings: dict) -> list[tuple[str, bool, str]]:
                             f"the Keys page of {base}"))
         else:
             def _flm_probe(t):
-                _, via = opencode_compat.translate_with_engine(
+                _, via = openai_compat.translate_with_engine(
                     t, base, key, bare)
                 return via or bare
             run(f"★ Your model ({bare})", _flm_probe)
@@ -91,7 +81,7 @@ def probe_all(settings: dict) -> list[tuple[str, bool, str]]:
                             "SKIPPED: provider token is not configured"))
         else:
             run(f"★ Your model ({bare})",
-                lambda t: opencode_compat.translate(t, base, key, bare))
+                lambda t: openai_compat.translate(t, base, key, bare))
     elif provider == "custom_provider":
         cfg = registry.custom_provider_config(model, s)
         if cfg is None:
@@ -107,12 +97,7 @@ def probe_all(settings: dict) -> list[tuple[str, bool, str]]:
                 entry = registry.get_custom_provider(s, model)
                 reasoning = bool(entry.get("reasoning_enabled")) if entry else False
                 run(f"★ Your model ({label})",
-                    lambda t: opencode_compat.translate(t, base, key, provider_model, reasoning_enabled=reasoning))
-    elif provider == "opencode_cli":
-        cli_model = model[len(registry.OPENCODE_CLI_PREFIX):]
-        run(f"★ Your model ({cli_model})",
-            lambda t: opencode_cli.translate(t, cli_model,
-                                             timeout=PROBE_TIMEOUT))
+                    lambda t: openai_compat.translate(t, base, key, provider_model, reasoning_enabled=reasoning))
     else:
         base, key = (s.get("openai_base") or "").strip(), (s.get("openai_key") or "").strip()
         if not (base and key):
@@ -120,7 +105,7 @@ def probe_all(settings: dict) -> list[tuple[str, bool, str]]:
                             "SKIPPED: OpenAI-compatible is not configured"))
         else:
             run(f"★ Your model ({model})",
-                lambda t: opencode_compat.translate(t, base, key, model))
+                lambda t: openai_compat.translate(t, base, key, model))
 
     # Hints: mismatches that produce a confusing result later.
     if provider not in ("gemini", "google_translate") \
@@ -136,15 +121,6 @@ def probe_all(settings: dict) -> list[tuple[str, bool, str]]:
     elif provider == "gemini" and not (s.get("gemini_key") or "").strip():
         results.append(("💡 Hint", True,
                         f"{model} needs a Gemini key: aistudio.google.com/apikey"))
-    elif provider == "opencode":
-        results.append(("💡 Hint", True,
-                        f"{model} is the one free model that needs no API key. "
-                        "The other '-free' ids answer 403 even from inside "
-                        "OpenCode, so they are not offered."))
-    elif provider == "bridge":
-        results.append(("💡 Hint", True,
-                        f"{model} uses the streaming bridge (no key). "
-                        "If the gate changes, it falls back to free services."))
     elif provider == "freellm":
         results.append(("💡 Hint", True,
                         f"{model} lets your local FreeLLMAPI router pick. "
@@ -241,7 +217,7 @@ def detect_vision(base_url: str, api_key: str, model: str) -> tuple[bool, str]:
     from . import http_client as requests
     from PIL import Image
 
-    from .opencode_compat import TRANSLATION_TIMEOUT
+    from .openai_compat import TRANSLATION_TIMEOUT
 
     image = Image.new("RGB", (64, 64), _VISION_PROBE_COLOR)
     buffer = BytesIO()
@@ -321,7 +297,7 @@ def detect_reasoning(base_url: str, api_key: str, model: str) -> tuple[bool, str
     """
     from . import http_client as requests
 
-    from .opencode_compat import TRANSLATION_TIMEOUT, _reasoning_parameters
+    from .openai_compat import TRANSLATION_TIMEOUT, _reasoning_parameters
 
     payload = {
         "model": model,

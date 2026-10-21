@@ -76,7 +76,7 @@ class _TempSettingsCase(unittest.TestCase):
     whole thing afterwards — including the `…json.tmp` sibling that
     `config.settings.save()` leaves behind on a partial write, which a bare
     `unlink()` of the .json would have missed. This is the same pattern
-    `mock_opencode_settings` already used.
+    `mock_settings_file` already used.
     """
 
     def setUp(self):
@@ -242,7 +242,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         )
 
         with mock.patch(
-            "translators.opencode_compat.list_model_groups",
+            "translators.openai_compat.list_model_groups",
             return_value=[("", [
                     "gemma2:2b",
                     "qwen3-vl:2b-instruct",
@@ -306,10 +306,37 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         card._cp_name.setText("Kilo Code")
         self.assertEqual(combo.itemText(0), "Models from Kilo Code")
 
+    def test_custom_model_picker_contains_every_model_from_provider(self):
+        from unittest import mock
+
+        dialog, _provider = self._dialog()
+        self.addCleanup(dialog.close)
+        card = next(
+            card for card in dialog._custom_cards
+            if card.property("cp_id") == "local"
+        )
+        models = [f"provider/model-{index:02}" for index in range(30)]
+        with mock.patch(
+            "translators.openai_compat.list_model_groups",
+            return_value=[("", models)],
+        ):
+            self._fill_credentials(dialog)
+            self._wait_for(
+                dialog,
+                lambda: card._cp_model.findData(models[-1]) >= 0,
+            )
+
+        listed = [
+            card._cp_model.itemData(index)
+            for index in range(card._cp_model.count())
+            if card._cp_model.itemData(index)
+        ]
+        self.assertEqual(listed, models)
+
     def test_endpoint_model_groups_are_preserved(self):
         from unittest import mock
         import requests
-        from translators import opencode_compat
+        from translators import openai_compat
 
         response = mock.Mock()
         response.raise_for_status.return_value = None
@@ -334,7 +361,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         explicit_free = set()
         with mock.patch.object(requests, "get", return_value=response):
             self.assertEqual(
-                opencode_compat.list_model_groups(
+                openai_compat.list_model_groups(
                     "https://x/v1", "k",
                     explicitly_free_models=explicit_free,
                 ),
@@ -349,7 +376,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
                 ],
             )
             self.assertEqual(
-                opencode_compat.free_model_groups(
+                openai_compat.free_model_groups(
                     [
                         ("Free", ["vendor/free-model"]),
                         ("Balanced", ["vendor/balanced-model"]),
@@ -357,7 +384,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
                             "vendor/zero-priced", "vendor/paid",
                             "vendor/paid-model-free", "vendor/free-flag",
                         ]),
-                        ("", ["vendor/space-bunny-free"]),
+                        ("", ["vendor/model-free"]),
                     ],
                     explicit_free,
                 ),
@@ -370,7 +397,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
                 ],
             )
             self.assertEqual(
-                opencode_compat.list_models("https://x/v1", "k"),
+                openai_compat.list_models("https://x/v1", "k"),
                 [
                     "vendor/free-model",
                     "vendor/balanced-model",
@@ -382,16 +409,117 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
                 ],
             )
 
+    def test_endpoint_model_groups_follow_all_openai_cursor_pages(self):
+        from unittest import mock
+        import requests
+        from translators import openai_compat
+
+        first_page = mock.Mock(status_code=200)
+        first_page.raise_for_status.return_value = None
+        first_page.json.return_value = {
+            "data": [{"id": "provider/model-1"}],
+            "has_more": True,
+        }
+        second_page = mock.Mock(status_code=200)
+        second_page.raise_for_status.return_value = None
+        second_page.json.return_value = {
+            "data": [{"id": "provider/model-2"}],
+            "has_more": True,
+        }
+        final_page = mock.Mock(status_code=200)
+        final_page.raise_for_status.return_value = None
+        final_page.json.return_value = {
+            "data": [{"id": "provider/model-3"}],
+            "has_more": False,
+        }
+
+        with mock.patch.object(
+            requests, "get",
+            side_effect=[first_page, second_page, final_page],
+        ) as get:
+            groups = openai_compat.list_model_groups(
+                "https://provider.example/v1", "secret")
+
+        self.assertEqual(
+            groups,
+            [("", [
+                "provider/model-1",
+                "provider/model-2",
+                "provider/model-3",
+            ])],
+        )
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(
+            get.call_args_list[1].kwargs["params"],
+            {"after": "provider/model-1"},
+        )
+        self.assertEqual(
+            get.call_args_list[2].kwargs["params"],
+            {"after": "provider/model-2"},
+        )
+
+    def test_cloudflare_model_search_uses_one_catalog_request(self):
+        from unittest import mock
+        import requests
+        from translators import openai_compat
+
+        response = mock.Mock(status_code=200)
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "success": True,
+            "result": [
+                {
+                    "id": "fe8904cf-e20e-4884-b829-ed7cec0a01cb",
+                    "name": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                    "task": {"name": "Text Generation"},
+                },
+                {
+                    "id": "f9f2250b-1048-4a52-9910-d0bf976616a1",
+                    "name": "@cf/meta/llama-3.1-8b-instruct",
+                    "task": {"name": "Text Generation"},
+                },
+                {
+                    "id": "eed32bc1-8775-4985-89ce-dd1405508ad8",
+                    "name": "@cf/baai/bge-m3",
+                    "task": {"name": "Text Embeddings"},
+                },
+            ],
+            "result_info": {"page": 1, "per_page": 100, "total_pages": 1},
+        }
+        base_url = (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            "581c70d4a0e6e2f9fce85e73f65774dc/ai/v1"
+        )
+        expected_url = (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            "581c70d4a0e6e2f9fce85e73f65774dc/ai/models/search"
+        )
+
+        with mock.patch.object(requests, "get", return_value=response) as get:
+            groups = openai_compat.list_model_groups(base_url, "test-token")
+
+        self.assertEqual(
+            groups,
+            [("Text Generation", [
+                "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                "@cf/meta/llama-3.1-8b-instruct",
+            ])],
+        )
+        get.assert_called_once()
+        self.assertEqual(get.call_args.args[0], expected_url)
+        self.assertEqual(
+            get.call_args.kwargs["params"], {"page": 1, "per_page": 100})
+
     def test_free_model_classification_uses_provider_indicators(self):
         from unittest import mock
-        from translators import opencode_compat
+        from translators import openai_compat
 
         groups = [
             ("", ["vendor/model-free", "vendor/paid-model"]),
             ("Free tier", ["vendor/model-in-free-group"]),
         ]
         self.assertEqual(
-            opencode_compat.free_model_groups(groups, {
+            openai_compat.free_model_groups(groups, {
                 "vendor/model-free", "vendor/model-in-free-group",
             }),
             [
@@ -403,7 +531,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
     def test_provider_model_check_uses_modern_token_limit_and_timeout(self):
         from unittest import mock
         import requests
-        from translators import opencode_compat
+        from translators import openai_compat
 
         def response_for_model(*_args, **kwargs):
             response = mock.Mock()
@@ -419,10 +547,10 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
             return response
 
         with mock.patch(
-            "translators.opencode_compat.requests.post",
+            "translators.openai_compat.requests.post",
             side_effect=response_for_model,
         ) as post:
-            results = opencode_compat.probe_models(
+            results = openai_compat.probe_models(
                 "https://provider/v1",
                 "secret",
                 ["vendor/working", "vendor/broken", "vendor/working"],
@@ -443,7 +571,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
     def test_provider_model_check_falls_back_for_unsupported_token_parameter(self):
         from unittest import mock
         import requests
-        from translators import opencode_compat
+        from translators import openai_compat
 
         modern_response = mock.Mock()
         modern_response.text = (
@@ -459,10 +587,10 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         }
 
         with mock.patch(
-            "translators.opencode_compat.requests.post",
+            "translators.openai_compat.requests.post",
             side_effect=[modern_response, legacy_response],
         ) as post:
-            results = opencode_compat.probe_models(
+            results = openai_compat.probe_models(
                 "https://provider/v1", "secret", ["vendor/model"]
             )
 
@@ -480,7 +608,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
 
     def test_provider_model_check_accepts_nonempty_truncated_probe_reply(self):
         from unittest import mock
-        from translators import opencode_compat
+        from translators import openai_compat
 
         response = mock.Mock()
         response.raise_for_status.return_value = None
@@ -491,10 +619,10 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
             }]
         }
         with mock.patch(
-            "translators.opencode_compat.requests.post",
+            "translators.openai_compat.requests.post",
             return_value=response,
         ):
-            result = opencode_compat.probe_models(
+            result = openai_compat.probe_models(
                 "https://provider/v1", "secret", ["vendor/model"]
             )[0]
 
@@ -503,17 +631,17 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
     def test_provider_model_check_marks_transient_errors_unverified(self):
         from unittest import mock
         import requests
-        from translators import opencode_compat
+        from translators import openai_compat
 
         response = mock.Mock()
         response.status_code = 429
         response.text = '{"error":"rate limit"}'
         error = requests.HTTPError("429 Too Many Requests", response=response)
         with mock.patch(
-            "translators.opencode_compat.requests.post",
+            "translators.openai_compat.requests.post",
             side_effect=error,
         ):
-            results = opencode_compat.probe_models(
+            results = openai_compat.probe_models(
                 "https://provider/v1", "secret", ["vendor/model"]
             )
 
@@ -538,11 +666,11 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
 
         with (
             mock.patch(
-                "translators.opencode_compat.list_model_groups",
+                "translators.openai_compat.list_model_groups",
                 side_effect=listed_models,
             ) as get_models,
             mock.patch(
-                "translators.opencode_compat.probe_models",
+                "translators.openai_compat.probe_models",
                 return_value=[
                     ("vendor/model-free", True, "0.1s"),
                     ("vendor/paid-model", False, "0.3s — 404 model not found"),
@@ -615,18 +743,18 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         )
         with (
             mock.patch(
-                "translators.opencode_compat.list_model_groups",
+                "translators.openai_compat.list_model_groups",
                 return_value=[("", ["second/model"])],
             ),
             mock.patch(
-                "translators.opencode_compat.probe_models",
+                "translators.openai_compat.probe_models",
                 return_value=[("second/model", True, "0.4s")],
             ) as probe,
         ):
             second_card._cp_check_models_btn.click()
             self._wait_for(
                 dialog,
-                lambda: "Second Provider" in dialog.results.toPlainText(),
+                lambda: "second/model" in dialog.results.toPlainText(),
             )
 
         self.assertIn("second/model", dialog.results.toPlainText())
@@ -648,7 +776,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         )
 
         with mock.patch(
-            "translators.opencode_compat.list_model_groups",
+            "translators.openai_compat.list_model_groups",
             side_effect=RuntimeError("endpoint unavailable"),
         ) as list_models:
             self._fill_credentials(dialog)
@@ -735,7 +863,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         self.assertIsNotNone(intro)
         self.assertEqual(
             intro.findChild(QLabel, "customProvidersTitle").text(),
-            "Custom Providers",
+            "AI Providers",
         )
         self.assertIsNone(intro.findChild(QLabel, "customProvidersHint"))
 
@@ -780,6 +908,182 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
             card._cp_content_layout.contentsMargins().top(), 13)
         self.assertEqual(
             card._cp_content_layout.contentsMargins().bottom(), 15)
+
+    def test_custom_provider_base_url_label_explains_account_id(self):
+        from PySide6.QtWidgets import QLabel
+
+        dialog, _provider = self._dialog()
+        self.addCleanup(dialog.close)
+        card = next(
+            card for card in dialog._custom_cards
+            if card.property("cp_id") == "local"
+        )
+        base_label = next(
+            label for label in card.findChildren(QLabel)
+            if label.text() == "Base URL / ID"
+        )
+        self.assertIsNotNone(base_label)
+        self.assertIn(
+            "https://api.cloudflare.com/client/v4/accounts/<ID>/ai/v1",
+            card._cp_base.placeholderText(),
+        )
+        self.assertIn("Account ID", card._cp_base.toolTip())
+
+    def test_cloudflare_account_id_base_resolves_to_workers_ai_endpoint(self):
+        from translators import registry
+
+        account_id = "581c70d4a0e6e2f9fce85e73f65774dc"
+        endpoint = (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{account_id}/ai/v1"
+        )
+        for entered_base in (
+            account_id,
+            f"https://{account_id}",
+            f"https://{account_id}/",
+        ):
+            with self.subTest(base=entered_base):
+                entry = {
+                    "id": "cf",
+                    "name": "Cloudflare",
+                    "base_url": entered_base,
+                    "api_key": "token",
+                    "model": "test-model",
+                }
+                settings = {"custom_providers": [entry]}
+                self.assertEqual(
+                    registry.custom_provider_base_url(entry), endpoint)
+                self.assertEqual(
+                    registry.custom_provider_config(
+                        "custom:cf::test-model", settings),
+                    (endpoint, "token", "test-model"),
+                )
+
+        self.assertEqual(
+            registry.custom_provider_base_url({
+                "name": "OpenAI",
+                "base_url": "https://api.openai.com/v1",
+            }),
+            "https://api.openai.com/v1",
+        )
+        template_entry = {
+            "id": "template",
+            "name": "Cloudflare Workers AI",
+            "base_url": (
+                "https://api.cloudflare.com/client/v4/accounts/"
+                "<ACCOUNT_ID>/ai/v1"
+            ),
+            "api_key": "token",
+            "model": "test-model",
+            "enabled": True,
+        }
+        self.assertEqual(registry.custom_provider_base_url(template_entry), "")
+        self.assertNotIn(
+            "custom:template::test-model",
+            registry.all_models({"custom_providers": [template_entry]}),
+        )
+
+    def test_cloudflare_account_id_fetches_model_catalogue(self):
+        from unittest import mock
+
+        dialog, provider = self._dialog()
+        self.addCleanup(dialog.close)
+        account_id = "581c70d4a0e6e2f9fce85e73f65774dc"
+        card = next(
+            card for card in dialog._custom_cards
+            if card.property("cp_id") == "local"
+        )
+        card._cp_name.setText("Cloudflare")
+        card._cp_base.setText(f"https://{account_id}")
+        card._cp_key.setText("cloudflare-token")
+        endpoint = (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{account_id}/ai/v1"
+        )
+
+        with mock.patch(
+            "translators.openai_compat.list_model_groups",
+            return_value=[("", ["@cf/meta/llama-3.3-70b-instruct-fp8-fast"])],
+        ) as list_models:
+            self._wait_for(
+                dialog,
+                lambda: card._cp_model.findData(
+                    "@cf/meta/llama-3.3-70b-instruct-fp8-fast") >= 0,
+            )
+
+        self.assertEqual(provider["name"], "Cloudflare")
+        self.assertEqual(list_models.call_args.args[0], endpoint)
+
+    def test_cloudflare_manual_refresh_uses_resolved_endpoint(self):
+        from unittest import mock
+
+        dialog, _provider = self._dialog()
+        self.addCleanup(dialog.close)
+        account_id = "581c70d4a0e6e2f9fce85e73f65774dc"
+        card = next(
+            card for card in dialog._custom_cards
+            if card.property("cp_id") == "local"
+        )
+        card._cp_name.setText("Cloudflare")
+        card._cp_base.setText(f"https://{account_id}")
+        card._cp_key.setText("cloudflare-token")
+        endpoint = (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{account_id}/ai/v1"
+        )
+
+        with mock.patch(
+            "translators.openai_compat.list_model_groups",
+            return_value=[("", ["@cf/meta/llama-3.3-70b-instruct-fp8-fast"])],
+        ) as list_models:
+            dialog._on_fetch_one_provider("local")
+            timer = dialog._auto_fetch_timers.get("local")
+            if timer is not None:
+                timer.stop()
+            self._wait_for(
+                dialog,
+                lambda: card._cp_model.findData(
+                    "@cf/meta/llama-3.3-70b-instruct-fp8-fast") >= 0,
+            )
+
+        self.assertEqual(list_models.call_args.args[0], endpoint)
+
+    def test_cloudflare_refresh_replaces_saved_catalog_uuid_with_model_name(self):
+        dialog, provider = self._dialog()
+        self.addCleanup(dialog.close)
+        account_id = "581c70d4a0e6e2f9fce85e73f65774dc"
+        endpoint = (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{account_id}/ai/v1"
+        )
+        model_name = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+        old_model_id = "fe8904cf-e20e-4884-b829-ed7cec0a01cb"
+        provider.update({
+            "name": "Cloudflare Workers AI",
+            "base_url": endpoint,
+            "api_key": "cloudflare-token",
+            "model": old_model_id,
+        })
+        card = next(
+            card for card in dialog._custom_cards
+            if card.property("cp_id") == "local"
+        )
+        card._cp_name.setText("Cloudflare Workers AI")
+        card._cp_base.setText(endpoint)
+        card._cp_key.setText("cloudflare-token")
+        card._cp_model.setCurrentText(old_model_id)
+
+        dialog._on_auto_fetch_done(
+            "local",
+            endpoint,
+            "cloudflare-token",
+            [model_name],
+            None,
+            [("Text Generation", [model_name])],
+        )
+
+        self.assertEqual(provider["model"], model_name)
+        self.assertEqual(card._cp_model.currentData(), model_name)
 
     def test_custom_provider_models_support_persisted_favorites(self):
         from PySide6.QtCore import QPoint, Qt
@@ -991,14 +1295,14 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
 
         self.assertEqual(
             [button.text() for button in dialog._nav_buttons[:3]],
-            ["Custom Providers", "API Keys", "Appearance"],
+            ["AI Providers", "API Keys", "Appearance"],
         )
         dialog._nav_buttons[0].click()
         self.assertEqual(dialog._stack.currentIndex(), 0)
         card._cp_collapse.setChecked(True)
         values = dialog.values()
         self.assertEqual(values["settings_last_page"], 0)
-        self.assertEqual(values["settings_last_page_version"], 3)
+        self.assertEqual(values["settings_last_page_version"], 5)
         self.assertEqual(
             values["custom_provider_collapsed"], {"local": True})
 
@@ -1021,10 +1325,14 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
 
         self.assertEqual(
             [button.text() for button in dialog._nav_buttons],
-            ["Custom Providers", "API Keys", "Appearance",
-             "Performance", "Application", "Read Aloud / TTS"],
+            ["AI Providers", "API Keys", "Appearance", "Speed & Usage",
+             "Application", "Read Aloud / TTS"],
         )
         self.assertTrue(dialog._page_keys[0].isAncestorOf(dialog.z_model))
+        self.assertTrue(
+            dialog._page_keys[1].isAncestorOf(dialog.gemini_key))
+        self.assertFalse(
+            dialog._page_keys[0].isAncestorOf(dialog.gemini_key))
         self.assertTrue(
             dialog._page_keys[4].isAncestorOf(dialog.model_instructions))
         self.assertTrue(
@@ -1043,6 +1351,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         ):
             self.assertEqual(down.text(), "−")
             self.assertEqual(up.text(), "+")
+
             self.assertEqual(down.size().width(), 48)
             self.assertEqual(down.size().height(), 42)
             self.assertEqual(up.size(), down.size())
@@ -1070,6 +1379,399 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
             ["edge", "gemini"],
         )
         self.assertEqual(dialog._stack.currentIndex(), 0)
+
+    def test_api_keys_page_adds_and_removes_builtin_credentials(self):
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from main import SettingsDialog
+        from config.settings import DEFAULTS
+
+        dialog = SettingsDialog(dict(DEFAULTS, gemini_key="saved-key"))
+        self.addCleanup(dialog.close)
+        self.assertTrue(
+            dialog._page_keys[1].isAncestorOf(dialog.gemini_key))
+        self.assertIn("gemini", dialog._api_key_provider_ids)
+        self.assertFalse(dialog._builtin_key_cards["gemini"].isHidden())
+
+        dialog._add_builtin_api_provider("groq")
+        self.assertFalse(dialog._builtin_key_cards["groq"].isHidden())
+        dialog.groq_key.setText("groq-test-key")
+        with mock.patch(
+            "PySide6.QtWidgets.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            dialog._remove_builtin_api_provider("groq")
+
+        self.assertTrue(dialog._builtin_key_cards["groq"].isHidden())
+        self.assertEqual(dialog.groq_key.text(), "")
+        values = dialog.values()
+        self.assertNotIn("groq", values["api_key_providers"])
+        self.assertEqual(values["gemini_key"], "saved-key")
+
+    def test_api_key_provider_presets_include_additional_compatible_services(self):
+        from ui.settings_dialog import _API_PROVIDER_PRESETS
+
+        self.assertEqual(
+            {
+                name: _API_PROVIDER_PRESETS[name]
+                for name in (
+                    "NVIDIA NIM",
+                    "SiliconFlow",
+                    "DeepInfra",
+                    "Nebius Token Factory",
+                    "SambaNova",
+                    "Hyperbolic",
+                )
+            },
+            {
+                "NVIDIA NIM": (
+                    "https://integrate.api.nvidia.com/v1",
+                    "https://build.nvidia.com/settings/api-keys",
+                ),
+                "SiliconFlow": (
+                    "https://api.siliconflow.com/v1",
+                    "https://cloud.siliconflow.com/account/ak",
+                ),
+                "DeepInfra": (
+                    "https://api.deepinfra.com/v1/openai",
+                    "https://deepinfra.com/dash/api_keys",
+                ),
+                "Nebius Token Factory": (
+                    "https://api.tokenfactory.nebius.com/v1",
+                    "https://tokenfactory.nebius.com/",
+                ),
+                "SambaNova": (
+                    "https://api.sambanova.ai/v1",
+                    "https://docs.sambanova.ai/docs/en/get-started/api-keys-urls",
+                ),
+                "Hyperbolic": (
+                    "https://api.hyperbolic.ai/inference/v1",
+                    "https://www.hyperbolic.ai/docs/inference/quickstart",
+                ),
+            },
+        )
+
+    def test_api_key_card_actions_share_the_header_row(self):
+        from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
+        from main import SettingsDialog
+
+        dialog = SettingsDialog(dict(DEFAULTS, gemini_key="saved-key"))
+        self.addCleanup(dialog.close)
+        dialog._stack.setCurrentIndex(1)
+        dialog.show()
+        QApplication.processEvents()
+
+        card = dialog._builtin_key_cards["gemini"]
+        remove = card.findChild(QPushButton, "apiKeyRemoveButton")
+        test = card.findChild(QPushButton, "apiKeyTestButton")
+        docs = card.findChild(QLabel, "apiKeyDocumentationLink")
+        self.assertIsNotNone(remove)
+        self.assertIsNotNone(test)
+        self.assertIsNotNone(docs)
+        self.assertEqual(test.y(), remove.y())
+        self.assertEqual(docs.y(), remove.y())
+
+    def test_api_key_cards_have_no_colored_accents(self):
+        from PySide6.QtWidgets import QFrame
+        from main import SettingsDialog
+
+        providers = [
+            {
+                "id": "custom-openrouter",
+                "name": "OpenRouter",
+                "base_url": "",
+                "api_key": "",
+                "model": "",
+                "enabled": True,
+            },
+        ]
+        dialog = SettingsDialog(dict(
+            DEFAULTS,
+            gemini_key="gemini-key",
+            groq_key="groq-key",
+            api_key_providers=["gemini", "groq", "custom-openrouter"],
+            custom_providers=providers,
+        ))
+        self.addCleanup(dialog.close)
+
+        cards = [
+            dialog._api_key_card_layout.itemAt(index).widget()
+            for index in range(dialog._api_key_card_layout.count())
+            if not dialog._api_key_card_layout.itemAt(index).widget().isHidden()
+        ]
+        self.assertTrue(cards)
+        self.assertTrue(all(
+            card.findChild(QFrame, "apiKeyProviderAccentStripe") is None
+            for card in cards
+        ))
+        ai_provider_card = next(
+            card for card in dialog._custom_cards
+            if card.property("cp_id") == "custom-openrouter"
+        )
+        self.assertIsNone(
+            ai_provider_card.findChild(
+                QFrame, "apiKeyProviderAccentStripe"))
+
+    def test_provider_card_order_is_independent_and_persisted_per_page(self):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication, QLabel
+        from main import SettingsDialog
+
+        providers = [
+            {
+                "id": provider_id,
+                "name": provider_id,
+                "base_url": "",
+                "api_key": "",
+                "model": "",
+                "enabled": True,
+                "reasoning_enabled": False,
+                "vision_enabled": False,
+            }
+            for provider_id in ("first", "second")
+        ]
+        dialog = SettingsDialog(dict(
+            DEFAULTS,
+            gemini_key="gemini-key",
+            groq_key="groq-key",
+            api_key_providers=["gemini", "groq", "first", "second"],
+            api_key_custom_providers=[
+                {
+                    "id": f"api-{provider_id}",
+                    "name": f"API {provider_id}",
+                    "base_url": "",
+                    "api_key": "",
+                }
+                for provider_id in ("first", "second")
+            ],
+            custom_providers=providers,
+        ))
+        self.addCleanup(dialog.close)
+        dialog.resize(1024, 768)
+        dialog.show()
+        QApplication.processEvents()
+
+        dialog._stack.setCurrentIndex(1)
+        QApplication.processEvents()
+        api_cards = [
+            dialog._api_key_card_layout.itemAt(index).widget()
+            for index in range(dialog._api_key_card_layout.count())
+            if not dialog._api_key_card_layout.itemAt(index).widget().isHidden()
+        ]
+        api_drag_handle = api_cards[0].findChild(
+            QLabel, "apiKeyProviderName")
+        api_drop_y = (
+            api_cards[-1].mapToGlobal(
+                QPoint(0, api_cards[-1].height())).y()
+            - api_drag_handle.mapToGlobal(QPoint(0, 0)).y()
+        )
+        QTest.mousePress(
+            api_drag_handle, Qt.MouseButton.LeftButton, pos=QPoint(2, 2))
+        QTest.mouseMove(
+            api_drag_handle, QPoint(12, api_drop_y), delay=100)
+        QTest.mouseRelease(
+            api_drag_handle, Qt.MouseButton.LeftButton,
+            pos=QPoint(12, api_drop_y), delay=100)
+        QApplication.processEvents()
+        api_order = [
+            dialog._api_key_card_layout.itemAt(index).widget().property(
+                "provider_id")
+            for index in range(dialog._api_key_card_layout.count())
+            if not dialog._api_key_card_layout.itemAt(index).widget().isHidden()
+        ]
+        self.assertEqual(
+            api_order, ["groq", "api-first", "api-second", "gemini"])
+        saved = dialog.values()
+        self.assertEqual(saved["api_key_provider_order"], api_order)
+
+        dialog._stack.setCurrentIndex(0)
+        QApplication.processEvents()
+        custom_cards = [
+            card for card in dialog._custom_cards
+            if card.property("cp_id")
+        ]
+        custom_drag_handle = custom_cards[0].findChild(
+            QLabel, "providerDragHandle")
+        custom_drop_y = (
+            custom_cards[-1].mapToGlobal(
+                QPoint(0, custom_cards[-1].height())).y()
+            - custom_drag_handle.mapToGlobal(QPoint(0, 0)).y()
+        )
+        QTest.mousePress(
+            custom_drag_handle, Qt.MouseButton.LeftButton, pos=QPoint(2, 2))
+        QTest.mouseMove(
+            custom_drag_handle, QPoint(12, custom_drop_y), delay=100)
+        QTest.mouseRelease(
+            custom_drag_handle, Qt.MouseButton.LeftButton,
+            pos=QPoint(12, custom_drop_y), delay=100)
+        QApplication.processEvents()
+        custom_order = [
+            card.property("cp_id") for card in dialog._custom_cards
+        ]
+        self.assertEqual(custom_order, ["second", "first"])
+        saved = dialog.values()
+        self.assertEqual(
+            [provider["id"] for provider in saved["custom_providers"]],
+            custom_order,
+        )
+
+        reopened = SettingsDialog(saved)
+        self.addCleanup(reopened.close)
+        self.assertEqual(
+            reopened._settings["api_key_provider_order"], api_order)
+        self.assertEqual(
+            [card.property("cp_id") for card in reopened._custom_cards],
+            custom_order,
+        )
+
+    def test_api_key_and_ai_provider_cards_are_independent(self):
+        from main import SettingsDialog
+
+        dialog, _provider = (
+            TestCustomProviderAutomaticModelFetch._dialog())
+        self.addCleanup(dialog.close)
+
+        card = next(
+            card for card in dialog._custom_cards
+            if card.property("cp_id") == "local"
+        )
+        self.assertTrue(dialog._page_keys[0].isAncestorOf(card._cp_key))
+        self.assertIs(
+            card._cp_key, dialog._custom_provider_key_edits["local"])
+        self.assertEqual(card._cp_key.echoMode(), card._cp_key.EchoMode.Password)
+        from PySide6.QtWidgets import QPushButton
+        visibility_button = card.findChild(
+            QPushButton, "customProviderApiKeyVisibilityButton")
+        self.assertIsNotNone(visibility_button)
+        visibility_button.click()
+        self.assertEqual(card._cp_key.echoMode(), card._cp_key.EchoMode.Normal)
+        self.assertEqual(visibility_button.text(), "Hide")
+        visibility_button.click()
+        self.assertEqual(
+            card._cp_key.echoMode(), card._cp_key.EchoMode.Password)
+        self.assertEqual(visibility_button.text(), "Show")
+        self.assertNotIn("local", dialog._api_key_provider_ids)
+
+        dialog._add_custom_api_provider(
+            "OpenRouter", "https://openrouter.ai/api/v1")
+        api_provider = dialog._api_key_custom_providers[0]
+        api_provider_id = api_provider["id"]
+        dialog._custom_key_edits[api_provider_id].setText("api-key-only")
+        card._cp_key.setText("ai-provider-only")
+
+        values = dialog.values()
+        self.assertEqual(
+            values["api_key_custom_providers"][0]["api_key"],
+            "api-key-only",
+        )
+        self.assertEqual(
+            values["custom_providers"][0]["api_key"],
+            "ai-provider-only",
+        )
+        self.assertEqual(
+            [entry["id"] for entry in values["custom_providers"]],
+            ["local"],
+        )
+        reopened = SettingsDialog(values)
+        self.addCleanup(reopened.close)
+        self.assertEqual(
+            [entry["id"] for entry in reopened._api_key_custom_providers],
+            [api_provider_id],
+        )
+        self.assertEqual(
+            [entry["id"] for entry in reopened._settings["custom_providers"]],
+            ["local"],
+        )
+        self.assertNotIn("local", reopened._api_key_provider_ids)
+        from config.settings import load, save
+        save(values)
+        loaded = load()
+        self.assertEqual(
+            [entry["id"] for entry in loaded["api_key_custom_providers"]],
+            [api_provider_id],
+        )
+
+    def test_custom_provider_add_menu_prefills_presets_and_offers_custom(self):
+        dialog, _provider = TestCustomProviderAutomaticModelFetch._dialog()
+        self.addCleanup(dialog.close)
+
+        menu = dialog._create_custom_provider_add_menu()
+        self.addCleanup(menu.deleteLater)
+        actions = {
+            action.text(): action for action in menu.actions()
+        }
+        self.assertIn("Cloudflare Workers AI", actions)
+        self.assertIn("Google Gemini", actions)
+        self.assertIn("OpenRouter", actions)
+        self.assertIn("Custom provider", actions)
+        actions["Google Gemini"].trigger()
+        gemini = dialog._settings["custom_providers"][-1]
+        self.assertEqual(gemini["name"], "Google Gemini")
+        self.assertEqual(
+            gemini["base_url"],
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        )
+
+        actions["OpenRouter"].trigger()
+        preset = dialog._settings["custom_providers"][-1]
+        self.assertEqual(preset["name"], "OpenRouter")
+        self.assertEqual(
+            preset["base_url"], "https://openrouter.ai/api/v1")
+
+        actions["Cloudflare Workers AI"].trigger()
+        cloudflare = dialog._settings["custom_providers"][-1]
+        self.assertEqual(cloudflare["name"], "Cloudflare Workers AI")
+        self.assertEqual(
+            cloudflare["base_url"],
+            "https://api.cloudflare.com/client/v4/accounts/"
+            "<ACCOUNT_ID>/ai/v1",
+        )
+
+        actions["Custom provider"].trigger()
+        custom = dialog._settings["custom_providers"][-1]
+        self.assertEqual(custom["name"], "Custom Provider")
+        self.assertEqual(custom["base_url"], "")
+        self.assertEqual(
+            [entry["id"] for entry in dialog._api_key_custom_providers],
+            [],
+        )
+
+    def test_provider_add_menus_use_large_text_and_prefer_above_button(self):
+        from unittest import mock
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QApplication
+
+        dialog, _provider = TestCustomProviderAutomaticModelFetch._dialog()
+        self.addCleanup(dialog.close)
+        dialog.resize(1080, 700)
+        dialog.show()
+        QApplication.processEvents()
+
+        for menu, button in (
+            (
+                dialog._create_custom_provider_add_menu(),
+                dialog._add_custom_btn,
+            ),
+            (
+                dialog._create_api_provider_add_menu(),
+                dialog._api_key_add_button,
+            ),
+        ):
+            self.addCleanup(menu.deleteLater)
+            with mock.patch.object(menu, "exec") as show_menu:
+                dialog._show_provider_add_menu(menu, button)
+
+            self.assertIn("font-size: 15px", menu.styleSheet())
+            self.assertIn("min-height: 24px", menu.styleSheet())
+            position = show_menu.call_args.args[0]
+            button_top = button.mapToGlobal(QPoint(0, 0))
+            screen = QApplication.screenAt(button_top) or dialog.screen()
+            available = screen.availableGeometry()
+            menu_height = menu.sizeHint().height()
+            if button_top.y() - menu_height >= available.top():
+                self.assertEqual(
+                    position.y(), button_top.y() - menu_height)
 
     def test_tts_settings_load_all_edge_voices_from_catalog(self):
         import asyncio
@@ -1184,6 +1886,28 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         self.addCleanup(dialog.close)
         self.assertEqual(dialog._stack.currentIndex(), 4)
 
+    def test_settings_page_indices_migrate_from_version_four(self):
+        from unittest import mock
+        from main import SettingsDialog
+        from config.settings import DEFAULTS
+
+        appearance = SettingsDialog(dict(
+            DEFAULTS,
+            settings_last_page=1,
+            settings_last_page_version=4,
+        ))
+        self.addCleanup(appearance.close)
+        self.assertEqual(appearance._stack.currentIndex(), 2)
+
+        with mock.patch.object(SettingsDialog, "_load_tts_edge_voices"):
+            tts = SettingsDialog(dict(
+                DEFAULTS,
+                settings_last_page=4,
+                settings_last_page_version=4,
+            ))
+        self.addCleanup(tts.close)
+        self.assertEqual(tts._stack.currentIndex(), 5)
+
     def test_settings_navigation_persists_page_immediately(self):
         from unittest import mock
         from PySide6.QtWidgets import QWidget
@@ -1197,7 +1921,7 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         with mock.patch("config.settings.save") as save_settings:
             dialog._nav_buttons[4].click()
         self.assertEqual(parent.settings["settings_last_page"], 4)
-        self.assertEqual(parent.settings["settings_last_page_version"], 3)
+        self.assertEqual(parent.settings["settings_last_page_version"], 5)
         save_settings.assert_called_once_with(parent.settings)
 
     def test_global_model_picker_panel_uses_compact_vertical_spacing(self):
@@ -1459,308 +2183,15 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
         self.assertEqual(len(set(card_colors)), len(card_colors))
 
 
-class TestOnlyWorkingModelsAreOffered(_GuiCase):
-    """Every claim here was measured against the live OpenCode Zen gateway and
-    the real OpenCode CLI on 2026-10-07, not guessed from model names:
+class TestSpeechFastModeAndSettings(_GuiCase):
 
-    * `space-bunny-free` answers 200 with no key at all (HTTP and CLI).
-    * Every other `-free` id answers 403 "free tier can only be used from
-      within OpenCode" -- from plain HTTP *and* from inside the authenticated
-      OpenCode CLI, so the block is an account entitlement, not a transport.
-    * The Zen "credits" ids answer provider.quota: the account has no balance.
-    * OpenCode's own log shows that same 403 on every single day since
-      2026-09-24, so these ids never worked for this machine.
-    """
 
-    # Despite the name, this class also builds real MainWindows and popups, so
-    # it needs the shared QApplication — and, now, the teardown that closes
-    # them again.
 
-    def test_the_free_tier_offers_the_one_model_that_actually_answers(self):
-        from translators import registry
-        self.assertEqual(registry.ZEN_FREE, ["space-bunny-free"])
 
-    def test_no_group_asks_the_user_for_an_opencode_key_any_more(self):
-        from translators import registry
-        labels = [label for label, _ in registry.model_groups({})]
-        self.assertFalse([x for x in labels if "OpenCode key" in x],
-                         f"still asks for a key: {labels}")
 
-    def test_models_that_never_answer_are_not_listed(self):
-        from translators import registry
-        labels = [label for label, _ in registry.model_groups({})]
-        # Bridge ids (2026-10-08 streaming) ARE listed; truly dead stay out.
-        # muse-spark uses /responses (verified 200); jev/ling/exo fail live.
-        for dead in ["exo-free", "deepseek-v4-flash-free",
-                     "grok-4.5", "glm-5.2", "deepseek-v4-pro",
-                     "jev-1.13-free", "ling-3.0-flash-fin-free",
-                     "ling-3.1-flash-free"]:
-            self.assertNotIn(dead, labels)
 
-    def test_a_zen_id_that_is_no_longer_free_says_why(self):
-        from translators import registry
-        ok, reason = registry.availability("exo-free", {})
-        self.assertFalse(ok)
-        self.assertIn("space-bunny-free", reason)
 
-    def test_the_working_free_model_needs_no_key_at_all(self):
-        from translators import registry
-        self.assertEqual(registry.availability("space-bunny-free", {}), (True, ""))
 
-    def test_a_cli_model_that_failed_verification_is_disabled_with_its_error(self):
-        from translators import registry
-        model = "opencode-cli:opencode/exo-free"
-        settings = {"model_status": {model: "403 — free tier blocked for this account"}}
-        ok, reason = registry.availability(model, settings)
-        self.assertFalse(ok)
-        self.assertIn("403", reason)
-
-    def test_a_cli_model_that_passed_verification_is_enabled(self):
-        from translators import registry
-        model = "opencode-cli:opencode/space-bunny-free"
-        settings = {"model_status": {model: ""}}
-        self.assertTrue(registry.availability(model, settings)[0])
-
-    def test_verification_status_does_not_disable_the_gemini_group(self):
-        from translators import registry
-        # Picker offers Gemini + bridge only; a bridge failure must not
-        # disable Gemini, and CLI ids are no longer offered at all.
-        rows = dict(registry.model_groups({
-            "gemini_key": "k",
-            "opencode_cli_models": ["opencode/exo-free", "opencode/space-bunny-free"],
-            "model_status": {"mimo-v2.6-flash-free": "403"},
-        }))
-        self.assertTrue(rows["gemini-2.5-flash-lite"])
-        self.assertFalse(rows["mimo-v2.6-flash-free"])
-        self.assertNotIn("opencode-cli:opencode/exo-free", rows)
-
-    def test_the_opencode_api_key_is_gone_from_settings(self):
-        from config.settings import DEFAULTS
-        self.assertNotIn("opencode_key", DEFAULTS)
-
-    def test_a_saved_dead_model_becomes_the_working_one(self):
-        from config import settings as settings_module
-        saved = {"model": "opencode-cli:opencode/muse-spark-1.3-contributor-free",
-                 "opencode_key": "an-old-key", "gemini_key": "k",
-                 "opencode_cli_models": ["opencode/space-bunny-free",
-                                         "opencode/muse-spark-1.3-contributor-free"]}
-        with mock_opencode_settings(saved) as path:
-            merged = settings_module.load()
-            settings_module.save(merged)   # persists the migrated values
-            on_disk = path.read_text(encoding="utf-8")
-        self.assertEqual(merged["model"], "opencode-cli:opencode/space-bunny-free")
-        self.assertNotIn("opencode_key", merged)
-        self.assertNotIn("opencode_key", on_disk)
-
-    def test_a_saved_working_model_is_left_alone(self):
-        from config import settings as settings_module
-        saved = {"model": "opencode-cli:opencode/space-bunny-free",
-                 "opencode_cli_models": ["opencode/space-bunny-free"]}
-        with mock_opencode_settings(saved):
-            merged = settings_module.load()
-        self.assertEqual(merged["model"], "opencode-cli:opencode/space-bunny-free")
-
-    def test_the_reasoning_budget_leaves_room_for_the_answer(self):
-        from translators import opencode_zen
-        # Measured: at 2048 space-bunny-free intermittently replies with
-        # finish_reason="length" -- the vocalisation the user asks for burns the
-        # whole budget before any content is emitted.
-        self.assertGreaterEqual(opencode_zen.MIN_MAX_TOKENS, 4096)
-
-    def test_a_raw_cli_failure_becomes_a_short_readable_reason(self):
-        """`opencode run` exits 1 and dumps its NDJSON event stream into the
-        error, so the picker must not show the user a wall of JSON."""
-        from translators import verify
-        raw = (
-            '`opencode run` failed (1): {"type":"error","timestamp":1791412,'
-            '"sessionID":"ses_abc","error":{"type":"provider.quota",'
-            '"message":"Upstream request failed with status 402"}}'
-        )
-        self.assertEqual(verify._readable(RuntimeError(raw)),
-                         "no credits on this account")
-
-    def test_a_google_failure_names_the_missing_connection(self):
-        from translators import verify
-        raw = ('`opencode run` failed (1): {"type":"error","error":'
-               '{"type":"provider.auth","message":'
-               '"Method doesn\'t allow unauthenticated requests"}}')
-        self.assertEqual(verify._readable(RuntimeError(raw)),
-                         "needs a Google connection in OpenCode")
-
-    def test_a_real_quota_failure_becomes_a_short_reason(self):
-        """The exact stream OpenCode emits for a 402, as measured on
-        2026-10-07: a step_start event first, then the error object."""
-        from translators import verify
-        raw = (
-            '`opencode run` failed (1): {"type":"step_start",'
-            '"timestamp":1791414012728,"sessionID":"ses_abc",'
-            '"part":{"type":"step-start"}}{"type":"error","error":'
-            '{"type":"provider.quota","message":"Upstream request failed: '
-            'Insufficient account funds","status":402}}'
-        )
-        self.assertEqual(verify._readable(RuntimeError(raw)),
-                         "no credits on this account")
-
-    def test_the_reason_never_shows_raw_json(self):
-        """Whatever the failure, the picker row must stay one short line."""
-        from translators import verify
-        raw = ('`opencode run` failed (1): {"type":"step_start","part":'
-               '{"type":"step-start"}}{"type":"error","error":'
-               '{"type":"provider.auth","message":"Method doesn\'t allow '
-               'unregistered callers (callers without established identity). '
-               'Please use API Key or other form of API consumer identity to '
-               'call this API.","status":403}}')
-        reason = verify._readable(RuntimeError(raw))
-        self.assertNotIn("{", reason)
-        self.assertNotIn("`", reason)
-        self.assertEqual(reason, "needs a Google connection in OpenCode")
-
-    def test_the_settings_dialog_no_longer_asks_for_an_opencode_key(self):
-        from main import SettingsDialog
-        from config.settings import DEFAULTS
-        dlg = SettingsDialog(dict(DEFAULTS))
-        try:
-            self.assertFalse(hasattr(dlg, "z_key"))
-            self.assertNotIn("opencode_key", dlg.values())
-            labels = [dlg.z_model.itemText(i) for i in range(dlg.z_model.count())]
-            model_ids = [
-                dlg.z_model.itemData(i) for i in range(dlg.z_model.count())
-                if isinstance(dlg.z_model.itemData(i), str)
-            ]
-            self.assertNotIn("exo-free", labels)
-            self.assertIn("space-bunny-free", model_ids)
-        finally:
-            dlg.close()
-
-    def test_bridge_ids_route_to_bridge_provider(self):
-        from translators import registry
-        self.assertEqual(registry.provider_of("mimo-v2.6-flash-free"), "bridge")
-        self.assertEqual(registry.provider_of("space-bunny-free"), "bridge")
-        ok, _ = registry.availability("mimo-v2.6-flash-free", {})
-        self.assertTrue(ok)
-
-    def test_bridge_aggregates_sse_and_sends_fingerprint(self):
-        from unittest import mock
-        import translators.opencode_bridge as b
-        self.assertIn("mimo-v2.6-flash-free", b.BRIDGE_FREE)
-        self.assertTrue(b._session_id().startswith("ses_"))
-
-        def fake_post(url, json=None, headers=None, timeout=None, stream=None):
-            self.assertTrue(json.get("stream"))
-            self.assertTrue(headers["User-Agent"].startswith("opencode/"))
-            self.assertTrue(headers["x-opencode-session"].startswith("ses_"))
-            names = [t["function"]["name"] for t in json.get("tools", [])]
-            self.assertIn("shell", names)
-            self.assertIn("read", names)
-
-            class Resp:
-                status_code = 200
-                text = ""
-                def iter_lines(self):
-                    yield b'data: {"choices":[{"delta":{"content":"Hello "},"finish_reason":null}]}'
-                    yield b'data: {"choices":[{"delta":{"content":"world"},"finish_reason":null}]}'
-                    yield b'data: [DONE]'
-                def close(self):
-                    pass
-            return Resp()
-
-        with mock.patch("translators.opencode_bridge.requests.post", side_effect=fake_post):
-            self.assertEqual(b.translate("hi", "mimo-v2.6-flash-free"), "Hello world")
-
-    def test_bridge_routes_muse_spark_to_responses_endpoint(self):
-        from unittest import mock
-        import translators.opencode_bridge as b
-        self.assertIn("muse-spark-1.3-contributor-free", b.BRIDGE_FREE)
-
-        def fake_post(url, json=None, headers=None, timeout=None, stream=None):
-            self.assertTrue(url.endswith("/responses"))
-            self.assertTrue(json.get("stream"))
-            self.assertIn("instructions", json)
-            self.assertIn("input", json)
-
-            class Resp:
-                status_code = 200
-                text = ""
-                def iter_lines(self):
-                    yield b'event: response.output_text.delta'
-                    yield b'data: {"type":"response.output_text.delta","delta":"Hello "}'
-                    yield b'event: response.output_text.delta'
-                    yield b'data: {"type":"response.output_text.delta","delta":"world"}'
-                    yield b'data: [DONE]'
-                def close(self):
-                    pass
-            return Resp()
-
-        with mock.patch("translators.opencode_bridge.requests.post", side_effect=fake_post):
-            self.assertEqual(
-                b.translate("hi", "muse-spark-1.3-contributor-free"), "Hello world")
-
-    def test_bridge_stream_yields_deltas_live(self):
-        from unittest import mock
-        import translators.opencode_bridge as b
-
-        def fake_post(url, json=None, headers=None, timeout=None, stream=None):
-            class Resp:
-                status_code = 200
-                text = ""
-                def iter_lines(self):
-                    yield b'data: {"choices":[{"delta":{"content":"Hello "},"finish_reason":null}]}'
-                    yield b'data: {"choices":[{"delta":{"content":"world"},"finish_reason":null}]}'
-                    yield b'data: [DONE]'
-                def close(self):
-                    pass
-            return Resp()
-
-        with mock.patch("translators.opencode_bridge.requests.post", side_effect=fake_post):
-            self.assertEqual(list(b.stream("hi", "mimo-v2.6-flash-free")),
-                             ["Hello ", "world"])
-            self.assertEqual(b.translate("hi", "mimo-v2.6-flash-free"),
-                             "Hello world")
-
-    def test_chain_stream_emits_partial_then_done(self):
-        from unittest import mock
-        from translators import chain
-        s = dict(DEFAULTS)
-        s.update({"model": "mimo-v2.6-flash-free"})
-        with mock.patch("translators.opencode_bridge.stream",
-                        return_value=iter(["Hello ", "world"])):
-            events = list(chain.translate_stream("cadence", s))
-        self.assertEqual(events[0], ("partial", "Hello ", ""))
-        self.assertEqual(events[1], ("partial", "Hello world", ""))
-        self.assertEqual(events[2][0], "done")
-        self.assertEqual(events[2][1], "Hello world")
-        self.assertIn("mimo-v2.6-flash", events[2][2])
-        # translate() itself is unchanged for the same input
-        with mock.patch("translators.opencode_bridge.stream",
-                        return_value=iter(["Hello ", "world"])):
-            self.assertEqual(chain.translate("cadence", s)[0], "Hello world")
-
-    def test_fast_mode_off_orders_bridge_alphabetically(self):
-        from translators import registry
-        from translators.opencode_bridge import BRIDGE_FREE
-        fast = [label for label, _ in registry.model_groups({"fast_mode": True})]
-        slow = [label for label, _ in registry.model_groups({"fast_mode": False})]
-        self.assertEqual(fast[0], "── ✦ Gemini — needs a Gemini key ──")
-        fast_bridge = fast[fast.index(registry.BRIDGE_HDR) + 1:
-                           fast.index(registry.GOOGLE_TRANSLATE_HDR)]
-        self.assertEqual(fast_bridge, BRIDGE_FREE)  # measured fastest-first
-        self.assertEqual(fast_bridge[0], "space-bunny-free")
-        slow_bridge = slow[slow.index(registry.BRIDGE_HDR) + 1:
-                           slow.index(registry.GOOGLE_TRANSLATE_HDR)]
-        self.assertEqual(slow_bridge, sorted(slow_bridge))
-
-    def test_chain_stream_off_emits_single_done(self):
-        from unittest import mock
-        from translators import chain
-        s = dict(DEFAULTS)
-        s.update({"model": "mimo-v2.6-flash-free", "fast_mode": False})
-        with mock.patch("translators.opencode_bridge.stream",
-                        side_effect=AssertionError("must not stream when off")):
-            with mock.patch("translators.opencode_bridge.translate",
-                            return_value="full-ar"):
-                events = list(chain.translate_stream("cadence", s))
-        self.assertEqual(events, [("done", "full-ar",
-                                   "◈ chosen bridge: mimo-v2.6-flash")])
 
     def test_speech_fast_off_skips_cache_and_parallel(self):
         from unittest import mock
@@ -1817,27 +2248,11 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         saved = {"model": "groq:qwen/qwen3.8-27b",
                  "openai_base": "https://api.groq.com/openai/v1",
                  "openai_key": "k"}
-        with mock_opencode_settings(saved):
+        with mock_settings_file(saved):
             merged = settings_module.load()
         self.assertEqual(merged["model"], "groq:qwen/qwen3.8-27b")
         self.assertEqual(resolve_model(merged), "groq:qwen/qwen3.8-27b")
 
-    def test_groq_models_listed_below_bridge_and_gated_by_key(self):
-        from translators import registry
-        no_key = [label for label, _ in registry.model_groups({})]
-        self.assertIn(registry.GROQ_HDR, no_key)
-        self.assertIn("groq:qwen/qwen3.8-27b", no_key)
-        rows = dict(registry.model_groups({}))
-        self.assertFalse(rows["groq:qwen/qwen3.8-27b"])
-        ok_rows = dict(registry.model_groups({
-            "openai_base": "https://api.groq.com/openai/v1",
-            "openai_key": "k"}))
-        self.assertTrue(ok_rows["groq:qwen/qwen3.8-27b"])
-        # Live ids merge above the curated list, de-duplicated.
-        live = [label for label, _ in registry.model_groups(
-            {}, live_groq=["new/model"])]
-        self.assertLess(live.index("groq:new/model"),
-                        live.index("groq:qwen/qwen3.8-27b"))
 
     def test_groq_provider_routing_and_chain(self):
         from unittest import mock
@@ -1853,7 +2268,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         s.update({"model": "groq:qwen/qwen3.8-27b",
                   "openai_base": "https://api.groq.com/openai/v1",
                   "openai_key": "k"})
-        with mock.patch("translators.opencode_compat.translate",
+        with mock.patch("translators.openai_compat.translate",
                         return_value="groq-ar") as t:
             self.assertEqual(chain.translate("cadence", s),
                              ("groq-ar", "⚡ groq: qwen/qwen3.8-27b"))
@@ -1861,7 +2276,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
                          ("https://api.groq.com/openai/v1", "k",
                           "qwen/qwen3.8-27b"))
         s["explain_mode"] = True
-        with mock.patch("translators.opencode_compat.translate",
+        with mock.patch("translators.openai_compat.translate",
                         return_value="groq-ar") as t:
             chain.translate("cadence", s)
         self.assertIn("### الشرح", t.call_args.kwargs["instructions"])
@@ -1952,7 +2367,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         img = Image.new("RGB", (10, 10), "white")
         s = dict(DEFAULTS)
         s.update({"model": "groq:qwen/qwen3.8-27b", "groq_key": "G"})
-        with mock.patch("translators.opencode_compat.translate_image",
+        with mock.patch("translators.openai_compat.translate_image",
                         return_value="img-ar") as t:
             self.assertEqual(chain.translate_image(img, s),
                              ("img-ar", "✦ chosen image: groq:qwen/qwen3.8-27b"))
@@ -1964,10 +2379,25 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
 
     def test_vision_model_ids_offered_for_cf_and_mistral(self):
         from translators import registry
-        labels = [label for label, _ in registry.model_groups({})]
+        disconnected = [label for label, _ in registry.model_groups({})]
+        self.assertNotIn("cf:@cf/meta/llama-3.2-11b-vision-instruct",
+                         disconnected)
+        settings = {
+            "cloudflare_account_id": "account",
+            "cloudflare_token": "token",
+            "mistral_key": "key",
+            "provider_models": {
+                "cf": [
+                    "@cf/meta/llama-3.2-11b-vision-instruct",
+                    "@cf/google/gemma-3-12b-it",
+                ],
+                "mistral": ["pixtral-12b-2409"],
+            },
+        }
+        labels = [label for label, _ in registry.model_groups(settings)]
         self.assertIn("cf:@cf/meta/llama-3.2-11b-vision-instruct", labels)
         self.assertIn("mistral:pixtral-12b-2409", labels)
-        self.assertNotIn("cf:@cf/google/gemma-3-12b-it", labels)
+        self.assertIn("cf:@cf/google/gemma-3-12b-it", labels)
 
     def test_model_image_capabilities_are_per_model(self):
         from translators import registry
@@ -1981,8 +2411,8 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             "cf:@cf/meta/llama-3.3-70b-instruct-fp8-fast": "unsupported",
             "mistral:mistral-small-latest": "supported",
             "mistral:codestral-latest": "unsupported",
-            "space-bunny-free": "supported",
-            "nemotron-3-ultra-free": "unsupported",
+            "flm:gemini-3.1-flash-lite": "supported",
+            "flm:llama-4-scout": "unsupported",
             "gemini-3.5-flash-lite": "supported",
         }
         for model, expected in expectations.items():
@@ -1996,7 +2426,20 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             _ACTIVE_MODEL_ROLE, _FREE_MODEL_ROLE, _IMAGE_CAPABILITY_ROLE,
         )
 
-        dlg = SettingsDialog(dict(DEFAULTS))
+        settings = dict(
+            DEFAULTS,
+            groq_key="groq-key",
+            flm_base="http://localhost:3001/v1",
+            flm_key="flm-key",
+            provider_models={
+                "groq": ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
+                "freellm": [
+                    "gemini-3.1-flash-lite",
+                    "gemini-3.1-flash-lite-free",
+                ],
+            },
+        )
+        dlg = SettingsDialog(settings)
         try:
             items = {
                 dlg.z_model.itemData(i): dlg.z_model.itemText(i)
@@ -2026,67 +2469,13 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             self.assertTrue(dlg.z_model.itemData(
                 text_index, _ACTIVE_MODEL_ROLE))
             self.assertTrue(dlg.z_model.itemData(
-                dlg.z_model.findData("space-bunny-free"), _FREE_MODEL_ROLE))
+                dlg.z_model.findData("flm:gemini-3.1-flash-lite-free"),
+                _FREE_MODEL_ROLE))
             self.assertEqual(
                 dlg.values()["model"], "groq:openai/gpt-oss-20b")
         finally:
             dlg.close()
 
-    def test_model_picker_favorites_are_grouped_toggleable_and_persisted(self):
-        from PySide6.QtCore import QPoint, Qt
-        from PySide6.QtTest import QTest
-        from main import SettingsDialog
-        from config.settings import DEFAULTS
-        from ui.settings_dialog import (
-            _FAVORITE_MODEL_ROLE, _MODEL_GROUP_ROLE, _PROVIDER_LABEL_ROLE,
-        )
-
-        dlg = SettingsDialog(dict(
-            DEFAULTS,
-            model="groq:openai/gpt-oss-20b",
-            model_favorites=["space-bunny-free"],
-        ))
-        try:
-            combo = dlg.z_model
-            self.assertEqual(combo.itemText(0), "── ★ Favorites ──")
-            favorite_index = combo.findData("space-bunny-free")
-            self.assertTrue(combo.itemData(
-                favorite_index, _FAVORITE_MODEL_ROLE))
-            self.assertEqual(
-                combo.itemData(favorite_index, _PROVIDER_LABEL_ROLE),
-                "OpenCode bridge free",
-            )
-            self.assertEqual(
-                combo.itemData(0, _MODEL_GROUP_ROLE),
-                "── ★ Favorites ──",
-            )
-            self.assertEqual(
-                [combo.itemData(i) for i in range(1, combo.count())
-                 if combo.itemData(i) == "space-bunny-free"],
-                ["space-bunny-free", "space-bunny-free"],
-            )
-
-            dlg.show()
-            combo.showPopup()
-            view = combo.view()
-            row = view.visualRect(combo.model().index(favorite_index, 0))
-            QTest.mouseClick(
-                view.viewport(),
-                Qt.MouseButton.LeftButton,
-                pos=QPoint(row.right() - 14, row.center().y()),
-            )
-            QTest.qWait(20)
-            self.assertEqual(dlg.values()["model_favorites"], [])
-            self.assertEqual(dlg._current_model(), "groq:openai/gpt-oss-20b")
-            self.assertEqual(combo.itemText(0), "── ✦ Gemini — needs a Gemini key ──")
-
-            dlg._on_model_favorite_clicked("space-bunny-free")
-            self.assertEqual(
-                dlg.values()["model_favorites"], ["space-bunny-free"])
-            self.assertEqual(combo.itemText(0), "── ★ Favorites ──")
-            self.assertEqual(dlg._current_model(), "groq:openai/gpt-oss-20b")
-        finally:
-            dlg.close()
 
     def test_image_translation_blocks_known_text_only_model(self):
         from unittest import mock
@@ -2099,38 +2488,12 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
             groq_key="test-key",
         )
         with mock.patch(
-            "translators.opencode_compat.translate_image",
+            "translators.openai_compat.translate_image",
         ) as translate_image:
             with self.assertRaisesRegex(RuntimeError, "text-only"):
                 chain.translate_image(Image.new("RGB", (10, 10)), settings)
         translate_image.assert_not_called()
 
-    def test_bridge_image_sends_image_part(self):
-        from unittest import mock
-        from translators import opencode_bridge
-        from PIL import Image
-
-        def fake_post(url, json=None, headers=None, timeout=None, stream=None):
-            msgs = json["messages"]
-            kinds = [str(part.get("type")) for part in msgs[1]["content"]]
-            assert "image_url" in kinds, kinds
-
-            class Resp:
-                status_code = 200
-                text = ""
-                def iter_lines(self):
-                    yield b'data: {"choices":[{"delta":{"content":"img"},"finish_reason":null}]}'
-                    yield b'data: [DONE]'
-                def close(self):
-                    pass
-            return Resp()
-
-        with mock.patch("translators.opencode_bridge.requests.post",
-                        side_effect=fake_post):
-            self.assertEqual(
-                opencode_bridge.translate_image(
-                    Image.new("RGB", (10, 10)), "space-bunny-free"),
-                "img")
 
     def test_cf_chain_uses_bare_id_and_names_badge(self):
         from unittest import mock
@@ -2139,7 +2502,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         s.update({"model": "cf:@cf/meta/llama-3.3-70b-instruct-fp8-fast",
                   "cloudflare_account_id": "ACC",
                   "cloudflare_token": "k"})
-        with mock.patch("translators.opencode_compat.translate",
+        with mock.patch("translators.openai_compat.translate",
                         return_value="cf-ar") as t:
             self.assertEqual(
                 chain.translate("cadence", s),
@@ -2196,7 +2559,7 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
     def test_groq_compat_lists_only_text_models(self):
         from unittest import mock
         import requests
-        from translators import opencode_compat
+        from translators import openai_compat
         resp = mock.Mock()
         resp.raise_for_status.return_value = None
         resp.json.return_value = {"data": [
@@ -2207,129 +2570,13 @@ class TestOnlyWorkingModelsAreOffered(_GuiCase):
         ]}
         with mock.patch.object(requests, "get", return_value=resp):
             self.assertEqual(
-                opencode_compat.list_models("https://x/v1", "k"),
+                openai_compat.list_models("https://x/v1", "k"),
                 ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"])
 
-    def test_effort_preset_per_model_then_default_then_future(self):
-        from translators.opencode_bridge import effort_for
-        s = {"effort_default": "low",
-             "effort_levels": {"mimo-v2.6-flash-free": "minimal"}}
-        self.assertEqual(
-            effort_for("mimo-v2.6-flash-free", s), "minimal")  # override wins
-        self.assertEqual(
-            effort_for("space-bunny-free", s), "low")  # default applies
-        self.assertEqual(
-            effort_for("some-future-model-free", s), "low")  # future: default
-        self.assertEqual(
-            effort_for("longcat-2.5-preview-free", s),
-            "minimal",
-        )
-        self.assertEqual(
-            effort_for(
-                "longcat-2.5-preview-free",
-                {"effort_default": "low",
-                 "effort_levels": {"longcat-2.5-preview-free": "medium"}},
-            ),
-            "medium",
-        )
-        self.assertEqual(effort_for("mimo-v2.6-flash-free", {}), "medium")
-        self.assertEqual(
-            effort_for("mimo-v2.6-flash-free",
-                       {"effort_levels": {"mimo-v2.6-flash-free": "bogus"}}),
-            "medium")  # invalid ignored
 
-    def test_effort_budget_never_below_translation_need(self):
-        from translators.opencode_bridge import effort_budget
-        self.assertEqual(effort_budget("hi", "minimal"), 512)  # cap bites
-        long_text = "x" * 4000
-        self.assertGreaterEqual(effort_budget(long_text, "minimal"), 8000)
 
-    def test_bridge_sends_effort_and_capped_budget(self):
-        from unittest import mock
-        import translators.opencode_bridge as b
 
-        seen = {}
 
-        def fake_post(url, json=None, headers=None, timeout=None, stream=None):
-            seen.update(json)
-
-            class Resp:
-                status_code = 200
-                text = ""
-                def iter_lines(self):
-                    yield b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}'
-                    yield b'data: [DONE]'
-                def close(self):
-                    pass
-            return Resp()
-
-        settings = {"effort_default": "minimal", "effort_levels": {}}
-        with mock.patch("translators.opencode_bridge.requests.post",
-                        side_effect=fake_post):
-            self.assertEqual(
-                b.translate("hi", "mimo-v2.6-flash-free", settings=settings),
-                "ok")
-        self.assertEqual(seen["reasoning_effort"], "minimal")
-        self.assertEqual(seen["max_tokens"], 512)
-
-    def test_longcat_uses_its_measured_minimal_effort_default(self):
-        from unittest import mock
-        import translators.opencode_bridge as bridge
-
-        sent_payload = {}
-
-        def fake_post(_url, json=None, **_kwargs):
-            sent_payload.update(json)
-
-            class Response:
-                status_code = 200
-                text = ""
-
-                def iter_lines(self):
-                    yield b'data: {"choices":[{"delta":{"content":"translation"}}]}'
-                    yield b"data: [DONE]"
-
-                def close(self):
-                    pass
-
-            return Response()
-
-        with mock.patch(
-            "translators.opencode_bridge.requests.post", side_effect=fake_post,
-        ):
-            self.assertEqual(
-                bridge.translate("hi", "longcat-2.5-preview-free"),
-                "translation",
-            )
-        self.assertEqual(sent_payload["reasoning_effort"], "minimal")
-        self.assertEqual(sent_payload["max_tokens"], 512)
-
-    def test_effort_override_reaches_settings_values(self):
-        from main import SettingsDialog
-        from config.settings import DEFAULTS
-        dlg = SettingsDialog(dict(DEFAULTS))
-        try:
-            self.assertEqual(dlg.values()["effort_default"], "medium")
-            self.assertEqual(dlg.values()["effort_levels"], {})
-            self.assertEqual(
-                dlg.effort_combos["longcat-2.5-preview-free"].currentText(),
-                "minimal",
-            )
-            dlg.effort_combos["longcat-2.5-preview-free"].setCurrentText(
-                "medium")
-            self.assertEqual(
-                dlg.values()["effort_levels"],
-                {"longcat-2.5-preview-free": "medium"},
-            )
-            dlg.effort_combos["longcat-2.5-preview-free"].setCurrentText(
-                "minimal")
-            dlg.effort_combos["mimo-v2.6-flash-free"].setCurrentText("minimal")
-            self.assertEqual(dlg.values()["effort_levels"],
-                             {"mimo-v2.6-flash-free": "minimal"})
-            dlg.effort_default_combo.setCurrentText("low")
-            self.assertEqual(dlg.values()["effort_default"], "low")
-        finally:
-            dlg.close()
 
     def test_settings_dialog_remembers_its_size(self):
         from unittest import mock
@@ -2867,7 +3114,7 @@ def mock_chain_translate(*args, **kwargs):
 
 
 @contextlib.contextmanager
-def mock_opencode_settings(data: dict):
+def mock_settings_file(data: dict):
     """Point config.settings at a throwaway settings file for one load()."""
     from config import settings as settings_module
     directory = tempfile.mkdtemp(prefix="harmony-settings-")
@@ -2955,29 +3202,6 @@ class TestChain(unittest.TestCase):
         self.assertEqual(chain.dehyphenate("no hyphens\nhere"), "no hyphens\nhere")
         self.assertEqual(chain.dehyphenate("C-\ndur"), "C-dur")
 
-    def test_chain_normalizes_raw_latex_from_streaming_bridge(self):
-        from unittest import mock
-        from translators import chain
-
-        settings = dict(DEFAULTS, model="mimo-v2.6-flash-free")
-        leaked = "المثال الموسيقي:\n" + r"begin{array}|c|c|} \hline \text{G Clef}"
-        with (
-            mock.patch(
-                "translators.opencode_bridge.stream",
-                return_value=iter([leaked]),
-            ) as stream,
-            mock.patch(
-                "translators.opencode_bridge.translate",
-                side_effect=AssertionError("normalization should avoid retry"),
-            ),
-        ):
-            events = list(chain.translate_stream("source", settings))
-
-        self.assertEqual(stream.call_count, 1)
-        self.assertIn("المثال الموسيقي", events[-1][1])
-        self.assertIn("G Clef", events[-1][1])
-        self.assertNotIn("\\", events[-1][1])
-        self.assertTrue(all("\\" not in event[1] for event in events))
 
     def test_glossary_word_boundaries(self):
         out = fallback.glossary_partial("tones in Norton and the dominant chord")
@@ -3041,49 +3265,8 @@ class TestChain(unittest.TestCase):
             with self.assertRaises(Exception):
                 mymemory.translate("hello")
 
-    def test_chain_uses_second_free_before_glossary(self):
-        from unittest import mock
-        s = dict(DEFAULTS)
-        s["model"] = "space-bunny-free"
-        with mock.patch("translators.opencode_bridge.stream",
-                        side_effect=RuntimeError("403")):
-            with mock.patch("translators.opencode_bridge.translate",
-                            side_effect=RuntimeError("403")):
-                with mock.patch("translators.fallback.gtx_translate",
-                                side_effect=ConnectionError("down")):
-                    with mock.patch("translators.mymemory.translate", return_value="mm-ar"):
-                        arabic, badge = chain.translate("cadence", s)
-                        self.assertEqual(arabic, "mm-ar")
-                        self.assertIn("Free service (alt)", badge)
 
-    def test_probe_reports_mixed_results(self):
-        """Quick probe: one tiny check of the chosen model only, no slow
-        full-passage translations, no fallback-service rows."""
-        from unittest import mock
-        from translators import probe
-        s = {"model": "space-bunny-free"}
-        with mock.patch("translators.opencode_bridge.translate",
-                        return_value="OK") as t:
-            results = probe.probe_all(s)
-        by_name = {n: (ok, d) for n, ok, d in results}
-        self.assertTrue(by_name["★ Your model (space-bunny-free)"][0])
-        # One tiny check only: chosen-model row plus its hint, nothing else.
-        self.assertEqual(sorted(by_name),
-                         ["★ Your model (space-bunny-free)", "💡 Hint"])
-        self.assertEqual(t.call_args.args[0], probe.PROBE_TEXT)
-        self.assertLessEqual(t.call_args.kwargs.get("max_tokens", 31), 30)
-        text = probe.format_results(results)
-        self.assertRegex(text, r"✅ space-bunny-free — OK — \d+\.\ds")
-        self.assertNotIn("Hint", text)
 
-    def test_probe_hints_mismatched_key(self):
-        from translators import probe
-        results = probe.probe_all({"model": "space-bunny-free",
-                                   "gemini_key": "k"})
-        hints = [d for n, ok, d in results if n == "💡 Hint"]
-        self.assertTrue(hints)
-        self.assertIn("Gemini key", hints[0])
-        self.assertIn("space-bunny-free", hints[0])
 
     def test_probe_selected_gemini_without_key(self):
         from translators import probe
@@ -3118,79 +3301,22 @@ class TestChain(unittest.TestCase):
                 fallback.gtx_translate("hello")
             self.assertEqual(g.call_count, 2)
 
-    def test_opencode_zen_never_offers_an_id_from_the_live_catalog(self):
-        """The Zen catalog still lists ids that answer 403, so it is not read.
 
-        Offering a model that cannot answer costs the user a failed translation
-        and a confusing badge; the one free model that does work is listed in
-        registry.ZEN_FREE instead.
-        """
-        from translators import opencode_zen, registry
-        self.assertFalse(hasattr(opencode_zen, "list_models"))
-        self.assertEqual(registry.ZEN_FREE, ["space-bunny-free"])
 
-    def test_opencode_zen_parses_reply(self):
-        import requests
-        from unittest import mock
-        from translators import opencode_zen
-        resp = mock.Mock()
-        resp.raise_for_status.return_value = None
-        resp.json.return_value = {"choices": [{"message": {"content": "  نص عربي  "}}]}
-        with mock.patch.object(requests, "post", return_value=resp) as p:
-            self.assertEqual(opencode_zen.translate("x", "m"), "نص عربي")
-            url = p.call_args[0][0]
-            self.assertIn("opencode.ai/zen/v1/chat/completions", url)
 
-    def test_opencode_zen_sends_no_auth_header(self):
-        import requests
-        from unittest import mock
-        from translators import opencode_zen
-        resp = mock.Mock()
-        resp.raise_for_status.return_value = None
-        resp.json.return_value = {"choices": [{"message": {"content": "نص"}}]}
-        with mock.patch.object(requests, "post", return_value=resp) as post:
-            opencode_zen.translate("x", "space-bunny-free")
-        self.assertNotIn("headers", post.call_args.kwargs)
 
-    def test_opencode_zen_output_budget_scales_for_page_chunks(self):
-        import requests
-        from unittest import mock
-        from translators import opencode_zen
-        resp = mock.Mock()
-        resp.raise_for_status.return_value = None
-        resp.json.return_value = {"choices": [{
-            "message": {"content": "نص"}, "finish_reason": "stop"}]}
-        text = "source " * 500
-        with mock.patch.object(requests, "post", return_value=resp) as post:
-            opencode_zen.translate(text, "m")
-        self.assertGreaterEqual(
-            post.call_args.kwargs["json"]["max_tokens"],
-            len(text) * 2,
-        )
-
-    def test_opencode_zen_reports_truncated_generation(self):
-        import requests
-        from unittest import mock
-        from translators import opencode_zen
-        resp = mock.Mock()
-        resp.raise_for_status.return_value = None
-        resp.json.return_value = {"choices": [{
-            "message": {"content": "partial"}, "finish_reason": "length"}]}
-        with mock.patch.object(requests, "post", return_value=resp):
-            with self.assertRaisesRegex(RuntimeError, "reply was cut off"):
-                opencode_zen.translate("source", "m")
 
     def test_compatible_api_output_budget_scales_for_page_chunks(self):
         import requests
         from unittest import mock
-        from translators import opencode_compat
+        from translators import openai_compat
         resp = mock.Mock()
         resp.raise_for_status.return_value = None
         resp.json.return_value = {"choices": [{
             "message": {"content": "translation"}, "finish_reason": "stop"}]}
         text = "source " * 600
         with mock.patch.object(requests, "post", return_value=resp) as post:
-            opencode_compat.translate(text, "https://example.test/v1", "k", "m")
+            openai_compat.translate(text, "https://example.test/v1", "k", "m")
         self.assertGreaterEqual(
             post.call_args.kwargs["json"]["max_tokens"],
             len(text) * 2,
@@ -3199,19 +3325,19 @@ class TestChain(unittest.TestCase):
     def test_compatible_api_reports_truncated_generation(self):
         import requests
         from unittest import mock
-        from translators import opencode_compat
+        from translators import openai_compat
         resp = mock.Mock()
         resp.raise_for_status.return_value = None
         resp.json.return_value = {"choices": [{
             "message": {"content": "partial"}, "finish_reason": "length"}]}
         with mock.patch.object(requests, "post", return_value=resp):
             with self.assertRaisesRegex(RuntimeError, "reply was cut off"):
-                opencode_compat.translate("source", "https://example.test/v1", "k", "m")
+                openai_compat.translate("source", "https://example.test/v1", "k", "m")
 
     def test_compatible_api_retries_rate_limit_after_retry_after(self):
         import requests
         from unittest import mock
-        from translators import opencode_compat
+        from translators import openai_compat
 
         limited = mock.Mock()
         limited.status_code = 429
@@ -3223,8 +3349,8 @@ class TestChain(unittest.TestCase):
             "message": {"content": "translation"}, "finish_reason": "stop"}]}
         with mock.patch.object(
                 requests, "post", side_effect=[limited, success]) as post:
-            with mock.patch("translators.opencode_compat.time.sleep") as sleep:
-                result = opencode_compat.translate(
+            with mock.patch("translators.openai_compat.time.sleep") as sleep:
+                result = openai_compat.translate(
                     "source", "https://example.test/v1", "k", "m")
 
         self.assertEqual(result, "translation")
@@ -3234,18 +3360,18 @@ class TestChain(unittest.TestCase):
     def test_compatible_api_stops_if_retry_after_exceeds_wait_limit(self):
         import requests
         from unittest import mock
-        from translators import opencode_compat
+        from translators import openai_compat
 
         limited = mock.Mock()
         limited.status_code = 429
         limited.headers = {"Retry-After": "120"}
         with mock.patch.object(
                 requests, "post", return_value=limited) as post:
-            with mock.patch("translators.opencode_compat.time.sleep") as sleep:
+            with mock.patch("translators.openai_compat.time.sleep") as sleep:
                 with self.assertRaisesRegex(
                     RuntimeError, "asks for a 120-second wait"
                 ):
-                    opencode_compat.translate(
+                    openai_compat.translate(
                         "source", "https://example.test/v1", "k", "m")
 
         post.assert_called_once()
@@ -3255,7 +3381,7 @@ class TestChain(unittest.TestCase):
         import requests
         from PIL import Image
         from unittest import mock
-        from translators import opencode_compat
+        from translators import openai_compat
 
         limited = mock.Mock()
         limited.status_code = 429
@@ -3269,8 +3395,8 @@ class TestChain(unittest.TestCase):
         }]}
         with mock.patch.object(
                 requests, "post", side_effect=[limited, success]) as post:
-            with mock.patch("translators.opencode_compat.time.sleep"):
-                result = opencode_compat.translate_image(
+            with mock.patch("translators.openai_compat.time.sleep"):
+                result = openai_compat.translate_image(
                     Image.new("RGB", (8, 8), "white"),
                     "https://example.test/v1", "k", "vision-model",
                 )
@@ -3278,32 +3404,6 @@ class TestChain(unittest.TestCase):
         self.assertEqual(result, "image translation")
         self.assertEqual(post.call_count, 2)
 
-    def test_chain_routes_single_choice(self):
-        from unittest import mock
-        # Bridge model chosen (space-bunny served via bridge)
-        s = dict(DEFAULTS)
-        s.update({"model": "space-bunny-free"})
-        with mock.patch("translators.opencode_bridge.stream",
-                        return_value=iter(["zen-ar"])):
-            with mock.patch("translators.fallback.gtx_translate",
-                            side_effect=AssertionError("should not reach free")):
-                self.assertEqual(chain.translate("cadence", s),
-                                 ("zen-ar", "◈ chosen bridge: space-bunny"))
-        # Gemini model chosen
-        s = dict(DEFAULTS)
-        s.update({"model": "gemini-2.0-flash", "gemini_key": "k"})
-        with mock.patch("translators.gemini.translate", return_value="gem-ar"):
-            self.assertEqual(chain.translate("cadence", s),
-                             ("gem-ar", "✦ chosen: gemini-2.0-flash"))
-        # Chosen bridge model is attempted via bridge, not free layers
-        s = dict(DEFAULTS)
-        s.update({"model": "mimo-v2.6-flash-free"})
-        with mock.patch("translators.opencode_bridge.stream",
-                        return_value=iter(["bridge-ar"])):
-            with mock.patch("translators.fallback.gtx_translate",
-                            side_effect=AssertionError("should not reach free")):
-                self.assertEqual(chain.translate("cadence", s),
-                                 ("bridge-ar", "◈ chosen bridge: mimo-v2.6-flash"))
 
     def test_chain_retries_when_model_returns_the_wrong_language(self):
         from unittest import mock
@@ -3529,128 +3629,10 @@ class TestChain(unittest.TestCase):
         self.assertEqual(
             translate.call_args.kwargs["source_language"], "auto")
 
-    def test_chain_routes_opencode_cli_model(self):
-        from unittest import mock
 
-        settings = dict(DEFAULTS)
-        settings["model"] = "opencode-cli:opencode/glm-5.2"
-        with mock.patch(
-            "translators.opencode_cli.translate", return_value="ترجمة"
-        ) as translate:
-            result = chain.translate("cadence", settings)
-        self.assertEqual(result, ("ترجمة", "◈ chosen: OpenCode CLI (opencode/glm-5.2)"))
-        self.assertEqual(
-            translate.call_args.args[:2],
-            ("cadence", "opencode/glm-5.2"),
-        )
 
-    def test_opencode_cli_lists_provider_models(self):
-        from unittest import mock
-        from translators import opencode_cli
 
-        completed = mock.Mock(
-            returncode=0,
-            stdout=(
-                "opencode/glm-5.2\n"
-                "anthropic/claude-sonnet-4\n"
-                "opencode/glm-5.2\n"
-                "Models cache is ready\n"
-            ),
-            stderr="",
-        )
-        self.assertEqual(
-            opencode_cli._hidden_console_options(),
-            (
-                {"creationflags": opencode_cli.subprocess.CREATE_NO_WINDOW}
-                if opencode_cli.os.name == "nt"
-                else {}
-            ),
-        )
-        with (
-            mock.patch.object(
-                opencode_cli, "find_executable", return_value="opencode"),
-            mock.patch.object(
-                opencode_cli, "_hidden_console_options",
-                return_value={"creationflags": 123},
-            ),
-            mock.patch.object(
-                opencode_cli.subprocess, "run", return_value=completed,
-            ) as run,
-        ):
-            self.assertEqual(
-                opencode_cli.list_models(),
-                ["opencode/glm-5.2", "anthropic/claude-sonnet-4"],
-            )
-        self.assertEqual(run.call_args.kwargs["creationflags"], 123)
 
-    def test_opencode_cli_finds_desktop_bundled_executable(self):
-        from pathlib import Path
-        from unittest import mock
-        from translators import opencode_cli
-
-        install_root = Path(r"C:\OpenCode")
-        expected = str(
-            install_root / "Programs" / "@opencodedesktop" / "resources"
-            / "opencode-cli.exe"
-        )
-        with mock.patch.object(opencode_cli.shutil, "which", return_value=None):
-            with mock.patch.dict(
-                    opencode_cli.os.environ,
-                    {"LOCALAPPDATA": str(install_root)}):
-                with mock.patch.object(Path, "is_file", return_value=True):
-                    self.assertEqual(opencode_cli.find_executable(), expected)
-
-    def test_opencode_cli_runs_tools_disabled_agent_and_parses_output(self):
-        import json
-        from unittest import mock
-        from translators import opencode_cli
-
-        stdout = "\n".join([
-            json.dumps({"type": "step_start", "part": {}}),
-            json.dumps({"type": "text", "part": {"type": "text", "text": "  الترجمة  "}}),
-            json.dumps({"type": "step_finish", "part": {}}),
-        ])
-
-        def run(command, **kwargs):
-            config_path = os.path.join(kwargs["cwd"], "opencode.json")
-            with open(config_path, encoding="utf-8") as config_file:
-                config = json.load(config_file)
-            agent = config["agent"][opencode_cli.AGENT_NAME]
-            self.assertEqual(agent["tools"], {"*": False})
-            self.assertEqual(agent["permission"]["bash"], "deny")
-            self.assertEqual(agent["permission"]["edit"], "deny")
-            self.assertIn("professional translator", agent["prompt"])
-            self.assertEqual(command[command.index("--model") + 1], "opencode/glm-5.2")
-            self.assertIn("Translate this passage", kwargs["input"])
-            return mock.Mock(returncode=0, stdout=stdout, stderr="")
-
-        with mock.patch.object(opencode_cli, "find_executable", return_value="opencode"):
-            with mock.patch.object(opencode_cli.subprocess, "run", side_effect=run):
-                self.assertEqual(
-                    opencode_cli.translate("cadence", "opencode/glm-5.2"),
-                    "الترجمة",
-                )
-
-    def test_registry_routes_opencode_cli_models_without_an_api_key(self):
-        from unittest import mock
-        from translators import registry
-
-        model = "opencode-cli:anthropic/claude-sonnet-4"
-        self.assertEqual(registry.provider_of(model), "opencode_cli")
-        with mock.patch("translators.opencode_cli.find_executable", return_value="opencode"):
-            self.assertEqual(registry.availability(model, {}), (True, ""))
-        # The engine still works when already selected, but the picker
-        # offers Gemini + bridge only.
-        with mock.patch("translators.opencode_cli.find_executable", return_value="opencode"):
-            rows = registry.model_groups(
-                {"opencode_cli_models": ["anthropic/claude-sonnet-4"]},
-                live_cli=["opencode/glm-5.2"],
-            )
-        labels = [label for label, _ in rows]
-        self.assertNotIn("opencode-cli:anthropic/claude-sonnet-4", labels)
-        self.assertNotIn("opencode-cli:opencode/glm-5.2", labels)
-        self.assertIn(registry.BRIDGE_HDR, labels)
-        self.assertNotIn(registry.CLI_HDR, labels)
 
     def test_chain_passes_custom_instructions_to_selected_ai_model(self):
         from unittest import mock
@@ -3712,7 +3694,7 @@ class TestChain(unittest.TestCase):
             }],
         )
         with mock.patch(
-            "translators.opencode_compat.stream_translate",
+            "translators.openai_compat.stream_translate",
             return_value=iter(["translated"]),
         ) as text_call:
             result = list(chain.translate_stream(
@@ -3730,7 +3712,7 @@ class TestChain(unittest.TestCase):
                 return_value="supported",
             ),
             mock.patch(
-                "translators.opencode_compat.translate_image",
+                "translators.openai_compat.translate_image",
                 return_value="translated image",
             ) as image_call,
         ):
@@ -3784,7 +3766,7 @@ class TestChain(unittest.TestCase):
             }],
         )
         with mock.patch(
-            "translators.opencode_compat.stream_translate",
+            "translators.openai_compat.stream_translate",
             return_value=iter(["translated"]),
         ) as text_call:
             result = list(chain.translate_stream(
@@ -3802,7 +3784,7 @@ class TestChain(unittest.TestCase):
                 return_value="supported",
             ),
             mock.patch(
-                "translators.opencode_compat.translate_image",
+                "translators.openai_compat.translate_image",
                 return_value="translated image",
             ) as image_call,
         ):
@@ -3958,7 +3940,7 @@ class TestChain(unittest.TestCase):
         completed = []
         worker.done.connect(lambda text, badge: completed.append((text, badge)))
         with mock.patch(
-            "translators.opencode_compat.stream_translate_image",
+            "translators.openai_compat.stream_translate_image",
             return_value=iter(["trans", "lated"]),
         ) as stream_translate_image:
             worker.run()
@@ -3972,44 +3954,6 @@ class TestChain(unittest.TestCase):
             args[1:], ("https://api.example/v1", "test-key", "vendor/vision-model"))
         self.assertEqual(kwargs["source_language"], "auto")
 
-    def test_bridge_image_request_uses_native_chat_image_content(self):
-        from PIL import Image
-        from unittest import mock
-        from translators import opencode_bridge
-
-        class FakeStream:
-            def iter_lines(self):
-                import json
-                event = {"choices": [{
-                    "delta": {"content": "translated"},
-                    "finish_reason": None,
-                }]}
-                yield f"data: {json.dumps(event)}".encode()
-                yield b"data: [DONE]"
-
-            def close(self):
-                pass
-
-        settings = {"effort_default": "high"}
-        with mock.patch.object(
-            opencode_bridge, "_open_stream", return_value=FakeStream(),
-        ) as open_stream:
-            result = opencode_bridge.translate_image(
-                Image.new("RGB", (80, 40)),
-                "mimo-v2.6-flash-free",
-                source_language="en",
-                target_language="it",
-                settings=settings,
-            )
-
-        self.assertEqual(result, "translated")
-        payload = open_stream.call_args.args[1]
-        self.assertTrue(payload["stream"])
-        self.assertEqual(payload["max_tokens"], 4096)
-        image_part = payload["messages"][1]["content"][1]
-        self.assertEqual(image_part["type"], "image_url")
-        self.assertTrue(
-            image_part["image_url"]["url"].startswith("data:image/jpeg;base64,"))
 
     def test_nonheading_bold_is_removed_after_model_translation(self):
         from unittest import mock
@@ -4030,18 +3974,25 @@ class TestChain(unittest.TestCase):
         )
 
         settings.update({
-            "model": "space-bunny-free",
+            "model": "custom:local::model",
+            "custom_providers": [{
+                "id": "local",
+                "name": "Local",
+                "base_url": "https://example.test/v1",
+                "api_key": "test-key",
+                "model": "model",
+                "enabled": True,
+            }],
             "model_instructions": "Output plain text only.",
         })
         with mock.patch(
-            "translators.opencode_bridge.stream",
-            return_value=iter(["ترجمة"]),
-        ) as stream:
+            "translators.openai_compat.translate",
+            return_value="ترجمة",
+        ) as translate:
             self.assertEqual(chain.translate("source", settings)[0], "ترجمة")
-        self.assertEqual(
-            stream.call_args.kwargs["instructions"],
-            chain._translation_instructions(settings, "space-bunny-free"),
-        )
+        self.assertEqual(translate.call_args.kwargs["instructions"],
+                         chain._translation_instructions(
+                             settings, "custom:local::model"))
 
     def test_translation_prompt_uses_auto_source_and_selected_target(self):
         from unittest import mock
@@ -4331,38 +4282,7 @@ class TestChain(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Could not translate into French"):
                     chain.translate("source", settings)
 
-    def test_selected_opencode_model_is_not_replaced_by_gemini(self):
-        from unittest import mock
-        s = dict(DEFAULTS)
-        s.update({"model": "fledge-alpha-free", "gemini_key": "k"})
-        with mock.patch("translators.opencode_bridge.stream",
-                        side_effect=RuntimeError("403 free tier")) as selected_stream:
-            with mock.patch("translators.opencode_bridge.translate",
-                            side_effect=RuntimeError("403 free tier")) as selected:
-                with mock.patch("translators.gemini.translate",
-                                side_effect=AssertionError("must not switch models")):
-                    with mock.patch("translators.fallback.gtx_translate",
-                                    return_value="free-ar"):
-                        arabic, badge = chain.translate("cadence", s)
-        self.assertEqual(arabic, "free-ar")
-        self.assertEqual(selected.call_count, 1)
-        self.assertIn("Free service", badge)
-        self.assertIn("fledge-alpha-free", badge)
 
-    def test_chain_marks_failed_chosen_model(self):
-        from unittest import mock
-        s = dict(DEFAULTS)
-        s.update({"model": "fledge-alpha-free"})
-        with mock.patch("translators.opencode_bridge.stream",
-                        side_effect=RuntimeError("401")):
-            with mock.patch("translators.opencode_bridge.translate",
-                            side_effect=RuntimeError("401")):
-                with mock.patch("translators.fallback.gtx_translate", return_value="free-ar"):
-                    arabic, badge = chain.translate("cadence", s)
-                    self.assertEqual(arabic, "free-ar")
-                    self.assertIn("⚠ chosen model", badge)
-                    self.assertIn("fledge-alpha-free", badge)
-                    self.assertIn("401", badge)
 
     def test_chunk_short(self):
         self.assertEqual(chain.chunk_text("hello"), ["hello"])
@@ -4507,42 +4427,8 @@ class TestChain(unittest.TestCase):
             chain._translation_instructions(settings),
         )
 
-    def test_keyless_opencode_model_is_attempted(self):
-        """space-bunny-free answers with no Authorization header at all, so the
-        chain must reach for it and must not fall through to a free service."""
-        from unittest import mock
-        s = dict(DEFAULTS)
-        s.update({"model": "space-bunny-free"})
-        with mock.patch("translators.opencode_bridge.stream",
-                        return_value=iter(["zen-ar"])) as t:
-            with mock.patch("translators.fallback.gtx_translate",
-                            side_effect=AssertionError("must not skip to free")):
-                arabic, badge = chain.translate("cadence", s)
-        self.assertEqual(arabic, "zen-ar")
-        self.assertIn("\u25c8 chosen bridge: space-bunny", badge)
-        self.assertEqual(t.call_args[0][1], "space-bunny-free")
 
-    def test_opencode_zen_falls_back_to_reasoning_content(self):
-        import requests
-        from unittest import mock
-        from translators import opencode_zen
-        resp = mock.Mock()
-        resp.raise_for_status.return_value = None
-        resp.json.return_value = {"choices": [{"message": {
-            "content": "", "reasoning_content": "  the translation  "}}]}
-        with mock.patch.object(requests, "post", return_value=resp):
-            self.assertEqual(opencode_zen.translate("x", "m"), "the translation")
 
-    def test_opencode_zen_raises_on_truly_empty_reply(self):
-        import requests
-        from unittest import mock
-        from translators import opencode_zen
-        resp = mock.Mock()
-        resp.raise_for_status.return_value = None
-        resp.json.return_value = {"choices": [{"message": {"content": "  "}}]}
-        with mock.patch.object(requests, "post", return_value=resp):
-            with self.assertRaises(RuntimeError):
-                opencode_zen.translate("x", "m")
 
     @staticmethod
     def _gemini_response(text="\u0639\u0631\u0628\u064a", status=200, finish="STOP"):
@@ -4690,39 +4576,7 @@ class TestChain(unittest.TestCase):
         badge = _merge_badges(["⚠ ✦ gemini-2.5-flash  ⚠ not your model (x failed)"] * 3)
         self.assertIn("not your model", badge)
 
-    def test_failed_opencode_model_does_not_switch_to_another_model(self):
-        from unittest import mock
-        from translators import chain
-        s = dict(DEFAULTS)
-        s.update({"model": "nemotron-3-ultra-free"})
-        with mock.patch("translators.opencode_bridge.stream",
-                        side_effect=RuntimeError("403 Forbidden")):
-            with mock.patch("translators.opencode_bridge.translate",
-                            side_effect=RuntimeError("403 Forbidden")) as selected:
-                with mock.patch("translators.fallback.gtx_translate",
-                                return_value="free-ar"):
-                    arabic, badge = chain.translate("cadence", s)
-        self.assertEqual(arabic, "free-ar")
-        self.assertEqual(selected.call_count, 1)
-        self.assertEqual(selected.call_args.args[1], "nemotron-3-ultra-free")
-        self.assertIn("Free service", badge)
-        self.assertIn("nemotron-3-ultra-free", badge)
 
-    def test_a_failed_free_model_never_becomes_a_paid_one(self):
-        """A free id that fails must not be silently swapped for a paid id."""
-        from unittest import mock
-        from translators import chain
-        s = dict(DEFAULTS)
-        s.update({"model": "nemotron-3-ultra-free"})
-        with mock.patch("translators.opencode_bridge.stream",
-                        side_effect=RuntimeError("403 free tier")):
-            with mock.patch("translators.opencode_bridge.translate",
-                            side_effect=RuntimeError("403 free tier")) as selected:
-                with mock.patch("translators.fallback.gtx_translate",
-                                return_value="free-ar"):
-                    chain.translate("cadence", s)
-        self.assertEqual(selected.call_count, 1)
-        self.assertEqual(selected.call_args.args[1], "nemotron-3-ultra-free")
 
     def test_openai_compatible_is_never_attempted_twice(self):
         """The dead retry removed ~20s of latency before the free layers."""
@@ -4730,7 +4584,7 @@ class TestChain(unittest.TestCase):
         s = dict(DEFAULTS)
         s.update({"model": "vendor/model", "openai_base": "https://x/api/v1",
                   "openai_key": "k", "openai_model": "vendor/model"})
-        with mock.patch("translators.opencode_compat.translate",
+        with mock.patch("translators.openai_compat.translate",
                         side_effect=RuntimeError("401")) as t:
             with mock.patch("translators.fallback.gtx_translate",
                             return_value="free-ar"):
@@ -4796,45 +4650,7 @@ class TestChain(unittest.TestCase):
         self.assertEqual(slept.call_count, 0)
         self.assertEqual(post.call_args.kwargs["timeout"], 12)
 
-    def test_gemini_timeout_does_not_switch_to_opencode_model(self):
-        from unittest import mock
-        s = dict(DEFAULTS)
-        s.update({"model": "gemini-3.5-flash-lite", "gemini_key": "k",
-                  "source_language": "en", "target_language": "it"})
-        with mock.patch(
-                "translators.gemini.translate",
-                side_effect=RuntimeError("Gemini request read timed out")) as gemini:
-            with mock.patch(
-                    "translators.opencode_cli.translate",
-                    side_effect=AssertionError("must not switch models")) as cli:
-                with mock.patch("translators.fallback.gtx_translate",
-                                return_value="traduzione"):
-                    arabic, badge = chain.translate("source text", s)
-        self.assertEqual(arabic, "traduzione")
-        self.assertIn("Free service", badge)
-        self.assertIn("gemini-3.5-flash-lite failed", badge)
-        gemini.assert_called_once()
-        cli.assert_not_called()
 
-    def test_gemini_timeout_does_not_start_a_second_gemini_request(self):
-        from unittest import mock
-        s = dict(DEFAULTS)
-        s.update({"model": "gemini-3.5-flash-lite", "gemini_key": "k"})
-        with mock.patch(
-                "translators.gemini.translate",
-                side_effect=RuntimeError("Gemini request read timed out")) as gemini:
-            with mock.patch(
-                    "translators.opencode_cli.find_executable",
-                    return_value="opencode"):
-                with mock.patch(
-                        "translators.opencode_cli.translate",
-                        side_effect=RuntimeError("OpenCode timed out")):
-                    with mock.patch(
-                            "translators.fallback.gtx_translate",
-                            return_value="هذه ترجمة مجانية للنص المطلوب."):
-                        arabic, _badge = chain.translate("source text", s)
-        self.assertEqual(arabic, "هذه ترجمة مجانية للنص المطلوب.")
-        self.assertEqual(gemini.call_count, 1)
 
     def test_gemini_error_names_the_model_and_status(self):
         """A bare HTTPError leaves the settings screen showing a URL. The user
@@ -4899,16 +4715,20 @@ class TestChain(unittest.TestCase):
             self.assertEqual(load(), {k: v for k, v in s.items()
                                       if k in DEFAULTS})
 
-    def test_settings_load_tolerates_legacy_bom_and_dead_keys(self):
+    def test_settings_load_migrates_retired_model_and_tolerates_bom(self):
         import tempfile
         from pathlib import Path
         from unittest import mock
+        from config.settings import DEFAULT_MODEL
+
         tmp = Path(tempfile.gettempdir()) / "ht_legacy.json"
-        tmp.write_bytes("\ufeff".encode("utf-8") + b'{"model":"space-bunny-free"}')
+        tmp.write_bytes(
+            "\ufeff".encode("utf-8")
+            + b'{"model":"opencode-cli:legacy/model"}')
         with mock.patch("config.settings.SETTINGS_PATH", tmp):
             from config.settings import DEFAULTS, load
             data = load()
-            self.assertEqual(data["model"], "space-bunny-free")
+            self.assertEqual(data["model"], DEFAULT_MODEL)
             self.assertNotIn("gemini_model", data)      # derived, never stored
             self.assertEqual(set(data), set(DEFAULTS))
         tmp.unlink(missing_ok=True)
@@ -4928,18 +4748,9 @@ class TestChain(unittest.TestCase):
     def test_registry_availability_matches_reality(self):
         from translators import registry
         no_keys = {}
-        # the one free model works with nothing
-        self.assertEqual(registry.availability("space-bunny-free", no_keys),
-                         (True, ""))
-        # a Zen id that left the free tier cannot be unlocked with a key,
-        # because there is no key field to fill in any more
-        ok, reason = registry.availability("deepseek-v4-flash-free", no_keys)
-        self.assertFalse(ok)
-        self.assertIn("space-bunny-free", reason)
-        # gemini needs its own key
         ok, reason = registry.availability("gemini-3.5-flash-lite", no_keys)
         self.assertFalse(ok)
-        self.assertIn("Gemini key", reason)
+        self.assertIn("Gemini API key", reason)
         # openai-compatible needs base + key + model
         ok, _ = registry.availability("vendor/model",
                                       {"openai_base": "b", "openai_key": "k",
@@ -4948,25 +4759,27 @@ class TestChain(unittest.TestCase):
         # a Gemini key lights up Gemini, and never a Zen id
         full = {"gemini_key": "k"}
         self.assertTrue(registry.availability("gemini-3.5-flash-lite", full)[0])
-        self.assertFalse(registry.availability("deepseek-v4-flash-free", full)[0])
+        self.assertFalse(registry.availability("vendor/model", full)[0])
 
     def test_registry_provider_routing(self):
         from translators import registry
         self.assertEqual(registry.provider_of("gemini-3.5-flash-lite"), "gemini")
-        # space-bunny-free is served via streaming bridge (verified 2026-10-08).
-        self.assertEqual(registry.provider_of("space-bunny-free"), "bridge")
-        self.assertEqual(registry.provider_of("mimo-v2.6-flash-free"), "bridge")
-        self.assertEqual(registry.provider_of("opencode-cli:opencode/glm-5.2"),
-                         "opencode_cli")
-        # an unoffered Zen-shaped id still belongs to Zen, so the reason the
-        # user sees is about the free tier and not about a base URL
-        self.assertEqual(registry.provider_of("deepseek-v4-flash-free"), "opencode")
+        self.assertEqual(registry.provider_of("groq:llama-model"), "groq")
+        self.assertEqual(registry.provider_of("cf:workers-model"), "cf")
+        self.assertEqual(registry.provider_of("mistral:model"), "mistral")
+        self.assertEqual(registry.provider_of("flm:auto"), "freellm")
+        self.assertEqual(
+            registry.provider_of("custom:local::model"), "custom_provider")
         self.assertEqual(registry.provider_of("vendor/model:free"), "custom")
         self.assertEqual(registry.provider_of(""), "custom")
 
     def test_registry_never_offers_retired_gemini_models(self):
         from translators import gemini, registry
-        models = registry.all_models()
+        gemini_models = gemini.known_models()
+        models = registry.all_models({
+            "gemini_key": "test-key",
+            "provider_models": {"gemini": gemini_models},
+        })
         self.assertNotIn("gemini-2.0-flash", models)   # 404
         self.assertNotIn("gemini-1.5-flash", models)   # retired
         self.assertIn("gemini-3.5-flash-lite", models)
@@ -5000,7 +4813,7 @@ class TestChain(unittest.TestCase):
         the offline glossary's partial translation rather than nothing.
         """
         from unittest import mock
-        from translators import gemini, mymemory, opencode_compat, fallback
+        from translators import gemini, mymemory, openai_compat, fallback
 
         offline = RuntimeError("network unreachable (simulated)")
 
@@ -5016,9 +4829,9 @@ class TestChain(unittest.TestCase):
             settings[key] = ""
 
         with mock.patch.object(gemini, "translate", side_effect=_no_network), \
-                mock.patch.object(opencode_compat, "translate",
+                mock.patch.object(openai_compat, "translate",
                                   side_effect=_no_network), \
-                mock.patch.object(opencode_compat, "translate_with_engine",
+                mock.patch.object(openai_compat, "translate_with_engine",
                                   side_effect=_no_network), \
                 mock.patch.object(fallback, "gtx_translate",
                                   side_effect=_no_network), \
@@ -7773,87 +7586,6 @@ class TestReaderZoom(_GuiCase):
             book.close_doc()
             book.close()
 
-    def test_settings_dialog_model_combo(self):
-        from unittest import mock
-        from main import SettingsDialog
-        from config.settings import DEFAULTS
-        from translators import opencode_cli, registry
-        s = dict(DEFAULTS)
-        s["model"] = "space-bunny-free"
-        dlg = SettingsDialog(s)
-        try:
-            self.assertTrue(dlg.z_model.isEditable())
-            self.assertEqual(dlg._current_model(), "space-bunny-free")
-            texts = [dlg.z_model.itemText(i) for i in range(dlg.z_model.count())]
-            models = {
-                dlg.z_model.itemData(i): dlg.z_model.itemText(i)
-                for i in range(dlg.z_model.count())
-                if isinstance(dlg.z_model.itemData(i), str)
-            }
-
-            # no dead ids anywhere in the picker
-            self.assertNotIn("gemini-2.0-flash", texts)
-            self.assertNotIn("gemini-1.5-flash", texts)
-            self.assertNotIn("exo-free", texts)
-            self.assertNotIn("deepseek-v4-flash-free", texts)
-            self.assertNotIn("grok-4.5", texts)       # no credits on the account
-            # Model names remain clean; image status has its own visible badge.
-            self.assertEqual(
-                models["gemini-3.5-flash-lite"], "gemini-3.5-flash-lite")
-            self.assertEqual(models["space-bunny-free"], "space-bunny-free")
-            self.assertEqual(dlg.model_image_badge.text(), "IMAGE INPUT")
-
-            # headers are non-selectable; picker offers Gemini + bridge only
-            hdr = dlg.z_model.findText(registry.BRIDGE_HDR)
-            self.assertGreaterEqual(hdr, 0)
-            self.assertFalse(dlg.z_model.model().item(hdr).isEnabled())
-            self.assertEqual(dlg.z_model.findText(registry.ZEN_FREE_HDR), -1)
-            self.assertEqual(dlg.z_model.findText(registry.CLI_HDR), -1)
-            self.assertEqual(dlg.z_model.findText(registry.CUSTOM_HDR), -1)
-
-            # every listed row stays selectable even before its key is set;
-            # the engine_hint alone reports why it can't be used yet.
-            for txt in ["gemini-3.5-flash-lite", "space-bunny-free"]:
-                ix = dlg.z_model.findData(txt)
-                self.assertTrue(dlg.z_model.model().item(ix).isEnabled(), txt)
-            ok, reason = registry.availability("gemini-3.5-flash-lite", {})
-            self.assertFalse(ok)
-            self.assertIn("Gemini key", reason)
-
-            with mock.patch.object(
-                opencode_cli,
-                "list_models",
-                return_value=["opencode/space-bunny-free", "opencode/exo-free"],
-            ) as cli_models:
-                with mock.patch(
-                    "translators.verify.verify_cli_models",
-                    return_value={"opencode-cli:opencode/exo-free": "403 blocked"},
-                ) as verify:
-                    dlg.z_refresh.click()
-                    cli_models.assert_called_once()
-                    verify.assert_called_once()
-            texts = [dlg.z_model.itemText(i) for i in range(dlg.z_model.count())]
-            models = {
-                dlg.z_model.itemData(i): dlg.z_model.itemText(i)
-                for i in range(dlg.z_model.count())
-                if isinstance(dlg.z_model.itemData(i), str)
-            }
-            # CLI models are no longer offered in the picker (engines kept).
-            self.assertNotIn("⌘ opencode/space-bunny-free", texts)
-            self.assertNotIn("⌘ opencode/exo-free", texts)
-            self.assertIn("gemini-3.5-flash-lite", models)   # gemini group kept
-            for m in ["mimo-v2.6-flash-free", "muse-spark-1.3-contributor-free"]:
-                self.assertIn(m, models)   # bridge group kept
-
-            self.assertEqual(dlg.values()["model"], "space-bunny-free")
-            dlg._select_model("opencode-cli:opencode/space-bunny-free")
-            self.assertEqual(
-                dlg.values()["model"],
-                "opencode-cli:opencode/space-bunny-free",
-            )
-            self.assertEqual(dlg.test_btn.text(), "Test Selected Model")
-        finally:
-            dlg.close()
 
     def test_explain_control_is_not_in_the_main_toolbar(self):
         from main import MainWindow
@@ -7876,26 +7608,6 @@ class TestReaderZoom(_GuiCase):
         finally:
             dlg.close()
 
-    def test_settings_dialog_reports_missing_opencode_cli(self):
-        from unittest import mock
-        from main import SettingsDialog
-        from config.settings import DEFAULTS
-        from translators import opencode_cli
-
-        dlg = SettingsDialog(dict(DEFAULTS))
-        try:
-            with mock.patch.object(
-                opencode_cli,
-                "list_models",
-                side_effect=opencode_cli.OpenCodeCLIError(
-                    "OpenCode CLI was not found"
-                ),
-            ):
-                dlg._refresh_zen_models()
-            self.assertIn("OpenCode CLI unavailable", dlg.engine_hint.text())
-            self.assertIn("was not found", dlg.engine_hint.text())
-        finally:
-            dlg.close()
 
     def test_settings_dialog_has_no_second_model_field(self):
         """One model, one source of truth: no separate gemini/opencode model box."""
@@ -7944,7 +7656,7 @@ class TestReaderZoom(_GuiCase):
         from main import SettingsDialog
         from config.settings import DEFAULTS
         s = dict(DEFAULTS)
-        s.update({"gemini_key": "gk", "model": "space-bunny-free",
+        s.update({"gemini_key": "gk", "model": "gemini-3.5-flash-lite",
               "openai_base": "https://x/api/v1", "openai_key": "ok",
                   "openai_model": "vendor/model", "ocr_langs": "de,en",
                   "email": "a@b.c", "font_size": 18,
@@ -9069,36 +8781,6 @@ class TestReaderZoom(_GuiCase):
             finally:
                 pop.close()
 
-    def test_popup_badge_states_the_engine_and_flags_substitutes(self):
-        # Chosen model ran: clean line, no warning marker.
-        text, tip = self._badge_after("\u2726 chosen: gemini-3.5-flash-lite")
-        self.assertNotIn("\u26a0", text)
-        self.assertIn("gemini-3.5-flash-lite", text)
-        self.assertIn("chosen model translated", tip)
-
-        # Substituted: visible warning marker, full reason on hover.
-        text, tip = self._badge_after(
-            "\u2726 gemini-2.5-flash  \u26a0 not your model (space-bunny-free failed: 403)")
-        self.assertTrue(text.startswith("\u26a0"))
-        self.assertIn("gemini-2.5-flash", text)
-        self.assertIn("NOT the model you chose", tip)
-        self.assertIn("403", tip)          # the reason is not lost
-
-        # A fallback names both the service that answered and the model that
-        # failed; the full failure reason remains available on hover.
-        text, tip = self._badge_after(
-            "Free service  \u26a0 chosen model gemini-3.5-flash-lite failed: no Gemini key")
-        self.assertTrue(text.startswith("\u26a0"))
-        self.assertIn("Google Translate", text)
-        self.assertIn("answered because", tip)
-        self.assertIn("gemini-3.5-flash-lite failed", tip)
-        self.assertIn("no Gemini key", tip)
-
-        text, tip = self._badge_after(
-            "Free service (alt)  \u26a0 chosen model space-bunny-free failed: 403")
-        self.assertIn("MyMemory", text)
-        self.assertIn("space-bunny-free failed", tip)
-        self.assertIn("403", tip)
 
     def test_popup_badge_shows_engine_for_mixed_chunk_warning(self):
         from translators.chain import _merge_badges
