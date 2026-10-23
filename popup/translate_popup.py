@@ -1,6 +1,7 @@
 """Frameless popup shown above selected text with its translation."""
 from __future__ import annotations
 
+from bisect import bisect_right
 import html
 import math
 import re
@@ -19,25 +20,14 @@ TOKEN_TAIL = "  ·  "
 # pre-synthesising (about ten minutes of audio; beyond that the read press
 # streams at normal speed instead of holding a connection open in vain).
 # The worker never streams, so no queue can block it.
-SPEECH_PREFETCH_DELAY_MS = 500
+SPEECH_PREFETCH_DELAY_MS = 200
 SPEECH_PREFETCH_MAX_CHARS = 8000
 SPEECH_AUTO_SCROLL_RESUME_MS = 1400
-MAX_SPEECH_RECOVERY_ATTEMPTS = 1
-# A player whose position has not moved for this long while it still claims to
-# be playing is hung, not pausing. Every other recovery path in the popup waits
-# for an event (EndOfMedia, the worker finishing, a failure, a transition to
-# StoppedState); a player that silently stops advancing sends none of them, so
-# without this the reading hangs for good with the highlight stuck on the last
-# spoken word. The margin is generous because synthesis runs far faster than
-# playback (a full page of audio is produced in seconds) and Edge's pauses at
-# punctuation are well under a second.
-SPEECH_STALL_TIMEOUT_SECONDS = 6.0
-SPEECH_STALL_MESSAGE = "Audio playback stalled before the text was finished."
 from PySide6.QtCore import QEvent, QPoint, QRect, QUrl, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QContextMenuEvent, QDesktopServices, QFont, QFontMetricsF,
     QTextBlockFormat, QTextCharFormat,
-    QTextCursor, QTextDocument, QTextFormat,
+    QTextCursor, QTextDocument, QTextFormat, QTextOption,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -46,7 +36,6 @@ from PySide6.QtWidgets import (
     QSlider, QTextEdit, QToolButton, QTextBrowser, QSplitter, QVBoxLayout,
     QWidget, QWidgetAction,
 )
-from ui.context_menu import style_context_menu
 
 from .audio_stream import AudioStreamServer
 from .speech_trace import SpeechTrace
@@ -56,22 +45,23 @@ from translators.prompt import LANGUAGE_CHOICES
 from .speech_worker import (
     ARABIC_VOICE, DEFAULT_SPEECH_RATE, GEMINI_TTS_ENGINE,
     MAX_SPEECH_RATE, MIN_SPEECH_RATE, SpeechWorker, VoiceListWorker,
-    _cache_key, normalize_speed,
-    build_latin_only_speech, latin_only_click_offset, learn_latin_pairs,
+    _cache_key, _speech_text_for_synthesis, normalize_speed,
     python_to_qt_position, qt_to_python_position,
     snap_speed_to_quarter, speech_available, speech_missing_message,
     speech_start_offset,
     speech_word_span,
+    configured_speech_rate, speech_language, speech_rate_setting_key,
+    build_latin_only_speech, learn_latin_pairs,
 )
 from config.settings import (
+    configure_playback_volume,
     DEFAULT_LINE_SPACING, DEFAULT_TRANSLATION_SIDE_MARGIN_PX,
     DEFAULT_TRANSLATION_TOP_BOTTOM_MARGIN_PX,
     MAX_LINE_SPACING, MAX_TRANSLATION_SIDE_MARGIN_PX,
     MAX_TRANSLATION_TOP_BOTTOM_MARGIN_PX, MIN_LINE_SPACING,
     MAX_TRANSLATION_FONT_SIZE, MIN_TRANSLATION_FONT_SIZE,
     MIN_TRANSLATION_SIDE_MARGIN_PX,
-    MIN_TRANSLATION_TOP_BOTTOM_MARGIN_PX, configure_playback_volume,
-    load, save,
+    MIN_TRANSLATION_TOP_BOTTOM_MARGIN_PX, load, save,
 )
 
 _POPUP_COLORS = {
@@ -100,111 +90,18 @@ _TABLE_SEPARATOR_CELL = re.compile(r":?-{3,}:?")
 _MUSICAL_ACCIDENTAL_AFTER_NOTE = re.compile(
     r"(?<![A-Za-z])([A-Ga-g])(?=[♭♯#♮])")
 
-# A line that opens a Markdown block rather than continuing the same one.
-_BLOCK_START_LINE = re.compile(
-    r"^[ \t]{0,3}(?:#{1,6}[ \t]+|>|`{3,}[ \t]*|"
-    r"(?:[-+*]|\d+[.)])[ \t]+|"
-    r"(?:\*{3,}|-{3,}|_{3,})[ \t]*$|\|)"
-)
-_SETEXT_UNDERLINE = re.compile(r"^[ \t]{0,3}(?:=+|-{3,})[ \t]*$")
-# Markdown folds any run of blank lines into one paragraph break; a plain-text
-# preview keeps each blank line as its own block.
-_BLANK_LINE_RUN = re.compile(r"\n(?:[ \t]*\n){2,}")
-
-
-def _normalize_line_separators(text: str) -> str:
-    """Turn Unicode line separators into the newlines Markdown understands.
-
-    Models and PDF extractors sometimes emit U+2028 between source lines.
-    Qt treats that character as a forced line break even inside a paragraph,
-    which produces ragged Arabic lines that stop after every sentence. U+2029
-    is a real paragraph separator, so it becomes a blank line.
-    """
-    return (
-        text.replace("\r\n", "\n")
-        .replace("\r", "\n")
-        .replace("\u2028", "\n")
-        .replace("\u2029", "\n\n")
-    )
-
-
-def reflow_wrapped_prose(markdown: str, *, hold_trailing: bool = False) -> str:
-    """Join prose that the model wrapped at the source page's line breaks.
-
-    The translation prompt asks the model to keep the source layout, so it
-    sometimes echoes a PDF line break in the middle of a sentence.
-    Left alone, each of those newlines becomes a block of its own and the
-    paragraph renders as ragged short lines instead of flush right text.
-
-    Unicode U+2028 separators are treated as soft wraps and U+2029 as real
-    paragraph breaks before this runs. Only soft wraps are merged. A blank
-    line, an explicit Markdown hard break (two trailing spaces or a trailing
-    backslash), a fenced code block, and any line that opens a heading, list,
-    quote, table, or rule all keep their break, so the finished document is
-    unchanged.
-
-    ``hold_trailing`` serves callers that grow the text one token at a time.
-    Text that has not finished arriving cannot be classified yet: a trailing
-    newline may still turn out to be a soft wrap, and a trailing run of
-    backticks may still turn out to open a fence. Holding those back keeps
-    every result a prefix of the next, so the caller only ever appends and
-    never retypes or drops a character it already showed.
-    """
-    markdown = _normalize_line_separators(markdown)
-    parts = re.split(r"(```.*?```|```.*\Z)", markdown, flags=re.DOTALL)
-    for index in range(0, len(parts), 2):
-        segments = re.split(r"(\n[ \t]*\n+)", parts[index])
-        for part_index in range(0, len(segments), 2):
-            lines = segments[part_index].split("\n")
-            if len(lines) == 1:
-                continue
-            joined = [lines[0]]
-            for line_index in range(len(lines) - 1):
-                previous = lines[line_index]
-                following = lines[line_index + 1]
-                trailing_spaces = len(previous) - len(previous.rstrip(" "))
-                trailing_backslashes = (
-                    len(previous) - len(previous.rstrip("\\"))
-                )
-                keep_break = (
-                    not previous
-                    or not following
-                    or trailing_spaces >= 2
-                    or trailing_backslashes % 2 == 1
-                    or _BLOCK_START_LINE.match(previous)
-                    or _BLOCK_START_LINE.match(following)
-                    or _SETEXT_UNDERLINE.fullmatch(previous)
-                    or _SETEXT_UNDERLINE.fullmatch(following)
-                    or previous.startswith("    ")
-                    or following.startswith("    ")
-                )
-                if keep_break:
-                    joined.append("\n" + following)
-                else:
-                    joined[-1] = (
-                        joined[-1].rstrip(" \t") + " "
-                        + following.lstrip(" \t")
-                    )
-            segments[part_index] = "".join(joined)
-        parts[index] = "".join(segments)
-    reflowed = "".join(parts)
-    if hold_trailing:
-        without_fence = reflowed.rstrip("`")
-        if without_fence != reflowed:
-            reflowed = without_fence.rstrip(" \t")
-    return reflowed[:-1] if reflowed.endswith("\n") else reflowed
-
 
 def retain_live_popups(popups, *, include_hidden=False):
-    """Keep hidden windows alive until their workers have finished closing."""
+    """Preserve hidden popups while their worker threads are still closing."""
     live = []
     for popup in popups:
         try:
-            visible = popup.isVisible()
-            if include_hidden or visible or getattr(popup, "_close_pending", False) is True:
+            if (include_hidden or popup.isVisible()
+                    or getattr(popup, "_close_pending", False)):
                 live.append(popup)
         except RuntimeError:
-            pass  # Its Qt object has already been deleted.
+            # A Qt window in the list may already have been deleted.
+            pass
     return live
 
 
@@ -218,6 +115,8 @@ class TranslationTextEdit(QTextEdit):
         selected_text = self.textCursor().selectedText().replace(
             "\u2029", "\n").strip()
         menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu::item { font-size: 16px; padding: 9px 24px; }")
         copy_action = menu.addAction("Copy")
         copy_action.setEnabled(bool(selected_text))
         copy_action.triggered.connect(self.copy)
@@ -237,7 +136,7 @@ class TranslationTextEdit(QTextEdit):
                 lambda _checked=False, selected_style=style,
                 text=selected_text: self.explainRequested.emit(
                     selected_style, text))
-        return style_context_menu(menu)
+        return menu
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         menu = self.create_context_menu()
@@ -365,7 +264,7 @@ class TranslatePopup(QDialog):
         super().__init__(parent, Qt.WindowType.Tool)
         self._settings = settings
         self.settings = settings
-        self._speech_glossary: dict[str, str] = (
+        self._speech_glossary = (
             speech_glossary if speech_glossary is not None else {})
         self._worker: TranslateWorker | None = None
         self._translation_workers: list[TranslateWorker] = []
@@ -376,8 +275,6 @@ class TranslatePopup(QDialog):
         self._chat_partial_text = ""
         self._translation_generation = 0
         self._streamed_partial = ""
-        self._streamed_displayed = ""
-        self._pending_streamed_partial: str | None = None
         self._translation_text = ""
         self._translation_needs_render = False
         self._rendered_translation_text: str | None = None
@@ -391,12 +288,20 @@ class TranslatePopup(QDialog):
         self._stale_speech_paths: list[str] = []
         self._speech_stream_urls: dict[int, str] = {}
         self._speech_playing_stream_index: int | None = None
-        self._speech_playing_continuous_stream = False
-        self._speech_disconnected_segments: set[int] = set()
-        self._speech_stream_recovery_positions: dict[int, int] = {}
         self._speech_boundaries: dict[int, list[tuple[int, int, int, int]]] = {}
         self._speech_index = 0
-        self._speech_segment_end_pending_index: int | None = None
+        self._speech_playing_continuous_stream = False
+        self._speech_stream_end_pending = False
+        self._speech_segment_end_pending_index = None
+        self._speech_stream_recovery_positions = {}
+        self._speech_workers: list[SpeechWorker] = []
+        self._speech_boundaries_finalized = False
+        self._speech_expected_end_offset = 0
+        self._speech_recovery_attempts = 0
+        self._speech_playback_has_started = False
+        self._speech_progress_position = None
+        self._speech_progress_since = 0.0
+        self._speech_last_highlight = None
         self._pending_player_position_ms: int | None = None
         self._pending_player_source: QUrl | None = None
         self._speech_prefetch_worker: SpeechWorker | None = None
@@ -406,13 +311,6 @@ class TranslatePopup(QDialog):
         self._close_pending = False
         self._speech_waiting = False
         self._speech_error: str | None = None
-        self._speech_recovery_attempts = 0
-        self._speech_playback_has_started = False
-        self._speech_last_progress_position_ms: int | None = None
-        self._speech_last_progress_at = 0.0
-        self._speech_expected_end_offset: int | None = None
-        self._speech_stream_end_pending = False
-        self._speech_boundaries_finalized = False
         self._speech_trace: SpeechTrace | None = None
         self._speech_trace_sample_ns = 0
         self._speech_text_override: str | None = None
@@ -484,7 +382,7 @@ class TranslatePopup(QDialog):
         self.speak_btn.clicked.connect(self._toggle_speech)
 
         # Speed picker: a narrow icon button so the popup keeps its exact size.
-        self._speech_rate = self._configured_speech_rate()
+        self._speech_rate = configured_speech_rate(self.settings)
         configured_voice = self.settings.get("speech_voice")
         self._speech_voice = (
             configured_voice if isinstance(configured_voice, str) and configured_voice
@@ -620,11 +518,6 @@ class TranslatePopup(QDialog):
         self._chat_render_timer.setSingleShot(True)
         self._chat_render_timer.setInterval(60)
         self._chat_render_timer.timeout.connect(self._render_chat_transcript)
-        self._streamed_update_timer = QTimer(self)
-        self._streamed_update_timer.setSingleShot(True)
-        self._streamed_update_timer.setInterval(30)
-        self._streamed_update_timer.timeout.connect(
-            self._flush_streamed_partial)
         for widget in (
             self.result,
             self.result.viewport(),
@@ -685,8 +578,7 @@ class TranslatePopup(QDialog):
         self._speech_highlight_timer = QTimer(self)
         self._speech_highlight_timer.setInterval(30)
         self._speech_highlight_timer.timeout.connect(self._update_speech_highlight)
-        self._speech_highlight_timer.timeout.connect(
-            self._check_speech_playback_progress)
+        self._speech_highlight_timer.timeout.connect(self._check_speech_playback_progress)
         self._speech_auto_scroll_suspended = False
         self._speech_follow_scroll_active = False
         self._speech_auto_scroll_timer = QTimer(self)
@@ -777,10 +669,20 @@ class TranslatePopup(QDialog):
         source_text: str | None = None,
         pil_image=None,
     ) -> None:
-        generation = self._invalidate_translation()
+        """Display an already translated page without translating it again.
+
+        Required by the current automatic page reader. It uses the original
+        display and TTS paths, without importing any newer speech subsystem.
+        """
+        self._translation_generation += 1
+        for worker in self._translation_workers:
+            if worker.isRunning():
+                worker.requestInterruption()
         self._reset_speech_for_new_translation()
-        if generation != self._translation_generation:
-            return
+        self._worker = None
+        self._source_text = source_text
+        self._source_image = pil_image
+        self._streamed_partial = ""
         self._chat_messages.clear()
         self._chat_entries.clear()
         self._chat_partial_text = ""
@@ -788,11 +690,6 @@ class TranslatePopup(QDialog):
         self.chat_transcript.clear()
         self.chat_send_btn.setEnabled(False)
         self._toggle_chat_panel(False)
-        self._streamed_partial = ""
-        self._streamed_displayed = ""
-        self._worker = None
-        self._source_text = source_text
-        self._source_image = pil_image
         self.result.clear()
         self._apply_streamed_typography()
         self._on_done(translated_text, badge)
@@ -832,8 +729,6 @@ class TranslatePopup(QDialog):
 
     def _set_translation_language(self, kind: str, code: str) -> None:
         key = "source_language" if kind == "source" else "target_language"
-        if self.settings.get(key, "auto" if kind == "source" else "ar") == code:
-            return
         self.settings[key] = code
         if self._float_language_preferences:
             float_key = (
@@ -841,11 +736,6 @@ class TranslatePopup(QDialog):
                 else "float_target_language"
             )
             self.settings[float_key] = code
-        # Invalidate before audio/settings callbacks can process queued Qt
-        # signals. Otherwise the preceding language can briefly repaint here.
-        generation = self._invalidate_translation()
-        if kind == "target":
-            self._refresh_speech_rate()
         self._update_language_control(kind, code)
         if self._language_change_callback is not None:
             self._language_change_callback(
@@ -853,8 +743,7 @@ class TranslatePopup(QDialog):
                 self.settings.get("target_language", "ar"),
                 self,
             )
-        if generation == self._translation_generation:
-            self._retranslate_for_current_languages()
+        self._retranslate_for_current_languages()
 
     def _update_language_control(self, kind: str, code: str) -> None:
         for language, action in self._language_actions[kind].items():
@@ -868,36 +757,19 @@ class TranslatePopup(QDialog):
 
     def sync_languages(self, source_language: str, target_language: str) -> None:
         """Apply toolbar languages without calling back to the application."""
-        changed = (
-            source_language != self.settings.get("source_language", "auto")
-            or target_language != self.settings.get("target_language", "ar")
-        )
         self.settings["source_language"] = source_language
         self.settings["target_language"] = target_language
-        if self._float_language_preferences:
-            self.settings["float_source_language"] = source_language
-            self.settings["float_target_language"] = target_language
-        generation = (self._invalidate_translation() if changed
-                      else self._translation_generation)
-        self._refresh_speech_rate()
         self._update_language_control("source", source_language)
         self._update_language_control("target", target_language)
-        if changed and generation == self._translation_generation:
-            self._retranslate_for_current_languages()
+        self._refresh_speech_controls()
+        self._retranslate_for_current_languages()
 
     def _retranslate_for_current_languages(self) -> None:
         if self._source_text:
             self._start_translation_worker(text=self._source_text)
-        elif self._source_image is not None:
-            # OCR may not have delivered text yet. Supersede that worker now,
-            # just as for direct image translation, using the new languages.
-            from translators.ocr import languages_for
-
-            self._start_translation_worker(
-                pil_image=self._source_image,
-                ocr_langs=languages_for(
-                    self.settings.get("source_language", "auto")),
-            )
+        elif (self._source_image is not None
+              and self.settings.get("selection_mode") == "image"):
+            self._start_translation_worker(pil_image=self._source_image)
 
     def _save_shared_settings(
         self, *, update_local: bool = True, **updates: object,
@@ -919,59 +791,14 @@ class TranslatePopup(QDialog):
             self.settings.update(updates)
         return True
 
-    def _speech_rate_setting_key(self) -> str:
-        chat_panel = getattr(self, "chat_panel", None)
-        use_chat_language = (
-            chat_panel is not None and not chat_panel.isHidden())
-        target_language = str(self.settings.get("target_language", "ar"))
-        language = (
-            str(
-                self.settings.get("chat_reply_language", target_language)
-                if self.settings.get("chat_reply_language_only", False)
-                else target_language
-            )
-            if use_chat_language else target_language
-        ).strip()
-        language_code = language.replace("_", "-").split("-", 1)[0].casefold()
-        return (
-            "speech_rate_arabic"
-            if language_code == "ar"
-            else "speech_rate_other"
-        )
-
-    def _configured_speech_rate(self) -> float:
-        key = self._speech_rate_setting_key()
-        return normalize_speed(
-            self.settings.get(key, self.settings.get("speech_rate")))
-
-    def _refresh_speech_rate(self) -> None:
-        self._speech_rate = self._configured_speech_rate()
-        self._player.setPlaybackRate(self._speech_rate)
-        self._speed_slider.blockSignals(True)
-        self._speed_slider.setValue(
-            self._speed_to_slider_value(self._speech_rate))
-        self._speed_slider.blockSignals(False)
-        self._update_speed_display(self._speech_rate)
-        language_name = (
-            "Arabic"
-            if self._speech_rate_setting_key() == "speech_rate_arabic"
-            else "Other languages"
-        )
-        self._speed_title.setText(f"{language_name} reading speed")
-        self._speed_slider.setAccessibleName(
-            f"{language_name} reading speed slider")
-        tooltip = f"{language_name} reading speed: {self._speech_rate:.2f}x"
-        self.speed_btn.setToolTip(tooltip)
-        self.chat_speed_btn.setToolTip(tooltip)
-
     def _start_translation_worker(
         self,
         text: str | None = None,
         pil_image=None,
         ocr_langs=("ru", "en"),
     ) -> None:
-        generation = self._invalidate_translation()
         self._reset_speech_for_new_translation()
+        self._translation_generation += 1
         self._chat_messages.clear()
         self._chat_entries.clear()
         self._chat_partial_text = ""
@@ -979,10 +806,8 @@ class TranslatePopup(QDialog):
         self.chat_transcript.clear()
         self.chat_send_btn.setEnabled(False)
         self._toggle_chat_panel(False)
-        # A nested Qt event during audio reset may have selected another
-        # language. Only the newest intent is allowed to create a worker.
-        if generation != self._translation_generation:
-            return
+        generation = self._translation_generation
+        self._streamed_partial = ""
         worker_settings = dict(self.settings)
         if self._full_page_translation:
             worker_settings["_full_page_translation"] = True
@@ -1008,33 +833,8 @@ class TranslatePopup(QDialog):
         self.speak_btn.setEnabled(False)
         worker.start()
 
-    def _invalidate_translation(self) -> int:
-        """Retire the old reply before invoking anything that can reenter Qt."""
-        self._translation_generation += 1
-        generation = self._translation_generation
-        self._worker = None
-        self._cancel_running_translations()
-        self._streamed_update_timer.stop()
-        self._pending_streamed_partial = None
-        self._streamed_partial = ""
-        self._streamed_displayed = ""
-        self._translation_text = ""
-        self._rendered_translation_text = None
-        self._translation_needs_render = False
-        self.result.clear()
-        self.speak_btn.setEnabled(False)
-        self.chat_send_btn.setEnabled(False)
-        self.spin.setText("Starting…")
-        self.spin.show()
-        return generation
-
-    def _cancel_running_translations(self) -> None:
-        """Stop superseded workers before another translation can start."""
-        for worker in self._translation_workers:
-            if worker.isRunning():
-                worker.requestInterruption()
-
     def _reset_speech_for_new_translation(self) -> None:
+        self._close_speech_stream_server()
         self._speech_active = False
         self._speech_waiting = False
         self._speech_start_offset = 0
@@ -1049,10 +849,6 @@ class TranslatePopup(QDialog):
         self._speech_boundaries.clear()
         self._speech_stream_urls.clear()
         self._speech_playing_stream_index = None
-        self._speech_playing_continuous_stream = False
-        self._speech_disconnected_segments.clear()
-        self._speech_stream_recovery_positions.clear()
-        self._speech_segment_end_pending_index = None
         self._pending_player_position_ms = None
         self._pending_player_source = None
         self._speech_highlight_timer.stop()
@@ -1093,81 +889,39 @@ class TranslatePopup(QDialog):
     def _on_worker_partial(self, partial_text: str) -> None:
         """Append streamed text cheaply; apply Markdown once the reply is done."""
         worker = self.sender()
-        if worker is not self._worker or worker is None or getattr(
+        if worker is None or getattr(
                 worker, "_popup_generation", -1) != self._translation_generation:
             return
         self.spin.setText("Translating…")
-        self._queue_streamed_partial(partial_text)
+        self._append_streamed_partial(partial_text)
         self.result.show()
-
-    def _queue_streamed_partial(self, text: str) -> None:
-        if not self._streamed_update_timer.isActive():
-            self._append_streamed_partial(text)
-            self._streamed_update_timer.start()
-            return
-        self._pending_streamed_partial = text
-
-    def _flush_streamed_partial(self) -> None:
-        text = self._pending_streamed_partial
-        self._pending_streamed_partial = None
-        if text is not None:
-            self._append_streamed_partial(text)
 
     def _append_streamed_partial(self, text: str) -> None:
         previous = self._streamed_partial
         if text == previous:
             return
-        displayed = self._normalize_streamed_markdown(text)
-        previous_displayed = self._streamed_displayed
-        if (
-            previous
-            and text.startswith(previous)
-            and displayed.startswith(previous_displayed)
-        ):
+        if text.startswith(previous):
             cursor = self.result.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
             start_position = cursor.position()
             previous_block_count = self.result.document().blockCount()
-            delta = displayed[len(previous_displayed):]
-            if delta:
-                cursor.insertText(delta)
+            cursor.insertText(text[len(previous):])
             self.result.setTextCursor(cursor)
-            if self.result.document().blockCount() > previous_block_count:
+            if not previous:
+                self._apply_streamed_typography()
+            elif self.result.document().blockCount() > previous_block_count:
                 self._apply_streamed_typography(start_position)
             else:
                 self._apply_streamed_font_size(start_position)
                 self._apply_script_font_families(
                     self.result.document(), start_position)
         else:
-            self.result.setPlainText(displayed)
+            self.result.setPlainText(text)
             cursor = self.result.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
             self.result.setTextCursor(cursor)
             self._apply_streamed_typography()
         self._streamed_partial = text
-        self._streamed_displayed = displayed
-
-    def _normalize_streamed_markdown(self, text: str) -> str:
-        """Preview English and Arabic prose as flowing text, not raw wraps.
-
-        ``setMarkdown`` is what finally turns the model's page-faithful line
-        breaks into paragraphs. Streaming inserts plain text, where every
-        newline becomes its own block, so a wrapped answer previews as ragged
-        short lines for the whole request. Reflowing here makes the preview
-        match the rendered result.
-        """
-        text = _normalize_line_separators(text)
-        if not self._reflows_wrapped_prose():
-            return _BLANK_LINE_RUN.sub("\n\n", text)
-        reflowed = reflow_wrapped_prose(text, hold_trailing=True)
-        return _BLANK_LINE_RUN.sub("\n\n", reflowed)
-
-    def _reflows_wrapped_prose(self) -> bool:
-        """Report whether prose soft breaks are reflowed for this target."""
-        language = str(
-            self.settings.get("target_language", "ar")
-        ).split("-", 1)[0].casefold()
-        return language in ("ar", "en")
 
     def _apply_streamed_font_size(
         self, start_position: int | None = None,
@@ -1267,11 +1021,7 @@ class TranslatePopup(QDialog):
         self._continue_pending_close()
 
     def _on_source_ready(self, worker: TranslateWorker, source: str) -> None:
-        if (worker is not self._worker
-                or getattr(worker, "_popup_generation", -1)
-                != self._translation_generation):
-            # An OCR/worker result that lost its generation must not start a
-            # second translation or overwrite the current original text.
+        if getattr(worker, "_popup_generation", -1) != self._translation_generation:
             return
         self._source_text = source
         if (
@@ -1289,40 +1039,20 @@ class TranslatePopup(QDialog):
         translated_text: str,
         badge: str,
     ) -> None:
-        if (generation == self._translation_generation
-                and worker is self._worker):
-            self._streamed_update_timer.stop()
-            self._pending_streamed_partial = None
+        if generation == self._translation_generation:
             self._streamed_partial = ""
-            self._streamed_displayed = ""
             self._worker = worker
             self._on_done(translated_text, badge)
             self.translationReady.emit()
 
     def _on_translation_failed(self, generation: int, error: str) -> None:
         if generation == self._translation_generation:
-            self._streamed_update_timer.stop()
-            self._flush_streamed_partial()
             self._streamed_partial = ""
-            self._streamed_displayed = ""
-            self._cancel_speech_prefetch()
             self._on_failed(error)
             self.translationFailed.emit(error)
 
     def refresh_display(self, settings: dict | None = None) -> None:
         """Reapply saved typography after refreshing settings in-place."""
-        # Reader settings are mutable. Keep a popup-owned snapshot so a later
-        # toolbar change cannot silently change this popup before it can detect
-        # the language change and replace its worker.
-        if settings is not None:
-            settings = dict(settings)
-        languages_changed = settings is not None and any(
-            settings.get(key, default) != self.settings.get(key, default)
-            for key, default in (
-                ("source_language", "auto"), ("target_language", "ar"))
-        )
-        if languages_changed:
-            self._invalidate_translation()
         theme_changed = settings is not None and (
             settings.get("theme") != self.settings.get("theme")
             or settings.get("color_scheme")
@@ -1337,7 +1067,6 @@ class TranslatePopup(QDialog):
                 settings.get(key) != self.settings.get(key)
                 for key in (
                     "arabic_tashkeel",
-                    "chat_reply_language",
                     "explain_instructions",
                     "explain_mode",
                     "font_size",
@@ -1347,10 +1076,9 @@ class TranslatePopup(QDialog):
                     "source_language",
                     "speech_engine",
                     "speech_rate",
-                    "speech_rate_arabic",
-                    "speech_rate_other",
+                    "speech_rate_arabic", "speech_rate_other",
+                    "speech_latin_only", "chat_reply_language", "chat_reply_language_only",
                     "speech_read_latin_words",
-                    "speech_latin_only",
                     "speech_voice",
                     "target_language",
                     "translation_font",
@@ -1390,6 +1118,8 @@ class TranslatePopup(QDialog):
                         or settings.get("speech_read_latin_words", False)
                         != self.settings.get(
                             "speech_read_latin_words", False)
+                        or settings.get("speech_latin_only", False)
+                        != self.settings.get("speech_latin_only", False)
                     )
                 )
                 or (
@@ -1401,20 +1131,9 @@ class TranslatePopup(QDialog):
                     )
                 )
             )
-            if speech_configuration_changed:
-                self._speech_prefetch_timer.stop()
-                self._cancel_speech_prefetch()
             if self._speech_active and speech_configuration_changed:
                 self._toggle_speech()
             self.settings = settings
-        if languages_changed:
-            source_language = self.settings.get("source_language", "auto")
-            target_language = self.settings.get("target_language", "ar")
-            self._update_language_control("source", source_language)
-            self._update_language_control("target", target_language)
-            if self._float_language_preferences:
-                self.settings["float_source_language"] = source_language
-                self.settings["float_target_language"] = target_language
         self._refresh_speech_controls()
         explain_mode = bool(self.settings.get("explain_mode", False))
         explain_instructions = self.settings.get("explain_instructions", "")
@@ -1425,8 +1144,7 @@ class TranslatePopup(QDialog):
         self._apply_chat_direction()
         if (
             settings is not None
-            and (languages_changed
-                 or old_explain_mode != explain_mode
+            and (old_explain_mode != explain_mode
                  or old_explain_instructions != explain_instructions
                  or old_arabic_tashkeel != bool(
                      self.settings.get("arabic_tashkeel", False)))
@@ -1514,7 +1232,7 @@ class TranslatePopup(QDialog):
             f"background-color: {colors['panel']}; color: {text}; "
             f"border: 1px solid {border}; }}"
             "QMenu::item:selected { "
-            f"background-color: {colors['selection']}; color: {text}; }}"
+            f"background-color: {colors['selection']}; }}"
         )
         self.result.setStyleSheet(
             "QTextEdit#translationResult { "
@@ -1559,8 +1277,6 @@ class TranslatePopup(QDialog):
             "QMenu { "
             f"background-color: {colors['panel']}; color: {text}; "
             f"border: 1px solid {border}; padding: 2px; }}"
-            "QMenu::item:selected { "
-            f"background-color: {colors['selection']}; color: {text}; }}"
         )
         self._speed_panel.setStyleSheet(
             "QWidget#speechSpeedPanel { "
@@ -1593,11 +1309,24 @@ class TranslatePopup(QDialog):
             if isinstance(configured_voice, str) and configured_voice
             else ARABIC_VOICE
         )
-        self._refresh_speech_rate()
+        self._speech_rate = configured_speech_rate(
+            self.settings, chat=self._speech_is_chat())
+        if hasattr(self, "_speed_title"):
+            self._speed_title.setText(
+                "Arabic reading speed" if self._speech_rate_setting_key() == "speech_rate_arabic"
+                else "Other languages reading speed")
         self._speech_available = speech_available(
             self._speech_engine,
             str(self.settings.get("gemini_key") or ""),
         )
+        self._player.setPlaybackRate(self._speech_rate)
+        self._speed_slider.blockSignals(True)
+        self._speed_slider.setValue(
+            self._speed_to_slider_value(self._speech_rate))
+        self._speed_slider.blockSignals(False)
+        self._update_speed_display(self._speech_rate)
+        self.speed_btn.setToolTip(
+            f"Reading speed: {self._speech_rate:.2f}x")
         self.speed_btn.setEnabled(self._speech_available)
 
         engine_name = (
@@ -1609,8 +1338,8 @@ class TranslatePopup(QDialog):
             if self._speech_available
             else speech_missing_message(self._speech_engine))
         has_text = bool(self._current_speech_text().strip())
-        self.speak_btn.setText(self._speech_idle_label())
-        self.speak_btn.setEnabled(has_text and self._speech_available)
+        self.speak_btn.setText("Stop" if self._speech_active else self._speech_idle_label())
+        self.speak_btn.setEnabled(self._speech_available and (self._speech_active or has_text))
         self.voice_btn.setEnabled(
             self._speech_available
             and self._speech_engine == "edge"
@@ -1921,11 +1650,9 @@ class TranslatePopup(QDialog):
             return False
 
     def _on_done(self, translated_text: str, badge: str) -> None:
+        self._learn_speech_glossary(self._markdown_speech_text(translated_text))
         self.spin.hide()
         self._translation_text = translated_text
-        # Every finished translation teaches the open book's names, even when
-        # the reader only looks at the page and never presses Read aloud.
-        self._learn_speech_glossary(translated_text)
         self._translation_needs_render = bool(translated_text)
         self.chat_send_btn.setEnabled(
             bool(translated_text.strip()) and self._chat_worker is None)
@@ -1938,17 +1665,8 @@ class TranslatePopup(QDialog):
             self._speech_available and self._speech_engine == "edge")
         try:
             secs = self._worker.translate_secs if self._worker else 0.0
-            first_text_secs = (
-                getattr(self._worker, "first_text_secs", None)
-                if self._worker else None)
         except RuntimeError:
             secs = 0.0
-            first_text_secs = None
-        timing_tooltip = (
-            f"\nFirst text received: {first_text_secs:.2f}s"
-            if first_text_secs is not None
-            else "\nNo text chunk was received before completion."
-        )
         # Keep model status compact; the full fallback reason stays on hover.
         # The token count is peeled off first: it is long, it does not
         # change between selections, and the main window shows it in its
@@ -1965,13 +1683,6 @@ class TranslatePopup(QDialog):
         )
         if chunk_summary:
             engine = chunk_summary.group(1).strip() or "Translation fallback"
-            from config.settings import resolve_model
-
-            selected_model = resolve_model(self.settings)
-            model_label = (
-                selected_model if len(selected_model) <= 27
-                else f"{selected_model[:24]}..."
-            )
             counts = re.fullmatch(
                 r"\((\d+)/(\d+) chunks by your model\)",
                 chunk_summary.group(2),
@@ -1979,21 +1690,17 @@ class TranslatePopup(QDialog):
             if counts:
                 used, total = counts.groups()
                 self.badge.setText(
-                    f"⚠ {model_label} · {used}/{total} · {secs:.1f}s")
+                    f"⚠ Partial fallback · {used}/{total} · {secs:.1f}s")
                 self.badge.setToolTip(
                     f"The selected model translated {used} of {total} chunks."
-                    f"\nSelected model: {selected_model}."
                     f"\nMost common engine: {engine}.\n{badge.strip()}"
-                    f"{timing_tooltip}"
                 )
             else:
                 self.badge.setText(
-                    f"⚠ {model_label} · fallback · {secs:.1f}s")
+                    f"⚠ Fallback · not your model · {secs:.1f}s")
                 self.badge.setToolTip(
                     f"The selected model did not translate any chunks."
-                    f"\nSelected model: {selected_model}."
                     f"\nMost common engine: {engine}.\n{badge.strip()}"
-                    f"{timing_tooltip}"
                 )
             self.badge.setProperty("warning", True)
         else:
@@ -2022,13 +1729,12 @@ class TranslatePopup(QDialog):
                     tooltip = (
                         f"{actual_engine} answered because the selected model "
                         f"{selected_model} failed.\n{why.strip()}"
-                        f"{timing_tooltip}"
                     )
                 else:
                     status = f"⚠ {actual_engine}"
                     tooltip = (
                         f"{actual_engine} is NOT the model you chose.\n"
-                        f"{why.strip()}{timing_tooltip}"
+                        f"{why.strip()}"
                     )
                 self.badge.setText(f"{status} · {secs:.1f}s")
                 self.badge.setToolTip(tooltip)
@@ -2036,10 +1742,7 @@ class TranslatePopup(QDialog):
                 engine = actual_engine
             else:
                 self.badge.setText(f"{engine} · {secs:.1f}s")
-                self.badge.setToolTip(
-                    "Your chosen model translated this."
-                    f"{timing_tooltip}"
-                )
+                self.badge.setToolTip("Your chosen model translated this.")
                 self.badge.setProperty("warning", False)
         self.badge.style().unpolish(self.badge)
         self.usageReported.emit(engine.strip(), self.token_line)
@@ -2190,8 +1893,7 @@ class TranslatePopup(QDialog):
         from translators.chain import _remove_nonheading_bold
 
         text = _remove_nonheading_bold(text)
-        self.result.setMarkdown(self._markdown_with_inline_notation(
-            text, reflow_soft_line_breaks=self._reflows_wrapped_prose()))
+        self.result.setMarkdown(self._markdown_with_inline_notation(text))
         self._apply_code_block_style(
             self.result.document(), self.result.font().pointSizeF())
         self._apply_translation_direction()
@@ -2311,14 +2013,13 @@ class TranslatePopup(QDialog):
             is_code_block = block_format.hasProperty(
                 QTextFormat.Property.BlockCodeFence)
             is_heading = bool(block_format.headingLevel())
-            cursor = QTextCursor(block)
-            is_table_cell = cursor.currentTable() is not None
             block_format.setLayoutDirection(
                 Qt.LayoutDirection.LeftToRight if is_code_block else direction)
             if is_code_block:
                 block_format.setAlignment(Qt.AlignmentFlag.AlignLeft)
-            elif not is_table_cell:
+            else:
                 block_format.setAlignment(start_alignment)
+            cursor = QTextCursor(block)
             cursor.setBlockFormat(block_format)
             block = block.next()
 
@@ -2336,7 +2037,8 @@ class TranslatePopup(QDialog):
 
     def _toggle_chat_panel(self, visible: bool) -> None:
         self.chat_panel.setVisible(visible)
-        self._refresh_speech_rate()
+        if hasattr(self, "_player"):
+            self._refresh_speech_controls()
         if visible:
             sizes = self.content_splitter.sizes()
             if len(sizes) == 2 and sizes[1] < self.chat_panel.minimumSizeHint().height():
@@ -2436,10 +2138,8 @@ class TranslatePopup(QDialog):
         return TranslatePopup._speech_text_from_document(document)
 
     @staticmethod
-    def _markdown_with_inline_notation(
-        markdown: str, *, reflow_soft_line_breaks: bool = False,
-    ) -> str:
-        markdown = _normalize_line_separators(markdown)
+    def _markdown_with_inline_notation(markdown: str) -> str:
+        markdown = markdown.replace("\r\n", "\n").replace("\r", "\n")
         markdown_parts = re.split(r"(```.*?```)", markdown, flags=re.DOTALL)
 
         def split_table_row(line: str) -> list[str]:
@@ -2519,9 +2219,6 @@ class TranslatePopup(QDialog):
                 r"**\1**",
                 markdown_parts[index],
             )
-            if reflow_soft_line_breaks:
-                markdown_parts[index] = reflow_wrapped_prose(
-                    markdown_parts[index])
             segments = re.split(
                 r"(\n[ \t]*\n+)", markdown_parts[index])
             for part_index in range(0, len(segments), 2):
@@ -2835,9 +2532,11 @@ class TranslatePopup(QDialog):
         layout.setSpacing(13)
 
         title = QLabel("Reading speed", panel)
+        self._speed_title = title
+        title.setText("Arabic reading speed" if self._speech_rate_setting_key() == "speech_rate_arabic"
+                      else "Other languages reading speed")
         title.setObjectName("speechSpeedTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._speed_title = title
         layout.addWidget(title)
 
         self._speed_display = QLabel(panel)
@@ -2913,7 +2612,6 @@ class TranslatePopup(QDialog):
         self.speed_menu.setStyleSheet(
             "QMenu { background: #f7f8fa; border: 1px solid #d8dde4;"
             " padding: 2px; }"
-            "QMenu::item:selected { background: #fff2a8; color: #222831; }"
         )
         action = QWidgetAction(self.speed_menu)
         action.setDefaultWidget(panel)
@@ -3093,19 +2791,21 @@ class TranslatePopup(QDialog):
             self._speed_slider.blockSignals(False)
         if hasattr(self, "_speed_presets"):
             self._update_speed_display(self._speech_rate)
-        setting_key = self._speech_rate_setting_key()
-        self.settings[setting_key] = self._speech_rate
-        self.settings["speech_rate"] = self._speech_rate
+        key = self._speech_rate_setting_key()
+        self.settings[key] = self._speech_rate
+        self.settings["speech_rate"] = self._speech_rate  # legacy compatibility
         self._player.setPlaybackRate(self._speech_rate)
         try:
             from config.settings import load, save
             persisted = load()
+            persisted[key] = self._speech_rate
             persisted["speech_rate"] = self._speech_rate
-            persisted[setting_key] = self._speech_rate
             save(persisted)
         except (OSError, TypeError, ValueError):
             logging.exception("Could not save the reading speed")
-        self._refresh_speech_rate()
+        self.speed_btn.setToolTip(f"Reading speed: {self._speech_rate:.2f}x")
+        self.chat_speed_btn.setToolTip(
+            f"Reading speed: {self._speech_rate:.2f}x")
 
     def _load_voices(self) -> None:
         if self._voice_list_worker is not None or self._voice_actions:
@@ -3166,10 +2866,7 @@ class TranslatePopup(QDialog):
             return
 
         self._voice_actions = []
-        preferred_language_order = (
-            "Fr", "Ar", "It", "En", "De", "Es", "Ru",
-            "Pt", "Ja", "Ko", "Zh", "Hi",
-        )
+        preferred_language_order = ("Fr", "Ar", "It", "En", "De", "Es", "Ru", "Pt", "Ja", "Ko", "Zh", "Hi")
         language_order = [
             language
             for language in preferred_language_order
@@ -3271,7 +2968,25 @@ class TranslatePopup(QDialog):
             if start > position_ticks:
                 next_start = source_start
                 break
-        return next_start if next_start is not None else self._speech_start_offset
+        return (next_start if next_start is not None else
+                boundaries[-1][2] if boundaries else self._speech_start_offset)
+
+    def _speech_is_chat(self) -> bool:
+        panel = getattr(self, "chat_panel", None)
+        return panel is not None and not panel.isHidden()
+
+    def _speech_rate_setting_key(self) -> str:
+        return speech_rate_setting_key(self.settings, chat=self._speech_is_chat())
+
+    def set_speech_glossary(self, glossary: dict[str, str] | None) -> None:
+        self._speech_glossary = glossary if glossary is not None else {}
+
+    def _learn_speech_glossary(self, text: str) -> None:
+        if self.settings.get("speech_latin_only", False):
+            self._speech_glossary.update(learn_latin_pairs(text))
+
+    def _latin_only_speech(self, text: str):
+        return build_latin_only_speech(text, self._speech_glossary)
 
     def _toggle_speech(self) -> None:
         if not self._speech_available:
@@ -3283,13 +2998,11 @@ class TranslatePopup(QDialog):
         if self._speech_active:
             self._speech_start_offset = self._current_speech_offset()
             self._speech_active = False
-            self._speech_stream_end_pending = False
             self._pending_speech_offset = None
             self._pending_highlight = None
             self._close_speech_stream_server()
             self._speech_stream_urls.clear()
             self._speech_playing_stream_index = None
-            self._speech_playing_continuous_stream = False
             self._clear_speech_highlight()
             self._player.stop()
             self._pending_player_position_ms = None
@@ -3514,9 +3227,8 @@ class TranslatePopup(QDialog):
     def _request_speech(
         self, start_offset: int, *, trigger: str = "speech-request"
     ) -> None:
-        self._speech_prefetch_timer.stop()
-        self._cancel_speech_prefetch()
         self._speech_recovery_attempts = 0
+        self._speech_prefetch_timer.stop()
         if trigger != "translation-word-click":
             self._speech_trace = SpeechTrace(trigger)
         if self._speech_trace is not None:
@@ -3529,7 +3241,6 @@ class TranslatePopup(QDialog):
         if worker is not None and worker.isRunning():
             self._pending_speech_offset = start_offset
             self._speech_active = False
-            self._speech_segment_end_pending_index = None
             if trigger != "translation-word-click":
                 self._clear_speech_highlight()
             self._player.stop()
@@ -3546,27 +3257,6 @@ class TranslatePopup(QDialog):
 
         self._begin_speech(start_offset)
 
-    def _latin_only_enabled(self) -> bool:
-        return (
-            bool(self.settings.get("speech_latin_only", False))
-            and str(self.settings.get("target_language", "ar"))
-            .casefold().split("-", 1)[0] == "ar"
-        )
-
-    def set_speech_glossary(self, glossary: dict[str, str] | None) -> None:
-        """Share the open book's glossary; the popup updates it in place."""
-        self._speech_glossary = glossary if glossary is not None else {}
-
-    def _learn_speech_glossary(self, text: str) -> None:
-        if not text or not self._latin_only_enabled():
-            return
-        learned = learn_latin_pairs(text)
-        if learned:
-            self._speech_glossary.update(learned)
-
-    def _latin_only_speech(self, text: str):
-        return build_latin_only_speech(text, self._speech_glossary)
-
     def _speech_worker_kwargs(self, text: str, source_offset: int) -> dict:
         """Keyword arguments both speech workers are built from.
 
@@ -3574,7 +3264,6 @@ class TranslatePopup(QDialog):
         synthesis request, or the prefetch fills a cache entry the read never
         looks up. One builder keeps them in lockstep.
         """
-        latin_only = self._latin_only_enabled()
         return {
             "rate": DEFAULT_SPEECH_RATE,
             "source_offset": source_offset,
@@ -3582,17 +3271,17 @@ class TranslatePopup(QDialog):
             "automatic_voice": bool(
                 self.settings.get("automatic_speech_voice", False)
             ),
-            "target_language": self.settings.get("target_language", "ar"),
+            "target_language": speech_language(self.settings, chat=self._speech_is_chat()),
             "read_latin_words": bool(
                 self.settings.get("speech_read_latin_words", False)
             ),
-            "latin_only": latin_only,
-            "glossary": dict(self._speech_glossary) if latin_only else None,
             "fast": bool(self.settings.get("fast_mode", True)),
             "engine": self._speech_engine,
             "gemini_api_key": str(self.settings.get("gemini_key") or ""),
             "gemini_voice": str(
                 self.settings.get("gemini_tts_voice") or "Kore"),
+            "latin_only": bool(self.settings.get("speech_latin_only", False)),
+            "glossary": dict(self._speech_glossary),
         }
 
     def _try_play_cached_full_text(self, text: str) -> bool:
@@ -3602,8 +3291,8 @@ class TranslatePopup(QDialog):
         the cache as soon as it lands. When the user presses Read aloud for the
         whole text, the identical request is usually cached; re-running
         synthesis would cost a full network round-trip (~2s of silence).
-        Instead we replay the cached segment in ~0.01s with the same word
-        boundaries, so the first word is heard instantly.
+        The cached audio and word boundaries avoid another synthesis request.
+        Actual start time still depends on the audio backend.
         """
         if (
             self._speech_engine != "edge"
@@ -3613,7 +3302,8 @@ class TranslatePopup(QDialog):
             or self._close_pending
         ):
             return False
-        kwargs = self._speech_worker_kwargs(text, 0)
+        source_offset = self._speech_start_offset
+        kwargs = self._speech_worker_kwargs(text, source_offset)
         probe = SpeechWorker(
             text,
             None,
@@ -3648,8 +3338,8 @@ class TranslatePopup(QDialog):
             (
                 start,
                 duration,
-                spans[first_word][0],
-                spans[last_word - 1][1],
+                spans[first_word][0] + source_offset,
+                spans[last_word - 1][1] + source_offset,
             )
             for start, duration, first_word, last_word in cached_boundaries
         ]
@@ -3695,8 +3385,6 @@ class TranslatePopup(QDialog):
 
     def _begin_speech(self, start_offset: int) -> None:
         self._speech_prefetch_timer.stop()
-        self._speech_playback_has_started = False
-        self._reset_speech_progress_tracking()
         if self._speech_active:
             self._player.stop()
             self._pending_player_position_ms = None
@@ -3708,16 +3396,17 @@ class TranslatePopup(QDialog):
         self._speech_waiting = False
         self._speech_error = None
         self._speech_index = 0
+        self._speech_playing_continuous_stream = False
+        self._speech_stream_end_pending = False
+        self._speech_segment_end_pending_index = None
+        self._speech_stream_recovery_positions = {}
+        self._speech_boundaries_finalized = False
+        self._speech_playback_has_started = False
+        self._speech_progress_position = None
+        self._speech_last_highlight = None
         self._speech_stream_urls.clear()
         self._speech_playing_stream_index = None
-        self._speech_playing_continuous_stream = False
-        self._speech_disconnected_segments.clear()
-        self._speech_stream_recovery_positions.clear()
         self._speech_boundaries.clear()
-        self._speech_segment_end_pending_index = None
-        self._speech_stream_end_pending = False
-        self._speech_expected_end_offset = None
-        self._speech_boundaries_finalized = False
         self._clear_speech_highlight()
         text = (
             self._speech_text_override
@@ -3729,9 +3418,6 @@ class TranslatePopup(QDialog):
                 self._speech_trace.mark("speech_empty_input")
             self._speech_active = False
             return
-        if self._latin_only_enabled():
-            self._learn_speech_glossary(text)
-            start_offset = latin_only_click_offset(text, start_offset)
         text = text[start_offset:]
         leading_whitespace = len(text) - len(text.lstrip())
         text = text.lstrip()
@@ -3804,9 +3490,8 @@ class TranslatePopup(QDialog):
             stream_audio=True,
             trace=self._speech_trace,
         )
-        self._speech_expected_end_offset = (
-            self._speech_worker.source_end_offset
-        )
+        self._speech_expected_end_offset = self._speech_worker.source_end_offset
+        self._speech_workers.append(self._speech_worker)
         self._speech_worker.segment_stream_ready.connect(
             self._on_speech_stream_ready)
         self._speech_worker.word_boundary_ready.connect(
@@ -3822,9 +3507,9 @@ class TranslatePopup(QDialog):
             self._highlight_translation_range(*self._pending_highlight)
 
     def _create_speech_stream_server(self) -> AudioStreamServer:
-        server = AudioStreamServer()
-        self._speech_stream_server = server
-        return server
+        if self._speech_stream_server is None:
+            self._speech_stream_server = AudioStreamServer()
+        return self._speech_stream_server
 
     def _schedule_speech_prefetch(self) -> None:
         """Queue a background synthesis of the fresh translation.
@@ -3836,91 +3521,50 @@ class TranslatePopup(QDialog):
         """
         self._speech_prefetch_timer.start()
 
-    def _start_speech_prefetch(self) -> None:
-        """Synthesise the fresh translation into the disk cache, silently.
+    def prefetch_speech_markdown(self, markdown: str) -> None:
+        """Prepare the next translated page without changing the current player."""
+        text = self._speech_text_for_markdown(markdown).lstrip()
+        self._learn_speech_glossary(text)
+        self._start_speech_prefetch_text(text, next_page=True)
 
-        A cache hit replays in ~0.01s, which is what makes Read Aloud start
-        fast. Deliberately `prefetch_only` with no stream server: the worker
-        never touches the player path, so background synthesis cannot
-        disturb (or crash) playback. Anything this skips (unavailable
-        engine, huge text, chat answers, an in-progress read) simply falls
-        back to streaming speed.
-        """
+    def _start_speech_prefetch(self) -> None:
         self._speech_prefetch_timer.stop()
-        if (
-            not self._speech_available
-            or self._speech_engine != "edge"
-            or not self.settings.get("fast_mode", True)
-            or not self.chat_panel.isHidden()
-            or not self.isVisible()
-            or self._speech_text_override is not None
-            or self._speech_active
-        ):
+        if (not self.isVisible() or not self.chat_panel.isHidden()
+                or self._speech_text_override is not None or self._speech_active):
             return
         raw = self._speech_text_from_document(self.result.document())
         text = raw.lstrip()
-        if not text or len(text) > SPEECH_PREFETCH_MAX_CHARS:
-            return
-        self._learn_speech_glossary(raw)
-        source_offset = len(raw) - len(text)
-        self._start_speech_prefetch_text(text, source_offset)
+        self._start_speech_prefetch_text(text, source_offset=len(raw) - len(text))
 
-    def prefetch_speech_markdown(self, markdown: str) -> None:
-        """Prefetch the first speech segment for an upcoming translation."""
-        self._speech_prefetch_timer.stop()
-        if (
-            not self._speech_available
-            or self._speech_engine != "edge"
-            or not self.settings.get("fast_mode", True)
-            or not self.chat_panel.isHidden()
-            or self._speech_text_override is not None
-            or (self._speech_worker is not None
-                and self._speech_worker.isRunning())
-        ):
-            return
-        text = self._speech_text_from_markdown(markdown)
-        if not text or len(text) > SPEECH_PREFETCH_MAX_CHARS:
-            return
-        self._learn_speech_glossary(text)
-        self._start_speech_prefetch_text(text, 0)
 
-    def _speech_text_from_markdown(self, markdown: str) -> str:
-        from translators.chain import _remove_nonheading_bold
-
+    @classmethod
+    def _speech_text_for_markdown(cls, markdown: str) -> str:
         document = QTextDocument()
-        document.setMarkdown(self._markdown_with_inline_notation(
-            _remove_nonheading_bold(markdown),
-            reflow_soft_line_breaks=self._reflows_wrapped_prose(),
-        ))
-        return self._speech_text_from_document(document).lstrip()
+        document.setMarkdown(markdown)
+        return cls._speech_text_from_document(document)
 
     def _start_speech_prefetch_text(
-        self, text: str, source_offset: int,
+        self, text: str, *, source_offset: int = 0, next_page: bool = False
     ) -> None:
+        if (not text or len(text) > SPEECH_PREFETCH_MAX_CHARS
+                or not self._speech_available or self._speech_engine != "edge"
+                or not self.settings.get("fast_mode", True) or self._close_pending
+                or (self._speech_active and not next_page)):
+            return
         kwargs = self._speech_worker_kwargs(text, source_offset)
-        key = (
-            text,
-            kwargs["voice"],
-            kwargs["automatic_voice"],
-            kwargs["target_language"],
-            kwargs["read_latin_words"],
-            kwargs["latin_only"],
-            tuple(sorted((kwargs["glossary"] or {}).items())),
-        )
-        if key == self._speech_prefetch_key:
+        # A page is always in the translation language, even if chat is open.
+        kwargs["target_language"] = speech_language(self.settings)
+        key = (text, kwargs["voice"], kwargs["automatic_voice"],
+               kwargs["target_language"], kwargs["read_latin_words"],
+               kwargs["latin_only"], tuple(sorted(kwargs["glossary"].items())))
+        current = self._speech_prefetch_worker
+        if key == self._speech_prefetch_key and current is not None and current.isRunning():
             return
         self._cancel_speech_prefetch()
-        trace = SpeechTrace("speech-prefetch")
         kwargs["fast"] = True
-        worker = SpeechWorker(
-            text,
-            self,
-            **kwargs,
-            continuous_stream=True,
-            stream_audio=False,
-            prefetch_only=True,
-            trace=trace,
-        )
+        worker = SpeechWorker(text, self, **kwargs, continuous_stream=True,
+                              stream_audio=False, prefetch_only=True,
+                              trace=SpeechTrace("next-page-prefetch" if next_page else "speech-prefetch"))
         self._speech_prefetch_worker = worker
         self._speech_prefetch_workers.append(worker)
         self._speech_prefetch_key = key
@@ -3967,10 +3611,6 @@ class TranslatePopup(QDialog):
             from pathlib import Path
             Path(path).unlink(missing_ok=True)
             return
-        worker_disconnected = getattr(
-            worker, "disconnected_segments", ())
-        if isinstance(worker_disconnected, set):
-            self._speech_disconnected_segments.update(worker_disconnected)
         if self._speech_trace is not None:
             self._speech_trace.mark(
                 "speech_segment_ready", once=False, segment=index)
@@ -3981,14 +3621,18 @@ class TranslatePopup(QDialog):
         self._speech_paths[index] = path
         if self._play_pending_speech_offset():
             return
-        if self._speech_segment_end_pending_index == index:
-            self._resolve_segment_stream_end(index)
+        recovery_position = self._speech_stream_recovery_positions.pop(index, None)
+        if recovery_position is not None:
+            self._speech_segment_end_pending_index = None
+            self._play_speech_segment(path, recovery_position)
             return
-        if (
-            index == self._speech_index
-            and index in self._speech_disconnected_segments
-        ):
-            self._recover_disconnected_speech_segment(index)
+        if self._speech_segment_end_pending_index == index:
+            self._speech_segment_end_pending_index = None
+            self._advance_speech_segment()
+            return
+        if (index == self._speech_index and self._speech_playing_stream_index == index
+                and index in getattr(worker, "disconnected_segments", set())):
+            self._play_speech_segment(path, self._player.position())
             return
         if (
             self._speech_active
@@ -4001,22 +3645,14 @@ class TranslatePopup(QDialog):
         worker = self.sender()
         if worker is not None and worker is not self._speech_worker:
             return
-        worker_disconnected = getattr(
-            worker, "disconnected_segments", ())
-        if (
-            index in self._speech_disconnected_segments
-            or (
-                isinstance(worker_disconnected, set)
-                and index in worker_disconnected
-            )
-        ):
-            return
         if self._speech_trace is not None:
             self._speech_trace.mark(
                 "speech_stream_ready", once=False, segment=index)
         if not self._speech_active:
             return
         self._speech_stream_urls[index] = url
+        self._speech_playing_continuous_stream = bool(
+            getattr(self._speech_worker, "_continuous_stream", False))
         if (
             index == self._speech_index
             and self._pending_speech_offset is None
@@ -4036,7 +3672,7 @@ class TranslatePopup(QDialog):
             worker is None or worker is self._speech_worker
         ):
             self._speech_boundaries.setdefault(index, []).append(boundary)
-            if index == self._speech_index:
+            if self._pending_highlight is not None or not self._speech_highlight_timer.isActive():
                 self._update_speech_highlight()
 
     def _on_speech_word_boundaries(
@@ -4047,108 +3683,28 @@ class TranslatePopup(QDialog):
             worker is None or worker is self._speech_worker
         ):
             self._speech_boundaries[index] = boundaries
-            if index == 0 and self._speech_playing_stream_index == 0:
-                self._speech_boundaries_finalized = True
 
     def _play_ready_speech_segment(self, index: int) -> None:
         stream_url = self._speech_stream_urls.get(index)
         if stream_url is not None:
             self._speech_playing_stream_index = index
-            self._speech_playing_continuous_stream = bool(
-                self._speech_worker is not None
-                and getattr(self._speech_worker, "_continuous_stream", False)
-            )
             self._play_speech_source(QUrl(stream_url))
         else:
             path = self._speech_paths.get(index)
             if path is not None:
                 self._play_speech_segment(path)
 
-    def _recover_disconnected_speech_segment(self, index: int) -> None:
-        self._speech_stream_urls.pop(index, None)
-        path = self._speech_paths.get(index)
-        if path is not None:
-            if self._speech_segment_end_pending_index == index:
-                self._speech_segment_end_pending_index = None
-            position_ms = self._speech_stream_recovery_positions.pop(
-                index, 0)
-            if self._speech_trace is not None:
-                self._speech_trace.mark(
-                    "disconnected_stream_replayed_from_file",
-                    once=False,
-                    segment=index,
-                    position_ms=position_ms,
-                )
-            self._play_speech_segment(path, position_ms)
-            return
-
-        worker = self._speech_worker
-        if worker is not None and worker.isRunning():
-            self._speech_waiting = True
-            self.spin.setText("Recovering the current speech part…")
-            self.spin.show()
-            return
-        self._recover_speech_playback(
-            "Audio stream disconnected before the current speech part finished.")
-
-    def _resolve_segment_stream_end(self, index: int) -> None:
-        if (
-            not self._speech_active
-            or self._speech_segment_end_pending_index != index
-            or index != self._speech_index
-        ):
-            return
-        worker = self._speech_worker
-        worker_disconnected = getattr(
-            worker, "disconnected_segments", ())
-        if isinstance(worker_disconnected, set):
-            self._speech_disconnected_segments.update(worker_disconnected)
-
-        if index in self._speech_disconnected_segments:
-            self._speech_stream_recovery_positions[index] = (
-                self._speech_stream_recovery_positions.get(
-                    index, self._player.position())
-            )
-            self._recover_disconnected_speech_segment(index)
-            return
-
-        if index not in self._speech_paths:
-            if worker is not None and worker.isRunning():
-                self._speech_waiting = True
-                self.spin.setText("Checking the current speech part…")
-                self.spin.show()
-                return
-            self._speech_segment_end_pending_index = None
-            self._recover_speech_playback(
-                self._speech_error
-                or "Speech segment ended before its audio was finalized.")
-            return
-
-        self._speech_segment_end_pending_index = None
-        self._speech_stream_recovery_positions.pop(index, None)
-        self._speech_playing_stream_index = None
-        self._speech_playing_continuous_stream = False
-        self._speech_index = index + 1
-        if (
-            self._speech_index in self._speech_paths
-            or self._speech_index in self._speech_stream_urls
-        ):
-            self._play_ready_speech_segment(self._speech_index)
-        elif worker is not None and worker.isRunning():
-            self._speech_waiting = True
-            self.spin.setText("Preparing next speech part…")
-            self.spin.show()
-        elif self._speech_error is not None:
-            self._recover_speech_playback(self._speech_error)
-        else:
-            self._finish_speech()
-
     def _play_speech_segment(self, path: str, position_ms: int = 0) -> None:
         self._speech_playing_stream_index = None
         self._speech_playing_continuous_stream = False
+        self._speech_stream_end_pending = False
+        self._speech_segment_end_pending_index = None
+        self._speech_stream_recovery_positions = {}
         self._play_speech_source(QUrl.fromLocalFile(path), position_ms)
 
     def _play_speech_source(self, source: QUrl, position_ms: int = 0) -> None:
+        if self._player.source() != source:
+            self._speech_playback_has_started = False
         if self._speech_trace is not None:
             self._speech_trace.mark(
                 "player_source_requested",
@@ -4156,12 +3712,11 @@ class TranslatePopup(QDialog):
                 source_kind="stream" if source.isLocalFile() is False else "file",
                 position_ms=position_ms,
             )
-        self._speech_playback_has_started = False
         self._speech_waiting = False
         self.spin.hide()
+        self._speech_progress_position = None
         self.speak_btn.setEnabled(True)
         self.speak_btn.setText("Stop")
-        self._reset_speech_progress_tracking()
         self._player.setPlaybackRate(self._speech_rate)
         if self._player.source() == source and self._player.mediaStatus() in (
             QMediaPlayer.MediaStatus.LoadedMedia,
@@ -4214,24 +3769,12 @@ class TranslatePopup(QDialog):
             position_ticks = self._pending_player_position_ms * 10_000
         else:
             position_ticks = self._player.position() * 10_000
-        active_boundary = None
-        previous_boundary = None
-        for boundary in boundaries:
-            if boundary[0] > position_ticks:
-                break
-            if position_ticks < boundary[0] + boundary[1]:
-                active_boundary = boundary
-                break
-            previous_boundary = boundary
-        if active_boundary is None:
-            if previous_boundary is None:
-                # Before the first spoken word: nothing to hold yet.
-                self.result.setExtraSelections([])
-                self.chat_transcript.setExtraSelections([])
-                return
-            # Between words (a natural pause): keep the word just spoken so
-            # the highlight walks with the voice instead of blinking out.
-            active_boundary = previous_boundary
+        boundary_index = bisect_right(boundaries, position_ticks, key=lambda b: b[0]) - 1
+        if boundary_index < 0:
+            self.result.setExtraSelections([])
+            self.chat_transcript.setExtraSelections([])
+            return
+        active_boundary = boundaries[boundary_index]
 
         _, _, start, end = active_boundary
         if (
@@ -4260,52 +3803,6 @@ class TranslatePopup(QDialog):
 
         self._highlight_translation_range(start, end)
 
-    def _reset_speech_progress_tracking(self) -> None:
-        """Forget the last observed position so the next poll starts fresh."""
-        self._speech_last_progress_position_ms = None
-        self._speech_last_progress_at = 0.0
-
-    def _check_speech_playback_progress(self) -> None:
-        """Recover a player that stopped advancing without saying so.
-
-        The other recovery paths all wait for an event. A stream that simply
-        stops delivering audio leaves the position frozen while the player
-        still reports PlayingState, so no event ever arrives: without this
-        check the read hangs silently, mid-text, with the highlight stuck on
-        the last spoken word. Runs beside the highlight timer that already
-        polls playback, so it costs two integer comparisons.
-        """
-        if not self._speech_active or self._speech_waiting:
-            return
-        if (
-            self._player.playbackState()
-            != QMediaPlayer.PlaybackState.PlayingState
-        ):
-            # Paused, stopped, or between sources: the existing edge handlers
-            # own those transitions, so only rearm the counter here.
-            self._reset_speech_progress_tracking()
-            return
-        position_ms = self._player.position()
-        now = time.monotonic()
-        if position_ms != self._speech_last_progress_position_ms:
-            self._speech_last_progress_position_ms = position_ms
-            self._speech_last_progress_at = now
-            return
-        if self._speech_last_progress_at == 0.0:
-            self._speech_last_progress_at = now
-            return
-        if now - self._speech_last_progress_at < SPEECH_STALL_TIMEOUT_SECONDS:
-            return
-        if self._speech_trace is not None:
-            self._speech_trace.mark(
-                "speech_playback_stalled",
-                once=False,
-                position_ms=position_ms,
-                frozen_for_s=round(now - self._speech_last_progress_at, 1),
-            )
-        self._reset_speech_progress_tracking()
-        self._recover_speech_playback(SPEECH_STALL_MESSAGE)
-
     def _trace_speech_playback_sample(self) -> None:
         trace = self._speech_trace
         if trace is None:
@@ -4328,6 +3825,10 @@ class TranslatePopup(QDialog):
         )
 
     def _highlight_translation_range(self, start: int, end: int) -> None:
+        marker = (start, end, self.result.document().revision())
+        if self._speech_last_highlight == marker:
+            return
+        self._speech_last_highlight = marker
         source_text = self.result.toPlainText()
         cursor = self.result.textCursor()
         cursor.setPosition(python_to_qt_position(source_text, start))
@@ -4404,6 +3905,7 @@ class TranslatePopup(QDialog):
         self._speech_auto_scroll_suspended = False
 
     def _clear_speech_highlight(self) -> None:
+        self._speech_last_highlight = None
         self._speech_highlight_timer.stop()
         self._speech_auto_scroll_timer.stop()
         self._speech_auto_scroll_suspended = False
@@ -4412,28 +3914,27 @@ class TranslatePopup(QDialog):
         self.chat_transcript.setExtraSelections([])
 
     def _on_speech_failed(self, error: str) -> None:
-        worker = self.sender()
-        if worker is not None and worker is not self._speech_worker:
+        sender = self.sender()
+        if sender is not None and sender is not self._speech_worker:
             return
         self._speech_error = error
         if self._speech_trace is not None:
             self._speech_trace.mark(
                 "speech_error")
         if self._player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
-            self._recover_speech_playback(error)
+            self._finish_speech(error)
 
     def _on_speech_worker_finished(self) -> None:
         worker = self.sender()
         if not isinstance(worker, SpeechWorker):
             return
+        if worker in self._speech_workers:
+            self._speech_workers.remove(worker)
         if worker is not self._speech_worker:
             worker.cleanup_output()
             worker.deleteLater()
+            self._continue_pending_close()
             return
-        worker_disconnected = getattr(worker, "disconnected_segments", None)
-        if isinstance(worker_disconnected, set):
-            self._speech_disconnected_segments.update(
-                worker_disconnected)
         interrupted = worker.isInterruptionRequested()
         if self._speech_trace is not None:
             self._speech_trace.mark(
@@ -4449,16 +3950,6 @@ class TranslatePopup(QDialog):
             self._clear_speech_files()
             self._continue_pending_close()
             return
-        if self._speech_stream_end_pending:
-            QTimer.singleShot(0, self._resolve_continuous_stream_end)
-            return
-        if self._speech_segment_end_pending_index is not None:
-            QTimer.singleShot(
-                0,
-                lambda index=self._speech_segment_end_pending_index:
-                    self._resolve_segment_stream_end(index),
-            )
-            return
         if interrupted:
             self._clear_speech_files()
             pending_offset = self._pending_speech_offset
@@ -4471,6 +3962,9 @@ class TranslatePopup(QDialog):
                     bool(self._current_speech_text().strip())
                     and self._speech_available
                 )
+        elif self._speech_stream_end_pending:
+            self._speech_boundaries_finalized = True
+            self._resolve_continuous_stream_end()
         elif self._pending_speech_offset is not None:
             pending_offset = self._pending_speech_offset
             if not self._play_pending_speech_offset():
@@ -4489,6 +3983,10 @@ class TranslatePopup(QDialog):
                 self._finish_speech(self._speech_error)
 
     def _on_playback_state_changed(self, state) -> None:
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._speech_playback_has_started = True
+        elif state == QMediaPlayer.PlaybackState.StoppedState:
+            QTimer.singleShot(0, self._recover_unexpected_playback_stop)
         if self._speech_trace is not None:
             state_name = getattr(state, "name", str(state))
             self._speech_trace.mark(
@@ -4500,99 +3998,14 @@ class TranslatePopup(QDialog):
                     str(self._player.mediaStatus()),
                 ),
             )
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self._speech_playback_has_started = True
-            return
         if (
             state == QMediaPlayer.PlaybackState.StoppedState
             and self._speech_active
             and not self._speech_waiting
-            and self._speech_playback_has_started
+            and self._player.mediaStatus() != QMediaPlayer.MediaStatus.EndOfMedia
+            and self._speech_error is not None
         ):
-            QTimer.singleShot(0, self._recover_unexpected_playback_stop)
-
-    def _recover_unexpected_playback_stop(self) -> None:
-        if (
-            not self._speech_active
-            or self._speech_waiting
-            or not self._speech_playback_has_started
-            or self._player.playbackState()
-            != QMediaPlayer.PlaybackState.StoppedState
-            or self._player.mediaStatus()
-            == QMediaPlayer.MediaStatus.EndOfMedia
-        ):
-            return
-        self._recover_speech_playback(
-            self._speech_error or "Audio playback stopped unexpectedly."
-        )
-
-    def _speech_resume_offset(self) -> int:
-        boundaries = self._speech_boundaries.get(self._speech_index, [])
-        if not boundaries:
-            earlier_indices = [
-                index for index in self._speech_boundaries
-                if index < self._speech_index
-            ]
-            if earlier_indices:
-                boundaries = self._speech_boundaries[max(earlier_indices)]
-        if not boundaries:
-            return self._speech_start_offset
-
-        position_ticks = self._player.position() * 10_000
-        previous_boundary = None
-        for boundary in boundaries:
-            start, duration, source_start, _ = boundary
-            if start > position_ticks:
-                break
-            if position_ticks < start + duration:
-                return source_start
-            previous_boundary = boundary
-        if previous_boundary is not None:
-            return previous_boundary[2]
-        return self._speech_start_offset
-
-    def _recover_speech_playback(self, error: str) -> None:
-        if not self._speech_active:
-            if self._pending_speech_offset is not None:
-                return
-            self._finish_speech(error)
-            return
-        if self._speech_recovery_attempts >= MAX_SPEECH_RECOVERY_ATTEMPTS:
-            self._finish_speech(error)
-            return
-
-        resume_offset = self._speech_resume_offset()
-        self._speech_recovery_attempts += 1
-        self._speech_error = None
-        if self._speech_trace is not None:
-            self._speech_trace.mark(
-                "playback_recovery_started",
-                once=False,
-                offset=resume_offset,
-                attempt=self._speech_recovery_attempts,
-                error=error,
-            )
-
-        worker = self._speech_worker
-        if worker is not None and worker.isRunning():
-            self._pending_speech_offset = resume_offset
-            self._speech_active = False
-            self._speech_stream_end_pending = False
-            self._speech_segment_end_pending_index = None
-            self._player.stop()
-            self._player.setSource(QUrl())
-            self._pending_player_position_ms = None
-            self._pending_player_source = None
-            worker.requestInterruption()
-            self._close_speech_stream_server()
-            self.speak_btn.setEnabled(False)
-            self.speak_btn.setText("Recovering speech…")
-            self.spin.setText("Resuming speech from the last word…")
-            self.spin.show()
-            return
-
-        self._pending_speech_offset = None
-        self._begin_speech(resume_offset)
+            self._finish_speech(self._speech_error)
 
     def _on_media_status_changed(self, status) -> None:
         if self._speech_trace is not None:
@@ -4616,60 +4029,34 @@ class TranslatePopup(QDialog):
             self._player.play()
         if not self._speech_active or status != QMediaPlayer.MediaStatus.EndOfMedia:
             return
-        stream_index = self._speech_playing_stream_index
-        worker = self._speech_worker
-        worker_disconnected = getattr(
-            worker, "disconnected_segments", ())
-        if (
-            stream_index is not None
-            and (
-                stream_index in self._speech_disconnected_segments
-                or (
-                    isinstance(worker_disconnected, set)
-                    and stream_index in worker_disconnected
-                )
-            )
-        ):
-            self._speech_disconnected_segments.add(stream_index)
-            if self._speech_playing_continuous_stream:
-                self._recover_speech_playback(
-                    "Audio stream disconnected before the reading finished.")
-            else:
-                self._speech_stream_recovery_positions[stream_index] = (
-                    self._player.position())
-                self._recover_disconnected_speech_segment(stream_index)
-            return
-        if (
-            self._speech_playing_stream_index is not None
-            and self._speech_playing_continuous_stream
-        ):
+        if self._speech_playing_continuous_stream:
             self._speech_stream_end_pending = True
-            if self._speech_trace is not None:
-                self._speech_trace.mark(
-                    "continuous_stream_media_ended",
-                    once=False,
-                    segment=self._speech_playing_stream_index,
-                    position_ms=self._player.position(),
-                )
-            if self._speech_worker is None or not self._speech_worker.isRunning():
-                self._resolve_continuous_stream_end()
-            else:
+            if self._speech_worker is not None and self._speech_worker.isRunning():
                 self._speech_waiting = True
-                self.spin.setText("Checking speech playback…")
+                self.spin.setText("Finishing speech preparation…")
                 self.spin.show()
+            else:
+                self._speech_boundaries_finalized = True
+                self._resolve_continuous_stream_end()
             return
-        if stream_index is not None:
-            self._speech_stream_recovery_positions[stream_index] = (
-                self._player.position())
-            self._speech_segment_end_pending_index = stream_index
-            self._speech_stream_urls.pop(stream_index, None)
-            self._speech_waiting = True
-            self.spin.setText("Checking the current speech part…")
-            self.spin.show()
-            self._resolve_segment_stream_end(stream_index)
-            return
-        self._speech_playing_stream_index = None
-        self._speech_playing_continuous_stream = False
+        index = self._speech_index
+        if self._speech_playing_stream_index == index:
+            disconnected = index in getattr(self._speech_worker, "disconnected_segments", set())
+            if disconnected:
+                self._speech_stream_urls.pop(index, None)
+                if index in self._speech_paths:
+                    self._play_speech_segment(self._speech_paths[index], self._player.position())
+                else:
+                    self._speech_stream_recovery_positions[index] = self._player.position()
+                    self._speech_waiting = True
+                return
+            if index not in self._speech_paths and self._speech_worker is not None and self._speech_worker.isRunning():
+                self._speech_segment_end_pending_index = index
+                self._speech_waiting = True
+                return
+        self._advance_speech_segment()
+
+    def _advance_speech_segment(self) -> None:
         self._speech_index += 1
         if (
             self._speech_index in self._speech_paths
@@ -4680,73 +4067,86 @@ class TranslatePopup(QDialog):
             self._speech_waiting = True
             self.spin.setText("Preparing next speech part…")
             self.spin.show()
-        elif self._speech_error is not None:
-            self._recover_speech_playback(self._speech_error)
         else:
-            self._finish_speech()
+            self._finish_speech(self._speech_error)
 
     def _resolve_continuous_stream_end(self) -> None:
-        self._speech_stream_end_pending = False
         if not self._speech_active:
             return
-        stream_index = self._speech_playing_stream_index
-        if (
-            self._speech_playing_continuous_stream
-            and stream_index is not None
-            and stream_index in self._speech_disconnected_segments
-        ):
-            self._recover_speech_playback(
-                "Audio stream disconnected before the reading finished.")
+        self._speech_stream_end_pending = False
+        self._speech_segment_end_pending_index = None
+        self._speech_stream_recovery_positions = {}
+        if self._speech_error:
+            self._finish_speech(self._speech_error)
             return
-
-        last_spoken_offset = max(
-            (
-                boundary[3]
-                for boundaries in self._speech_boundaries.values()
-                for boundary in boundaries
-            ),
-            default=self._speech_start_offset,
-        )
-        expected_end = self._speech_expected_end_offset
-        incomplete = (
-            not self._speech_boundaries_finalized
-            or (
-                expected_end is not None
-                and last_spoken_offset < expected_end
-            )
-        )
-        if self._speech_trace is not None:
-            self._speech_trace.mark(
-                "continuous_stream_end_checked",
-                once=False,
-                expected_end=expected_end,
-                last_spoken_offset=last_spoken_offset,
-                incomplete=incomplete,
-                error=self._speech_error,
-            )
-
-        if incomplete or self._speech_error is not None:
-            self._recover_speech_playback(
-                self._speech_error
-                or "Speech audio ended before the full translation was read."
-            )
-        else:
+        boundaries = self._speech_boundaries.get(0, [])
+        position_ticks = self._player.position() * 10_000
+        complete = not boundaries or (
+            self._speech_boundaries_finalized
+            and boundaries[-1][3] >= self._speech_expected_end_offset
+            and position_ticks + 2_500_000 >= boundaries[-1][0] + boundaries[-1][1])
+        if complete:
             self._finish_speech()
+        else:
+            self._recover_speech_playback("Audio stream ended before the text was finished.")
+
+    def _recover_unexpected_playback_stop(self) -> None:
+        if (self._speech_active and self._speech_playback_has_started and not self._speech_waiting
+                and self._pending_player_source is None
+                and self._player.playbackState() == QMediaPlayer.PlaybackState.StoppedState
+                and self._player.mediaStatus() not in (
+                    QMediaPlayer.MediaStatus.EndOfMedia, QMediaPlayer.MediaStatus.NoMedia)):
+            self._recover_speech_playback("Audio playback stopped unexpectedly.")
+
+    def _check_speech_playback_progress(self) -> None:
+        if (not self._speech_active or self._speech_waiting or not self._speech_playback_has_started
+                or self._player.playbackState() != QMediaPlayer.PlaybackState.PlayingState):
+            self._speech_progress_position = None
+            return
+        position = self._player.position()
+        now = time.monotonic()
+        if self._speech_progress_position != position:
+            self._speech_progress_position = position
+            self._speech_progress_since = now
+        elif now - self._speech_progress_since >= 10:
+            self._speech_progress_position = None
+            self._recover_speech_playback("Audio playback stalled before the text was finished.")
+
+    def _recover_speech_playback(self, reason: str) -> None:
+        if not self._speech_active:
+            return
+        if self._speech_recovery_attempts >= 1:
+            self._finish_speech(reason)
+            return
+        self._speech_recovery_attempts += 1
+        position_ms = self._player.position()
+        path = self._speech_paths.get(self._speech_index)
+        if path is not None and self._speech_playing_stream_index is not None:
+            # Switch a failed non-seekable stream to its already prepared file.
+            self._close_speech_stream_server()
+            self._play_speech_segment(path, position_ms)
+            return
+        offset = self._current_speech_offset()
+        self._speech_active = False
+        self._player.stop()
+        self._player.setSource(QUrl())
+        self._close_speech_stream_server()
+        if self._speech_worker is not None and self._speech_worker.isRunning():
+            self._pending_speech_offset = offset
+            self._speech_worker.requestInterruption()
+        else:
+            self._speech_active = True
+            self._begin_speech(offset)
 
     def _finish_speech(self, error: str | None = None) -> None:
         self._speech_active = False
         self._speech_waiting = False
-        self._speech_playback_has_started = False
-        self._reset_speech_progress_tracking()
-        self._speech_stream_end_pending = False
-        self._speech_expected_end_offset = None
-        self._speech_boundaries_finalized = False
-        self._speech_stream_urls.clear()
-        self._speech_disconnected_segments.clear()
-        self._speech_stream_recovery_positions.clear()
-        self._speech_segment_end_pending_index = None
-        self._speech_playing_stream_index = None
         self._speech_playing_continuous_stream = False
+        self._speech_stream_end_pending = False
+        self._speech_segment_end_pending_index = None
+        self._speech_stream_recovery_positions = {}
+        self._speech_stream_urls.clear()
+        self._speech_playing_stream_index = None
         self._speech_boundaries.clear()
         self._pending_highlight = None
         self._clear_speech_highlight()
@@ -4776,6 +4176,8 @@ class TranslatePopup(QDialog):
         self.speechFinished.emit(error or "")
 
     def _on_playback_error(self, error, message: str) -> None:
+        if not self._speech_active:
+            return
         if error != QMediaPlayer.Error.NoError or message:
             error_text = message or error.name
             logging.warning(
@@ -4784,14 +4186,30 @@ class TranslatePopup(QDialog):
                 self._player.source().toString(),
                 self._player.position(),
             )
-            self._recover_speech_playback(
-                f"Audio playback failed: {error_text}")
+            index = self._speech_index
+            if (self._speech_playing_stream_index is not None
+                    and index not in self._speech_paths
+                    and self._speech_worker is not None and self._speech_worker.isRunning()):
+                # A streaming backend may reopen an unseekable HTTP response.
+                # Let the same synthesis finish and resume its seekable file.
+                self._speech_stream_recovery_positions[index] = self._player.position()
+                self._speech_stream_urls.pop(index, None)
+                self._speech_waiting = True
+                self._close_speech_stream_server()
+                self._player.stop()
+                self.spin.setText("Preparing audio for playback…")
+                self.spin.show()
+                return
+            self._recover_speech_playback(f"Audio playback failed: {error_text}")
 
-    def _close_speech_stream_server(self) -> None:
+    def _close_speech_stream_server(self, *, shutdown: bool = False) -> None:
         server = self._speech_stream_server
-        self._speech_stream_server = None
         if server is not None:
-            server.close()
+            if shutdown:
+                self._speech_stream_server = None
+                server.close()
+            else:
+                server.abort_all()
 
     def _clear_speech_files(self) -> None:
         from pathlib import Path
@@ -4815,6 +4233,8 @@ class TranslatePopup(QDialog):
             self._voice_list_worker is not None
             and self._voice_list_worker.isRunning()
         ) or self._speech_prefetch_workers or any(
+            worker.isRunning() for worker in self._speech_workers
+        ) or any(
             worker.isRunning() for worker in self._translation_workers
         ) or any(worker.isRunning() for worker in self._chat_workers):
             return
@@ -4881,9 +4301,11 @@ class TranslatePopup(QDialog):
             self._player.setSource(QUrl())
         except Exception:
             pass
-        self._close_speech_stream_server()
+        self._close_speech_stream_server(shutdown=True)
         voice_worker = self._voice_list_worker
-        speech_running = speech_worker is not None and speech_worker.isRunning()
+        speech_running = (
+            speech_worker is not None and speech_worker.isRunning()
+        ) or any(worker.isRunning() for worker in self._speech_workers)
         prefetch_pending = bool(self._speech_prefetch_workers)
         voices_running = voice_worker is not None and voice_worker.isRunning()
         translation_running = any(
@@ -4899,7 +4321,11 @@ class TranslatePopup(QDialog):
             self._player.stop()
             self._player.setSource(QUrl())
             if speech_running:
-                speech_worker.requestInterruption()
+                if speech_worker is not None:
+                    speech_worker.requestInterruption()
+                for worker in self._speech_workers:
+                    if worker.isRunning():
+                        worker.requestInterruption()
             for worker in self._speech_prefetch_workers:
                 if worker.isRunning():
                     worker.requestInterruption()

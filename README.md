@@ -1,5 +1,7 @@
 # Capio
 
+**Current version: V1.0** — also shown at the bottom of Settings.
+
 **Translate. Understand. Listen.**
 Your AI reading companion, right inside your book.
 
@@ -55,8 +57,14 @@ then translate its text with OCR or send the image to a vision-capable model.
 - Ask AI to explain difficult passages.
 - Listen to translations and follow word-by-word highlighting; resume where you
   stopped.
-- With Edge TTS and Fast mode, Capio can prepare completed translations for
-  quicker playback when you press **Read aloud**.
+- With Edge TTS and Fast mode, Capio prepares completed translations and the
+  next translated page in the background for quicker **Read aloud** playback.
+  Prefetch never starts playback by itself.
+- Uncached speech starts streaming before synthesis finishes. Continuous reads
+  avoid artificial short segments, and completed audio can be reused to jump
+  to a clicked word without requesting the same speech again.
+- Arabic reading speed is saved independently from the shared speed for other
+  languages, and can be changed during playback.
 - Translate pages and continue through a book with automatic page-by-page
   reading.
 - Use the floating translator outside the book reader.

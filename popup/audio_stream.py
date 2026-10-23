@@ -16,6 +16,15 @@ class _AudioStream:
         self._state_changed = threading.Condition()
         self._finished = False
         self._queued_bytes = 0
+        self._reader_claimed = False
+
+    def claim_reader(self) -> bool:
+        """A stream queue can feed exactly one HTTP response."""
+        with self._state_changed:
+            if self._reader_claimed or self._closed.is_set():
+                return False
+            self._reader_claimed = True
+            return True
 
     def write(self, audio: bytes) -> bool:
         for offset in range(0, len(audio), STREAM_QUEUE_MAX_BYTES):
@@ -88,15 +97,17 @@ class AudioStreamServer:
                 if stream is None:
                     self.send_error(404)
                     return
-
-                self.send_response(200)
-                self.send_header("Content-Type", "audio/mpeg")
-                self.send_header("Transfer-Encoding", "chunked")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Connection", "close")
-                self.end_headers()
+                if not stream.claim_reader():
+                    self.send_error(409, "Audio stream already has a reader")
+                    return
 
                 try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
                     while True:
                         chunk = stream.get()
                         if chunk is None:
@@ -162,6 +173,14 @@ class AudioStreamServer:
             if self._streams.get(token) is stream:
                 del self._streams[token]
         stream.close()
+
+    def abort_all(self) -> None:
+        """Invalidate reads immediately while retaining the listening server."""
+        with self._lock:
+            streams = list(self._streams.values())
+            self._streams.clear()
+        for stream in streams:
+            stream.close()
 
     def close(self) -> None:
         with self._lock:

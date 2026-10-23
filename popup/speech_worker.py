@@ -6,12 +6,14 @@ import base64
 import binascii
 from contextvars import ContextVar
 import difflib
+from functools import wraps
 import hashlib
 import json
 import math
 import os
 import re
 import tempfile
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -41,6 +43,7 @@ else:
 from PySide6.QtCore import QThread, Signal
 
 from .audio_stream import AudioStreamServer
+from .speech_voices import GEMINI_TTS_VOICES
 
 
 class SpeechTraceLike(Protocol):
@@ -135,10 +138,13 @@ EDGE_TTS_PREFERRED_LANGUAGE_CODES = frozenset(
     {"ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "pt", "ru", "zh"}
 )
 SPEECH_RATE = "+15%"
-# Classic playback keeps only the first request short for a quick start.
-# Continuous reads bound long requests while preserving sentence punctuation.
+# Classic segmented playback keeps only the first request short for a quick
+# start. Continuous playback uses one Communicate stream per read, avoiding
+# extra application-level synthesis boundaries. edge-tts still handles its
+# own service byte limits internally.
 FIRST_CHUNK_LENGTH = 90
-# Retained for compatibility with callers that used a longer first chunk.
+# Retained for compatibility; continuous playback no longer cuts a short first
+# synthesis request because that boundary itself was audible.
 CONTINUOUS_FIRST_CHUNK_LENGTH = 240
 MAX_CHUNK_LENGTH = 1200
 MAX_PARALLEL_SEGMENTS = 3
@@ -175,6 +181,32 @@ _NON_PAUSING_SPEECH_WRAPPERS = frozenset("()[]{}\"“”‘’_")
 # other punctuation or symbol still becomes a comma pause; without that cleanup,
 # Edge TTS can spell out or stumble over markup-like characters from PDFs.
 _SENTENCE_FINAL_PUNCTUATION = frozenset({".", "!", "?", "؟", "…"})
+_TTS_CACHE_LOCK = threading.RLock()
+
+
+def _cache_synchronized(function):
+    """Keep playback and prefetch cache operations consistent in this process."""
+    @wraps(function)
+    def locked(*args, **kwargs):
+        with _TTS_CACHE_LOCK:
+            return function(*args, **kwargs)
+    return locked
+
+
+def _atomic_cache_write(path: Path, content: bytes) -> None:
+    """Publish a complete cache file, keeping temporary files on the same disk."""
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
 def _speech_text_for_synthesis(text: str, target_language: str) -> str:
     if target_language.casefold().split("-", 1)[0] == "ar":
         return text.translate(_WESTERN_TO_ARABIC_DIGITS)
@@ -220,6 +252,7 @@ def _cache_key(
     ).hexdigest()
 
 
+@_cache_synchronized
 def _prune_cache() -> None:
     """Drop cache entries older than a week and enforce the entry-count cap."""
     try:
@@ -250,10 +283,14 @@ def _prune_cache() -> None:
         except OSError:
             continue
 
-    audio_keys = {path.stem for path in files if path not in expired}
     try:
         for metadata in cache_dir.glob("*.json"):
-            if metadata.stem not in audio_keys:
+            # Check the current filesystem rather than the earlier scan: a
+            # prefetch may have published audio and metadata since that scan.
+            if not any(
+                metadata.with_suffix(suffix).is_file()
+                for suffix in (".mp3", ".wav")
+            ):
                 metadata.unlink(missing_ok=True)
     except OSError:
         return
@@ -292,44 +329,30 @@ def snap_speed_to_quarter(value: float) -> float:
         return normalize_speed(nearest_step)
     return speed
 
+
+def speech_language(settings: dict, *, chat: bool = False) -> str:
+    language = settings.get("target_language", "ar")
+    if chat and settings.get("chat_reply_language_only", False):
+        language = settings.get("chat_reply_language", language)
+    return str(language or "ar").replace("_", "-").casefold()
+
+
+def speech_rate_setting_key(settings: dict, *, chat: bool = False) -> str:
+    return ("speech_rate_arabic" if speech_language(settings, chat=chat).split("-", 1)[0] == "ar"
+            else "speech_rate_other")
+
+
+def configured_speech_rate(settings: dict, *, chat: bool = False) -> float:
+    return normalize_speed(settings.get(
+        speech_rate_setting_key(settings, chat=chat),
+        settings.get("speech_rate", settings.get("chat_speech_rate", DEFAULT_SPEECH_RATE))))
+
 MISSING_SPEECH_MESSAGE = (
     "Read aloud needs an internet connection and the edge-tts package."
 )
 GEMINI_TTS_ENGINE = "gemini"
 GEMINI_TTS_MODEL = "gemini-3.8-flash-tts"
 GEMINI_TTS_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
-GEMINI_TTS_VOICES = (
-    ("Zephyr", "Bright"),
-    ("Puck", "Upbeat"),
-    ("Charon", "Informative"),
-    ("Kore", "Firm"),
-    ("Fenrir", "Excitable"),
-    ("Leda", "Youthful"),
-    ("Orus", "Firm"),
-    ("Aoede", "Breezy"),
-    ("Callirrhoe", "Easy-going"),
-    ("Autonoe", "Bright"),
-    ("Enceladus", "Breathy"),
-    ("Iapetus", "Clear"),
-    ("Umbriel", "Easy-going"),
-    ("Algieba", "Smooth"),
-    ("Despina", "Smooth"),
-    ("Erinome", "Clear"),
-    ("Algenib", "Gravelly"),
-    ("Rasalgethi", "Informative"),
-    ("Laomedeia", "Upbeat"),
-    ("Achernar", "Soft"),
-    ("Alnilam", "Firm"),
-    ("Schedar", "Even"),
-    ("Gacrux", "Mature"),
-    ("Pulcherrima", "Forward"),
-    ("Achird", "Friendly"),
-    ("Zubenelgenubi", "Casual"),
-    ("Vindemiatrix", "Gentle"),
-    ("Sadachbia", "Lively"),
-    ("Sadaltager", "Knowledgeable"),
-    ("Sulafat", "Warm"),
-)
 
 
 def speech_missing_message(engine: str = "edge") -> str:
@@ -490,11 +513,18 @@ def split_speech_text(
 
 
 def _split_continuous_speech_text(text: str) -> list[str]:
-    """Normalize a read into bounded requests while preserving punctuation."""
+    """Normalize one read without adding application-level boundaries.
+
+    Continuous playback keeps one Communicate stream. Word wrapping here is
+    disabled by giving the whole passage as its own limit; edge-tts applies
+    its own byte-based service limits. Playback can start on the first audio
+    chunk without waiting for the complete response.
+    """
+    whole_text_length = max(1, len(text))
     return split_speech_text(
         text,
-        max_length=MAX_CHUNK_LENGTH,
-        first_chunk_length=MAX_CHUNK_LENGTH,
+        max_length=whole_text_length,
+        first_chunk_length=whole_text_length,
         preserve_sentence_punctuation=True,
     )
 
@@ -630,6 +660,7 @@ class SpeechWorker(QThread):
         glossary: dict[str, str] | None = None,
     ):
         super().__init__(parent)
+        target_language = str(target_language or "ar").replace("_", "-").casefold()
         continuous = bool(continuous_stream and engine == "edge")
         (
             self._segments,
@@ -675,7 +706,7 @@ class SpeechWorker(QThread):
         self._stream_server = stream_server
         self._owns_stream_server = stream_server is None
         self._stream_audio = bool(stream_audio)
-        self._continuous_stream = continuous and len(self._segments) == 1
+        self._continuous_stream = continuous and self._stream_audio
         self.disconnected_segments: set[int] = set()
         self._prefetch_only = prefetch_only
         self._trace = trace
@@ -720,7 +751,7 @@ class SpeechWorker(QThread):
                 )
             if self._owns_stream_server and self._stream_server is not None:
                 self._stream_server.close()
-            if self.isInterruptionRequested() or self._continuous_stream:
+            if self.isInterruptionRequested():
                 self.cleanup_output()
 
     async def _synthesize(self) -> None:
@@ -917,7 +948,12 @@ class SpeechWorker(QThread):
                 first_audio_bytes * 8 * _TICKS_PER_SECOND
                 // _MP3_BITRATE_BPS
             )
-            self._cleanup_output_path(Path(first_path))
+            if total == 1:
+                # The completed file is seekable while its stream keeps
+                # playing; a word click can reuse it without a new request.
+                self.segment_ready.emit(0, first_path)
+            else:
+                self._cleanup_output_path(Path(first_path))
 
             for index in range(1, total):
                 if self.isInterruptionRequested():
@@ -934,13 +970,14 @@ class SpeechWorker(QThread):
                     index, result, handoff_wait_ms)
                 self.word_boundaries.emit(0, list(all_boundaries))
         finally:
-            for task in prefetch_tasks.values():
+            tasks = [first_task, *prefetch_tasks.values()]
+            for task in tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(
-                first_task, *prefetch_tasks.values(), return_exceptions=True
-            )
+            # Wake a write blocked by the bounded audio queue before waiting
+            # for cancelled tasks and the executor threads that perform it.
             await asyncio.to_thread(stream_server.finish, token)
+            await asyncio.gather(*tasks, return_exceptions=True)
             if self._trace is not None:
                 self._trace.mark("continuous_stream_finished")
 
@@ -1072,6 +1109,9 @@ class SpeechWorker(QThread):
 
         boundaries: list[tuple[int, int, int, int]] = []
         boundary_word_ranges: list[tuple[int, int]] = []
+        # A continuous read may contain thousands of words. Tokenizing the
+        # complete passage on every WordBoundary makes alignment quadratic.
+        spoken_words = _speech_source_word_spans(synthesis_text)
         chunks: list[bytes] = []
         stream: tuple[AudioStreamServer, str] | None = None
         word_index = 0
@@ -1083,17 +1123,17 @@ class SpeechWorker(QThread):
 
         async def write_audio(
             server: AudioStreamServer, stream_token: str, audio_data: bytes
-        ) -> bool | None:
+        ) -> None:
             nonlocal audio_write_total_ms, audio_write_max_ms
             write_started_ns = time.perf_counter_ns()
-            accepted = await asyncio.to_thread(
-                server.write, stream_token, audio_data)
+            accepted = await asyncio.to_thread(server.write, stream_token, audio_data)
+            if accepted is False:
+                self.disconnected_segments.add(index)
             write_ms = (
                 time.perf_counter_ns() - write_started_ns
             ) / 1_000_000
             audio_write_total_ms += write_ms
             audio_write_max_ms = max(audio_write_max_ms, write_ms)
-            return accepted
 
         try:
             if getattr(edge_tts, "Communicate", None) is None:
@@ -1136,10 +1176,8 @@ class SpeechWorker(QThread):
                                 chunk_bytes=len(audio),
                             )
                     if continuous_token is not None:
-                        accepted = await write_audio(
+                        await write_audio(
                             self._stream_server, continuous_token, audio)
-                        if accepted is False:
-                            self.disconnected_segments.add(index)
                     elif (
                         self._stream_audio
                         and not self._prefetch_only
@@ -1152,10 +1190,7 @@ class SpeechWorker(QThread):
                         stream = (self._stream_server, token)
                         self.segment_stream_ready.emit(index, url)
                     if stream is not None:
-                        accepted = await write_audio(
-                            stream[0], stream[1], audio)
-                        if accepted is False:
-                            self.disconnected_segments.add(index)
+                        await write_audio(stream[0], stream[1], audio)
                 elif chunk["type"] == "WordBoundary":
                     if first_boundary:
                         first_boundary = False
@@ -1173,7 +1208,8 @@ class SpeechWorker(QThread):
                     first_word = word_index
                     matched = _match_synthesis_boundary_span(
                         chunk.get("text", ""), synthesis_text,
-                        self._source_text, spans, word_index)
+                        self._source_text, spans, word_index,
+                        spoken_words=spoken_words)
                     if matched is not None:
                         start, end, word_index = matched
                         boundary_word_ranges.append((first_word, word_index))
@@ -1288,6 +1324,7 @@ class SpeechWorker(QThread):
         return str(path), boundaries
 
     @staticmethod
+    @_cache_synchronized
     def _read_cache(
         key: str, *, suffix: str = ".mp3"
     ) -> tuple[bytes, list] | None:
@@ -1302,9 +1339,26 @@ class SpeechWorker(QThread):
             if isinstance(metadata, dict):
                 if metadata.get("audio_size") != len(audio):
                     return None
+                digest = metadata.get("audio_sha256")
+                if digest is not None and digest != hashlib.sha256(audio).hexdigest():
+                    return None
                 boundary_data = metadata.get("boundaries", [])
             else:
                 boundary_data = metadata
+            if not isinstance(boundary_data, list):
+                return None
+            previous_start = -1
+            for boundary in boundary_data:
+                if (
+                    not isinstance(boundary, (list, tuple))
+                    or len(boundary) != 4
+                    or any(type(value) is not int for value in boundary)
+                ):
+                    return None
+                start, duration, first, last = boundary
+                if start < 0 or start < previous_start or duration < 0 or first < 0 or last <= first:
+                    return None
+                previous_start = start
             boundaries = [tuple(b) for b in boundary_data]
         except (OSError, TypeError, ValueError):
             return None
@@ -1319,6 +1373,7 @@ class SpeechWorker(QThread):
         return audio, boundaries
 
     @staticmethod
+    @_cache_synchronized
     def _write_cache(
         key: str,
         audio: bytes,
@@ -1326,18 +1381,29 @@ class SpeechWorker(QThread):
         *,
         suffix: str = ".mp3",
     ) -> None:
+        metadata_path: Path | None = None
+        audio_published = False
         try:
             cache = _cache_dir()
-            (cache / f"{key}{suffix}").write_bytes(audio)
-            (cache / f"{key}.json").write_text(
+            metadata_path = cache / f"{key}.json"
+            _atomic_cache_write(cache / f"{key}{suffix}", audio)
+            audio_published = True
+            _atomic_cache_write(
+                metadata_path,
                 json.dumps({
                     "audio_size": len(audio),
+                    "audio_sha256": hashlib.sha256(audio).hexdigest(),
                     "boundaries": [list(b) for b in boundaries],
-                }),
-                encoding="utf-8",
+                }).encode("utf-8"),
             )
         except OSError:
-            pass
+            # If publication stops between the two files, legacy metadata
+            # without a checksum must not describe the replacement audio.
+            if audio_published and metadata_path is not None:
+                try:
+                    metadata_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def cleanup_output(self) -> None:
         """Delete temp mp3s; keep locked ones for a later cleanup retry."""
@@ -2049,10 +2115,11 @@ def _speech_segments_with_voices(
 ) -> tuple[list[str], list[str], list[list[tuple[int, int]]]]:
     """Split speech into script runs and retain each segment's source spans.
 
-    ``continuous=True`` keeps the whole read as one synthesis request. Separate
-    Edge requests restart prosody and MP3 framing, which is heard as a short
-    stop at an otherwise arbitrary word boundary.
+    ``continuous=True`` keeps the whole read as one worker segment, avoiding
+    additional application-level request boundaries. edge-tts can still split
+    oversized input internally according to its own service byte limits.
     """
+    target_language = str(target_language or "ar").replace("_", "-").casefold().split("-", 1)[0]
     words = _speech_source_word_spans(text)
     script_spans = words
     if not words:
@@ -2352,10 +2419,13 @@ def _match_synthesis_boundary_span(
     source_text: str,
     source_spans: list[tuple[int, int]],
     next_word_index: int,
+    *,
+    spoken_words: list[tuple[int, int]] | None = None,
 ) -> tuple[int, int, int] | None:
     """Prefer alignment against the actual spoken words after pronunciation conversion."""
     target = _normalize_boundary_token(boundary_text)
-    spoken_words = _speech_source_word_spans(synthesis_text)
+    if spoken_words is None:
+        spoken_words = _speech_source_word_spans(synthesis_text)
     if target:
         search_end = min(next_word_index + 4, len(spoken_words))
         for start_index in range(next_word_index, search_end):

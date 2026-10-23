@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from config.app_log import get_logger
+from config.version import APP_VERSION
 from config.settings import (
     copy_settings,
     DEFAULT_LINE_SPACING, DEFAULT_MODEL,
@@ -930,6 +931,12 @@ class SettingsDialog(QDialog):
         lay.addWidget(self._sidebar_splitter, 1)
 
         # Sidebar footer: version + storage path hint
+        self._version_label = QLabel(f"Version: V{APP_VERSION}")
+        self._version_label.setObjectName("settingsAppVersion")
+        self._version_label.setProperty("theme_color_role", "muted")
+        self._version_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._version_label.setStyleSheet(f"color: {self._theme_colors()['muted']}; font-size: 13px; font-weight: 700; background: transparent; border: none;")
+        lay.addWidget(self._version_label)
         foot = QLabel(f"Config: {SETTINGS_PATH.name}")
         foot.setObjectName("settingsConfigPath")
         foot.setProperty("theme_color_role", "muted")
@@ -3262,6 +3269,8 @@ class SettingsDialog(QDialog):
         worker = self.sender()
         if worker is self._tts_voice_list_worker:
             self._tts_voice_list_worker = None
+        if worker is not None:
+            worker.deleteLater()
         self.edge_speech_voice_refresh.setEnabled(
             self.speech_engine.currentData() == "edge")
 

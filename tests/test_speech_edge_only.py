@@ -13,6 +13,25 @@ from popup import speech_worker
 
 
 class TestSpeechSynthesis(unittest.TestCase):
+    def test_join_mp3_segments_preserves_order_and_offsets_boundaries(self):
+        first_boundaries = [(0, 1_000_000, 0, 1)]
+        second_boundaries = [(2_000_000, 1_000_000, 10, 11)]
+
+        audio, boundaries = speech_worker._join_mp3_segments([
+            (b"first", first_boundaries),
+            (b"second", second_boundaries),
+        ])
+
+        expected_offset = (
+            len(b"first") * 8 * speech_worker._TICKS_PER_SECOND
+            // speech_worker._MP3_BITRATE_BPS
+        )
+        self.assertEqual(audio, b"firstsecond")
+        self.assertEqual(boundaries, [
+            (0, 1_000_000, 0, 1),
+            (2_000_000 + expected_offset, 1_000_000, 10, 11),
+        ])
+
     def test_gemini_tts_uses_selected_voice_and_wav_response(self):
         wav = b"RIFF\x00\x00\x00\x00WAVEfake-wav-data"
         encoded = base64.b64encode(wav).decode("ascii")
@@ -409,7 +428,7 @@ class TestSpeechSynthesis(unittest.TestCase):
             ["ar-SA-ZariyahNeural"],
         )
 
-    def test_continuous_arabic_playback_uses_one_synthesis_request(self):
+    def test_continuous_arabic_playback_starts_with_short_lead_in(self):
         text = (
             "في صباح بارد ومشرق من أيام الربيع الأولى، استيقظت المدينة "
             "على ضجيج غير معتاد تسرب من نوافذ البيوت المغلقة بإحكام. "
@@ -428,8 +447,90 @@ class TestSpeechSynthesis(unittest.TestCase):
             stream_audio=False,
         )
 
-        self.assertEqual(len(worker._segments), 1)
-        self.assertIn("البحر. قال", worker._segments[0])
+        # The short lead-in extends past sentence endings so it does not
+        # create an avoidable handoff pause at the end of a short sentence.
+        self.assertEqual(len(worker._segments), 2)
+        self.assertLessEqual(
+            len(worker._segments[0]), speech_worker.SPEECH_LEAD_IN_LENGTH)
+        self.assertIn("خرج الناس", worker._segments[0])
+        self.assertFalse(
+            worker._segments[0].endswith(
+                tuple(speech_worker._SENTENCE_FINAL_PUNCTUATION)))
+        self.assertIn("يتبادلون", worker._segments[1])
+        self.assertIn("ألفة", worker._segments[1])
+
+    def test_short_first_sentence_shares_lead_in_with_following_sentence(self):
+        text = (
+            "هذا اختبار عملي لقراءة النص من بدايته حتى نهايته. "
+            "نريد التأكد أن الصوت يواصل القراءة بعد المقطع الأول من غير وقفة، "
+            "ونراقب الكلمات بعد العشرين إلى أن ينتهي النص بالكامل."
+        )
+        worker = speech_worker.SpeechWorker(
+            text,
+            voice="fr-FR-VivienneMultilingualNeural",
+            target_language="ar",
+            continuous_stream=True,
+            stream_audio=False,
+        )
+
+        self.assertEqual(len(worker._segments), 2)
+        self.assertIn("نريد التأكد", worker._segments[0])
+        self.assertNotEqual(
+            worker._segments[0],
+            "هذا اختبار عملي لقراءة النص من بدايته حتى نهايته.",
+        )
+        self.assertTrue(worker._segments[1])
+
+    def test_lead_in_uses_stable_word_boundary_for_streamed_prefetch(self):
+        text = (
+            "جملة أولى قصيرة. جملة ثانية قصيرة. "
+            "ثم يستمر النص حتى يتجاوز الحد المخصص للمقطع الأول. "
+            + "كلمة " * 40
+        )
+        worker = speech_worker.SpeechWorker(
+            text,
+            voice="fr-FR-VivienneMultilingualNeural",
+            target_language="ar",
+            continuous_stream=True,
+            stream_audio=False,
+        )
+
+        self.assertIn("جملة ثانية قصيرة.", worker._segments[0])
+        self.assertLessEqual(
+            len(worker._segments[0]), speech_worker.SPEECH_LEAD_IN_LENGTH)
+        self.assertTrue(worker._segments[1])
+
+    def test_short_arabic_lead_in_period_is_softened_only_for_speech(self):
+        text = (
+            "(بِالصِّينِيَّةِ تَعْنِي الْحَارِسَ) لَمْ يَنْبَحْ "
+            "عَلَى الدَّخِيلِ. فَمَعَ وُجُودِ هَذَا الْعَدَدِ الْكَبِيرِ"
+        )
+        worker = speech_worker.SpeechWorker(
+            text,
+            target_language="ar",
+            fast=False,
+            continuous_stream=True,
+            stream_audio=False,
+        )
+
+        self.assertIn("الدَّخِيلِ.", worker._segments[0])
+        speech_text = worker._synthesis_text(worker._segments[0], 0)
+        self.assertIn("الدَّخِيلِ,", speech_text)
+        self.assertNotIn("الدَّخِيلِ.", speech_text)
+
+    def test_first_complete_sentence_waits_for_punctuation(self):
+        self.assertEqual(
+            speech_worker._first_complete_speech_sentence(
+                "هذه جملة غير مكتملة"
+            ),
+            "",
+        )
+        self.assertEqual(
+            speech_worker._first_complete_speech_sentence(
+                "هذه جملة مكتملة؟ الجملة التالية"
+            ),
+            "هذه جملة مكتملة؟",
+        )
 
     def test_continuous_speech_preserves_sentence_final_punctuation(self):
         segments, _voices, _spans = (
@@ -1007,7 +1108,7 @@ class TestSpeechSynthesis(unittest.TestCase):
         finally:
             worker.cleanup_output()
 
-    def test_long_continuous_read_streams_each_segment(self):
+    def test_long_continuous_read_streams_segments_on_one_stream(self):
         from PySide6.QtCore import Qt
 
         class FakeStreamServer:
@@ -1029,12 +1130,9 @@ class TestSpeechSynthesis(unittest.TestCase):
                 self.finished.add(token)
 
         class FakeCommunicate:
-            next_index = 0
-
             def __init__(self, text, *_args, **_kwargs):
                 self.text = text
-                self.index = type(self).next_index
-                type(self).next_index += 1
+                self.index = worker._segments.index(text)
 
             async def stream(self):
                 yield {
@@ -1071,20 +1169,16 @@ class TestSpeechSynthesis(unittest.TestCase):
             self.assertTrue(worker.wait(5000))
 
         self.assertGreater(len(worker._segments), 1)
-        self.assertFalse(worker._continuous_stream)
-        self.assertEqual(
-            [index for index, _url in stream_urls],
-            list(range(len(worker._segments))),
-        )
+        self.assertTrue(worker._continuous_stream)
+        self.assertEqual([index for index, _url in stream_urls], [0])
         self.assertEqual(
             list(stream_server.streams.values()),
-            [bytearray([index + 1]) * 1024
-             for index in range(len(worker._segments))],
+            [bytearray().join(
+                bytearray([index + 1]) * 1024
+                for index in range(len(worker._segments))
+            )],
         )
-        self.assertEqual(
-            stream_server.finished,
-            {str(index) for index in range(len(worker._segments))},
-        )
+        self.assertEqual(stream_server.finished, {"0"})
         worker.cleanup_output()
 
     def test_worker_marks_a_segment_when_its_stream_disconnects(self):
@@ -1238,7 +1332,7 @@ class TestSpeechSynthesis(unittest.TestCase):
         )
 
         self.assertGreater(len(worker._segments), 1)
-        self.assertFalse(worker._continuous_stream)
+        self.assertTrue(worker._continuous_stream)
         self.assertTrue(all(
             len(segment) <= speech_worker.MAX_CHUNK_LENGTH
             for segment in worker._segments
@@ -1266,34 +1360,21 @@ class TestSpeechSynthesis(unittest.TestCase):
         self.assertTrue(worker._continuous_stream)
 
     def test_continuous_playback_streams_cached_audio_in_order(self):
-        class FakeStreamServer:
-            def __init__(self):
-                self.audio = bytearray()
-                self.finished = False
-
-            def create_stream(self):
-                return "token", "http://127.0.0.1/token"
-
-            def write(self, _token, audio):
-                self.audio.extend(audio)
-
-            def finish(self, _token):
-                self.finished = True
-
         text = "مرحبا بالعالم " * 20
-        stream_server = FakeStreamServer()
         worker = speech_worker.SpeechWorker(
             text,
             fast=True,
-            stream_server=stream_server,
             continuous_stream=True,
             stream_audio=False,
         )
         cached_audio = b"cached-frame" * 4_000
         boundaries = []
+        ready = []
         worker.word_boundaries.connect(
             lambda index, segment_boundaries:
                 boundaries.append((index, segment_boundaries)))
+        worker.segment_ready.connect(
+            lambda index, path: ready.append((index, path)))
 
         def cached_segment(_key):
             return cached_audio, [(0, 1_000_000, 0, 1)]
@@ -1303,22 +1384,23 @@ class TestSpeechSynthesis(unittest.TestCase):
                     worker, "_read_cache", side_effect=cached_segment):
             asyncio.run(worker._synthesize())
 
-        self.assertEqual(len(worker._segments), 1)
+        self.assertEqual(len(worker._segments), 2)
+        self.assertLessEqual(
+            len(worker._segments[0]), speech_worker.SPEECH_LEAD_IN_LENGTH)
+        self.assertEqual([index for index, _path in ready], [0, 1])
         self.assertEqual(
-            bytes(stream_server.audio),
-            cached_audio * len(worker._segments),
+            [Path(path).read_bytes() for _index, path in ready],
+            [cached_audio, cached_audio],
         )
-        self.assertEqual([index for index, _ in boundaries],
-                         [0] * len(worker._segments))
+        self.assertEqual([index for index, _ in boundaries], [0, 1])
         self.assertEqual(
             [
                 boundary[0]
                 for _index, segment_boundaries in boundaries
                 for boundary in segment_boundaries
             ],
-            [0],
+            [0, 0],
         )
-        self.assertTrue(stream_server.finished)
 
     def test_arabic_synthesis_forces_arabic_language_and_digit_pronunciation(self):
         from xml.etree import ElementTree

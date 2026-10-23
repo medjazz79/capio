@@ -2185,6 +2185,49 @@ class TestCustomProviderAutomaticModelFetch(_GuiCase):
 
 class TestSpeechFastModeAndSettings(_GuiCase):
 
+    def test_streaming_translation_prefetches_stable_lead_in(self):
+        from unittest import mock
+        from popup.speech_worker import SpeechWorker
+        from popup.translate_popup import TranslatePopup
+
+        with mock.patch.object(TranslatePopup, "_start_translation_worker"):
+            popup = TranslatePopup(dict(DEFAULTS), source_text="")
+        try:
+            popup._speech_available = True
+            popup._speech_engine = "edge"
+            popup._translation_generation = 7
+            popup.show()
+            self.app.processEvents()
+            with mock.patch.object(
+                popup, "_start_speech_prefetch_text"
+            ) as prefetch:
+                popup._append_streamed_partial("جملة أولى غير مكتملة")
+                prefetch.assert_not_called()
+
+                first_sentence = "جملة أولى غير مكتملة."
+                popup._append_streamed_partial(first_sentence)
+                prefetch.assert_not_called()
+
+                streamed = (
+                    first_sentence
+                    + (" هذه جملة ثانية طويلة بما يكفي حتى يتجاوز النص حد "
+                       "المقطع الأول قبل أن يكتمل الرد كله." * 4)
+                )
+                popup._append_streamed_partial(streamed)
+                self.assertEqual(prefetch.call_count, 1)
+                lead_in = prefetch.call_args.args[0]
+                speech_text = popup._speech_text_for_markdown(streamed)
+                final_worker = SpeechWorker(
+                    speech_text,
+                    None,
+                    **popup._speech_worker_kwargs(speech_text, 0),
+                    continuous_stream=True,
+                    stream_audio=False,
+                )
+                self.assertEqual(lead_in, final_worker._segments[0])
+        finally:
+            popup.close()
+
 
 
 
@@ -6083,7 +6126,10 @@ class TestReaderZoom(_GuiCase):
                 popup._speech_prefetch_timer.interval(),
                 SPEECH_PREFETCH_DELAY_MS,
             )
-            self.assertEqual(SPEECH_PREFETCH_DELAY_MS, 500)
+            # The 150ms debounce still absorbs rapid page flips, while
+            # starting the lead synthesis right after the translation lands -
+            # the press at +0.3s rides it instead of finding nothing running.
+            self.assertEqual(SPEECH_PREFETCH_DELAY_MS, 150)
             calls = []
 
             class FakeCommunicate:
@@ -6321,6 +6367,129 @@ class TestReaderZoom(_GuiCase):
             popup._speech_active = False
             popup._player.stop()
             popup._cancel_speech_prefetch()
+            popup.close()
+
+    def test_cached_full_read_uses_one_joined_audio_source(self):
+        from pathlib import Path
+        from unittest import mock
+        from popup import speech_worker
+        from popup.speech_worker import SpeechWorker
+        from popup.translate_popup import TranslatePopup
+        from config.settings import DEFAULTS
+
+        text = "مرحبا بالعالم " * 40
+        with mock_chain_translate(return_value=(text, "T")):
+            popup = TranslatePopup(dict(DEFAULTS), source_text="hello")
+        try:
+            if popup._worker is not None:
+                popup._worker.wait(20000)
+            self.app.processEvents()
+            popup.result.setPlainText(text)
+            popup._speech_available = True
+            popup._speech_engine = "edge"
+            kwargs = popup._speech_worker_kwargs(text, 0)
+            probe = SpeechWorker(
+                text,
+                None,
+                **kwargs,
+                continuous_stream=True,
+                stream_audio=False,
+            )
+            self.assertGreater(len(probe._segments), 1)
+            segment_audio = [
+                f"segment-{index}".encode()
+                for index in range(len(probe._segments))
+            ]
+            cache_hits = [
+                (audio, [(0, 1_000_000, 0, 1)])
+                for audio in segment_audio
+            ]
+            with mock.patch.object(
+                SpeechWorker, "_read_cache", side_effect=cache_hits
+            ), mock.patch.object(popup, "_play_speech_segment") as play:
+                self.assertTrue(popup._try_play_cached_full_text(text))
+
+            self.assertEqual(play.call_count, 1)
+            self.assertEqual(
+                Path(popup._speech_read_path).read_bytes(),
+                b"".join(segment_audio),
+            )
+            self.assertEqual(list(popup._speech_paths), [0])
+            self.assertEqual(
+                len(popup._speech_boundaries[0]),
+                len(probe._segments),
+            )
+            expected_second_start = (
+                len(segment_audio[0]) * 8
+                * speech_worker._TICKS_PER_SECOND
+                // speech_worker._MP3_BITRATE_BPS
+            )
+            self.assertEqual(
+                popup._speech_boundaries[0][1][0],
+                expected_second_start,
+            )
+        finally:
+            popup._speech_active = False
+            popup._player.stop()
+            popup.close()
+
+    def test_cached_prefix_keeps_segment_indexes_across_cache_gaps(self):
+        from pathlib import Path
+        from unittest import mock
+        from popup.speech_worker import SpeechWorker
+        from popup.translate_popup import TranslatePopup
+        from config.settings import DEFAULTS
+
+        text = " ".join(
+            f"جملة {index} مميزة لاختبار الترتيب."
+            for index in range(200)
+        )
+        with mock_chain_translate(return_value=(text, "T")):
+            popup = TranslatePopup(dict(DEFAULTS), source_text="hello")
+        try:
+            if popup._worker is not None:
+                popup._worker.wait(20000)
+            self.app.processEvents()
+            popup.result.setPlainText(text)
+            popup._speech_available = True
+            popup._speech_engine = "edge"
+            probe = SpeechWorker(
+                text,
+                None,
+                **popup._speech_worker_kwargs(text, 0),
+                continuous_stream=True,
+                stream_audio=False,
+            )
+            self.assertGreaterEqual(len(probe._segments), 3)
+            boundaries = [(0, 1_000_000, 0, 1)]
+            cache_hits = [
+                (b"segment-0", boundaries),
+                None,
+                (b"segment-2", boundaries),
+            ] + [None] * (len(probe._segments) - 3)
+
+            with (
+                mock.patch.object(
+                    SpeechWorker, "_read_cache", side_effect=cache_hits),
+                mock.patch.object(popup, "_play_speech_segment"),
+            ):
+                self.assertTrue(
+                    popup._try_play_cached_full_text(text, allow_prefix=True)
+                )
+
+            self.assertEqual(set(popup._speech_paths), {0, 2})
+            self.assertEqual(
+                [index for index, _key in popup._speech_chain_cache_expect],
+                [1, *range(3, len(probe._segments))],
+            )
+            self.assertEqual(
+                Path(popup._speech_paths[2]).read_bytes(),
+                b"segment-2",
+            )
+        finally:
+            popup._speech_active = False
+            popup._clear_speech_files()
+            popup._player.stop()
             popup.close()
 
     def test_closing_while_speech_worker_runs_does_not_block_the_ui(self):

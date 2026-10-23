@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -39,6 +40,7 @@ from config.settings import configure_playback_volume
 from popup.chat_worker import ChatWorker
 from popup.speech_worker import (
     ARABIC_VOICE,
+    configured_speech_rate, speech_rate_setting_key,
     DEFAULT_SPEECH_RATE,
     SpeechWorker,
     learn_latin_pairs,
@@ -742,28 +744,11 @@ class ChatPanel(QWidget):
 
     @staticmethod
     def _speech_rate_setting_key(settings: dict) -> str:
-        target_language = str(settings.get("target_language", "ar"))
-        response_language = str(
-            settings.get("chat_reply_language", target_language)
-            if settings.get("chat_reply_language_only", False)
-            else target_language
-        )
-        language_code = (
-            response_language.replace("_", "-").split("-", 1)[0].casefold())
-        return (
-            "speech_rate_arabic"
-            if language_code == "ar"
-            else "speech_rate_other"
-        )
+        return speech_rate_setting_key(settings, chat=True)
 
     @classmethod
     def _configured_speech_rate(cls, settings: dict) -> float:
-        key = cls._speech_rate_setting_key(settings)
-        return normalize_speed(
-            settings.get(
-                key,
-                settings.get(
-                    "speech_rate", settings.get("chat_speech_rate", 1.0))))
+        return configured_speech_rate(settings, chat=True)
 
     def refresh_speech_settings(self) -> None:
         """Apply the shared Arabic/other-language speed settings."""
@@ -784,8 +769,12 @@ class ChatPanel(QWidget):
         self._fit_chat_action_buttons()
         settings = self._settings_provider()
         setting_key = self._speech_rate_setting_key(settings)
+        pending = getattr(self, "_pending_speech_rate_save", None)
+        if pending is not None and pending[0] != setting_key:
+            self._save_speech_rate()
         settings[setting_key] = self._speech_rate
         settings["chat_speech_rate"] = self._speech_rate
+        self._pending_speech_rate_save = (setting_key, self._speech_rate)
         self._speech_rate_save_timer.start()
 
     def _save_speech_rate(self) -> None:
@@ -793,11 +782,12 @@ class ChatPanel(QWidget):
 
         try:
             persisted = load()
-            setting_key = self._speech_rate_setting_key(
-                self._settings_provider())
-            persisted[setting_key] = self._speech_rate
-            persisted["chat_speech_rate"] = self._speech_rate
+            setting_key, speed = getattr(self, "_pending_speech_rate_save", None) or (
+                self._speech_rate_setting_key(self._settings_provider()), self._speech_rate)
+            persisted[setting_key] = speed
+            persisted["chat_speech_rate"] = speed
             save(persisted)
+            self._pending_speech_rate_save = None
         except (OSError, TypeError, ValueError):
             log.exception("Could not save Chat reading speed")
 
@@ -1168,6 +1158,26 @@ class ChatPanel(QWidget):
             return
         word_start, word_end = speech_word_span(
             speech_text, speech_start_offset(speech_text, 0))
+        if (
+            whole_message is False
+            and self._speech_active
+            and self._speech_message_start == marker_position
+        ):
+            # Clicking a word inside the message that is already being read:
+            # jump straight into the measured audio if that word was spoken.
+            for boundary in self._speech_boundaries.get(
+                self._speech_index, []
+            ):
+                start_tick, _duration, source_start, source_end = boundary
+                if source_start <= start < source_end:
+                    path = self._speech_paths.get(self._speech_index)
+                    if path is not None:
+                        self._speech_paused = False
+                        self._sync_speech_controls()
+                        self._highlight_speech_range(source_start, source_end)
+                        self._player.setPosition(start_tick // 10_000)
+                        self._player.play()
+                        return
         self._stop_speech()
         self._speech_text = speech_text
         self._speech_document_start = document_start
@@ -1324,20 +1334,9 @@ class ChatPanel(QWidget):
         if not self._speech_active or self._speech_document_start is None:
             return
         boundaries = self._speech_boundaries.get(self._speech_index, [])
-        if not boundaries:
-            return
-        position_ticks = position_ms * 10_000
-        active = None
-        previous = None
-        for boundary in boundaries:
-            if boundary[0] > position_ticks:
-                break
-            if position_ticks < boundary[0] + boundary[1]:
-                active = boundary
-                break
-            previous = boundary
-        selected = active or previous
-        if selected is not None:
+        index = bisect_right(boundaries, position_ms * 10_000, key=lambda b: b[0]) - 1
+        if index >= 0:
+            selected = boundaries[index]
             self._highlight_speech_range(selected[2], selected[3])
 
     def _highlight_speech_range(self, start: int, end: int) -> None:
