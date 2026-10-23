@@ -1,6 +1,6 @@
 # Capio
 
-**Current version: V1.0.5** — also shown at the bottom of Settings.
+**Current version: V1.0.6** — also shown at the bottom of Settings.
 
 **Translate. Understand. Listen.**
 Your AI reading companion, right inside your book.

@@ -1,4 +1,4 @@
 @echo off
 setlocal
-start "" /min powershell.exe -NoProfile -WindowStyle Minimized -ExecutionPolicy Bypass -File "%~dp0setup\bootstrap.ps1" -Mode float
+wscript.exe //B //NoLogo "%~dp0setup\run_float_hidden.vbs"
 exit /b %errorlevel%
