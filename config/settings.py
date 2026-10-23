@@ -282,15 +282,13 @@ DEFAULTS = {
 
 SETTINGS_PATH = Path.home() / ".harmony_translator.json"
 
-# Playback volume is deliberately not a setting. The OS mixer owns loudness,
-# and the user changes it outside Capio. Every new player therefore starts at
-# full scale instead of restoring an old app-level volume.
-PLAYBACK_VOLUME = 1.0
-
 
 def configure_playback_volume(audio_output) -> None:
-    """Keep app output at full scale so the OS mixer controls loudness."""
-    audio_output.setVolume(PLAYBACK_VOLUME)
+    """Leave volume and mute untouched; the user controls them in Windows.
+
+    Shared by the reader, floating popup and chat player. In particular, do
+    not restore a saved value or force full volume when creating a player.
+    """
 
 
 def _custom_providers_path() -> Path:

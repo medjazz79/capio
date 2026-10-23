@@ -4,8 +4,8 @@ from __future__ import annotations
 import os
 
 
-def hide_standalone_console() -> None:
-    """Hide a console created only for this process, not an existing shell."""
+def minimize_standalone_console() -> None:
+    """Minimize this app's console without touching an existing user shell."""
     if os.name != "nt":
         return
 
@@ -32,4 +32,4 @@ def hide_standalone_console() -> None:
     show_window = user32.ShowWindow
     show_window.argtypes = [ctypes.c_void_p, ctypes.c_int]
     show_window.restype = ctypes.c_bool
-    show_window(window, 0)
+    show_window(window, 7)  # SW_SHOWMINNOACTIVE: taskbar, without stealing focus.

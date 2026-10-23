@@ -1,6 +1,6 @@
 # Capio
 
-**Current version: V1.0** — also shown at the bottom of Settings.
+**Current version: V1.0.5** — also shown at the bottom of Settings.
 
 **Translate. Understand. Listen.**
 Your AI reading companion, right inside your book.
@@ -63,8 +63,19 @@ then translate its text with OCR or send the image to a vision-capable model.
 - Uncached speech starts streaming before synthesis finishes. Continuous reads
   avoid artificial short segments, and completed audio can be reused to jump
   to a clicked word without requesting the same speech again.
+- Chat Read aloud also uses one continuous Edge TTS response, avoiding the
+  short-segment transition after the first few words while preserving pause,
+  resume and word seeking through the completed audio.
 - Arabic reading speed is saved independently from the shared speed for other
   languages, and can be changed during playback.
+- Volume and mute are controlled by the user in Windows. Neither the reader
+  nor the floating translator saves, restores or forces a playback volume.
+- Playback files are released automatically after use, with background retries
+  for locked files and recovery of abandoned audio sessions after a crash.
+  The speech cache expires unused entries after 24 hours. It is checked on
+  every cache write: at 60 MiB, older entries are removed toward 48 MiB,
+  with a 64 MiB ceiling and a 200-file cap. Background cleanup also runs
+  once a minute.
 - Translate pages and continue through a book with automatic page-by-page
   reading.
 - Use the floating translator outside the book reader.
@@ -76,11 +87,13 @@ window's page counter, or right-click a page and choose **Successive reading**
 to open its translation and start reading automatically. In **Settings → Read
 Aloud / TTS**, enable **Translate the next page while reading** to prepare each
 following page in the background.
-Capio waits five seconds after speech starts before requesting the next
-translation, and waits for the current speech-generation task to finish before
-sending that request. With Edge TTS and **Fast mode**, it also prepares the
-next page's first audio segment after translation finishes, so playback can
-start sooner when the current page ends.
+Capio requests the next translation shortly after reading starts, while the
+current speech is still being prepared or played. With Edge TTS and **Fast
+mode**, it also prepares the next page's audio in the background. A completed
+page advances once and the next page starts at its first word. Natural audio
+completion does not restart the final words when highlighting timestamps drift.
+Prepared audio reduces the pause between pages; network, OCR and translation
+delays can still cause a gap when the next page is not ready.
 Save the setting with **Save Changes**; it is remembered the next time you open
 Capio. You can also enable **Stop successive reading after a set time** and
 choose a duration in 15-minute steps up to four hours, or enter a custom
@@ -93,6 +106,12 @@ automatic sequence and current speech.
 1. Install **Python 3.10 or newer** on Windows.
 2. Download and extract the project.
 3. Double-click `run.bat` for the book reader or `run_float.bat` for the floating translator.
+
+Both launchers start their setup terminal minimized on the taskbar. It closes
+after starting the app. Configured installations launch directly from their
+local Python environment, avoiding repeated system-Python discovery and a
+second full import of the app's dependencies. First-time setup and changed
+requirements still use the installation checks.
 
 On first launch, Capio downloads the required libraries. Translation providers
 may require an API key.

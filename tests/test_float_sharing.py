@@ -145,6 +145,9 @@ class SharedSettingsRefreshTest(_FloatSharingCase):
             def __init__(self):
                 self.synced = []
 
+            def refresh_display(self, settings):
+                pass
+
             def isVisible(self):
                 return True
 
@@ -195,6 +198,7 @@ class SharedCacheTest(_FloatSharingCase):
             mock.patch.object(main_02, "setup_logging"),
             mock.patch("translators.usage.start_session"),
             mock.patch.object(main_02, "_prune_shared_speech_cache") as prune,
+            mock.patch("popup.speech_temp.start_speech_cleanup") as cleanup,
             mock.patch.object(main_02, "QApplication") as app_type,
             mock.patch.object(main_02, "FloatButton", return_value=mock.Mock()),
             mock.patch.object(main_02, "sys") as sys_module,
@@ -203,6 +207,8 @@ class SharedCacheTest(_FloatSharingCase):
             main_02.main()
 
         prune.assert_called_once()
+        cleanup.assert_called_once_with(prune)
+        fake_app.setApplicationVersion.assert_called_once_with(main_02.APP_VERSION)
         sys_module.exit.assert_called_once()
 
 

@@ -11158,7 +11158,7 @@ class TestMemoryZoom(_GuiCase):
                     side_effect=record_page_translation),
                 mock.patch.object(book, "page_needs_full_page_ocr",
                                  return_value=False),
-                mock.patch.object(popup, "_toggle_speech") as speak,
+                mock.patch.object(popup, "_request_speech") as speak,
             ):
                 popup.page_number_label.click()
                 self.assertTrue(popup.page_number_label.isChecked())
@@ -11167,7 +11167,7 @@ class TestMemoryZoom(_GuiCase):
                 self.assertTrue(popup.next_page_btn.isEnabled())
 
                 popup.translationReady.emit()
-                speak.assert_called_once_with()
+                speak.assert_called_once_with(0, trigger="successive-reading")
                 popup.speechFinished.emit("")
                 self.app.processEvents()
                 self.assertEqual(calls[-1], (2, False, popup, True))
@@ -11229,12 +11229,12 @@ class TestMemoryZoom(_GuiCase):
                 self.assertIsNotNone(worker)
                 self.assertTrue(worker.wait(20000))
                 popup._speech_available = True
-                with mock.patch.object(popup, "_toggle_speech") as speak:
+                with mock.patch.object(popup, "_request_speech") as speak:
                     self.app.processEvents()
 
                 self.assertEqual(popup._translation_text,
                                  "first page translation")
-                speak.assert_called_once_with()
+                speak.assert_called_once_with(0, trigger="successive-reading")
                 self.assertTrue(
                     window._automatic_page_reading_time_timer.isActive())
                 self.assertEqual(
@@ -11292,7 +11292,7 @@ class TestMemoryZoom(_GuiCase):
             with (
                 mock.patch.object(
                     window, "_translate_selection") as translate,
-                mock.patch.object(popup, "_toggle_speech"),
+                mock.patch.object(popup, "_request_speech"),
                 mock.patch.object(
                     window, "_start_automatic_page_prefetch"),
             ):
@@ -11417,7 +11417,7 @@ class TestMemoryZoom(_GuiCase):
         finally:
             window.close()
 
-    def test_automatic_page_prefetch_waits_before_request_and_for_speech_worker(self):
+    def test_automatic_page_prefetch_runs_while_speech_worker_is_running(self):
         from unittest import mock
         from main import MainWindow
 
@@ -11440,7 +11440,7 @@ class TestMemoryZoom(_GuiCase):
             window._automatic_page_reading_page = 0
             popup._speech_available = True
             with (
-                mock.patch.object(popup, "_toggle_speech"),
+                mock.patch.object(popup, "_request_speech"),
                 mock.patch.object(
                     window, "_start_automatic_page_prefetch") as prefetch,
             ):
@@ -11454,7 +11454,7 @@ class TestMemoryZoom(_GuiCase):
                     popup.set_page_navigation(page_no, book.page_count())
                     window._on_automatic_page_translation_ready(popup)
 
-                    self.assertEqual(timer.interval(), 5000)
+                    self.assertEqual(timer.interval(), 350)
                     self.assertTrue(timer.isActive())
                     self.assertEqual(
                         window._automatic_page_prefetch_scheduled,
@@ -11462,13 +11462,8 @@ class TestMemoryZoom(_GuiCase):
 
                     timer.stop()
                     window._start_scheduled_automatic_page_prefetch()
-                    self.assertEqual(timer.interval(), 250)
-                    self.assertTrue(timer.isActive())
-                    self.assertEqual(prefetch.call_count, page_no)
-
-                    speech_worker.isRunning.return_value = False
-                    timer.stop()
-                    window._start_scheduled_automatic_page_prefetch()
+                    self.assertFalse(timer.isActive())
+                    self.assertEqual(prefetch.call_count, page_no + 1)
                     prefetch.assert_called_with(book, popup, page_no)
                 self.assertIsNone(
                     window._automatic_page_prefetch_scheduled)

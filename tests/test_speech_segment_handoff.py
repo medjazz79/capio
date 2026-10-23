@@ -313,7 +313,7 @@ class TestHandOffKeepsHighlight(unittest.TestCase):
         popup._worker = worker
         with (
             mock.patch.object(popup, "sender", return_value=worker),
-            mock.patch.object(popup, "_queue_streamed_partial") as queue,
+            mock.patch.object(popup, "_append_streamed_partial") as queue,
             mock.patch.object(popup, "_start_speech_prefetch_text") as prefetch,
         ):
             popup._on_worker_partial("A streamed translation fragment.")
@@ -345,6 +345,7 @@ class TestHandOffKeepsHighlight(unittest.TestCase):
         popup._speech_start_offset = 0
         popup._speech_expected_end_offset = 12
         popup._speech_boundaries_finalized = True
+        popup._speech_synthesis_completed = True
         popup._speech_boundaries[0] = [
             (0, 1_000_000, 0, 5),
             (1_000_000, 1_000_000, 6, 12),

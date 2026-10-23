@@ -43,6 +43,7 @@ else:
 from PySide6.QtCore import QThread, Signal
 
 from .audio_stream import AudioStreamServer
+from .speech_temp import create_speech_file, release_speech_file
 from .speech_voices import GEMINI_TTS_VOICES
 
 
@@ -167,7 +168,10 @@ SPEED_SNAP_TOLERANCE = 0.025
 # with HARMONY_TTS_CACHE. Boundaries ride along in a .json sidecar so the
 # word highlight keeps working on cache hits.
 TTS_CACHE_MAX_FILES = 200
-TTS_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+TTS_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+TTS_CACHE_MAX_BYTES = 64 * 1024 * 1024
+TTS_CACHE_CLEANUP_START_BYTES = 60 * 1024 * 1024
+TTS_CACHE_CLEANUP_TARGET_BYTES = 48 * 1024 * 1024
 _WESTERN_TO_ARABIC_DIGITS = str.maketrans(
     "0123456789",
     "٠١٢٣٤٥٦٧٨٩",
@@ -253,8 +257,8 @@ def _cache_key(
 
 
 @_cache_synchronized
-def _prune_cache() -> None:
-    """Drop cache entries older than a week and enforce the entry-count cap."""
+def _prune_cache(*, incoming_bytes: int = 0) -> bool:
+    """At 60 MiB, evict oldest entries down to 48 MiB; reserve new writes."""
     try:
         cache_dir = _cache_dir()
         files = sorted(
@@ -262,7 +266,7 @@ def _prune_cache() -> None:
             key=lambda p: p.stat().st_mtime,
         )
     except OSError:
-        return
+        return False
 
     now = time.time()
     expired = []
@@ -274,16 +278,55 @@ def _prune_cache() -> None:
         except OSError:
             retained.append(path)
 
-    expired.extend(
-        retained[:max(0, len(retained) - TTS_CACHE_MAX_FILES)])
-    for stale in expired:
+    def discard_entry(path: Path) -> bool:
         try:
-            stale.unlink(missing_ok=True)
-            stale.with_suffix(".json").unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
         except OSError:
-            continue
+            return False
+        try:
+            path.with_suffix(".json").unlink(missing_ok=True)
+        except OSError:
+            pass  # The orphan-sidecar sweep below will retry it.
+        return True
+
+    retained = [path for path in expired if not discard_entry(path)] + retained
+
+    retained_sizes = []
+    for path in retained:
+        try:
+            metadata = path.with_suffix(".json")
+            retained_sizes.append(
+                path.stat().st_size
+                + (metadata.stat().st_size if metadata.exists() else 0))
+        except FileNotFoundError:
+            retained_sizes.append(0)
+        except OSError:
+            return False
+    retained_bytes = sum(retained_sizes)
+    remaining_count = len(retained)
+    target_bytes = (
+        TTS_CACHE_CLEANUP_TARGET_BYTES
+        if retained_bytes + incoming_bytes >= TTS_CACHE_CLEANUP_START_BYTES
+        else TTS_CACHE_MAX_BYTES)
+    available_bytes = max(0, target_bytes - incoming_bytes)
+    available_files = TTS_CACHE_MAX_FILES - int(incoming_bytes > 0)
+    for path, size in zip(retained, retained_sizes):
+        if remaining_count <= available_files and retained_bytes <= available_bytes:
+            break
+        # Locked files do not count as freed space; try another older entry.
+        if discard_entry(path):
+            retained_bytes -= size
+            remaining_count -= 1
 
     try:
+        # An interrupted atomic cache publication can leave an unfinished file.
+        for temporary in cache_dir.glob("*.tmp"):
+            try:
+                if (re.fullmatch(r"[0-9a-f]{40}\.(?:mp3|wav|json)\..+\.tmp", temporary.name)
+                        and now - temporary.stat().st_mtime >= 60 * 60):
+                    temporary.unlink(missing_ok=True)
+            except OSError:
+                continue
         for metadata in cache_dir.glob("*.json"):
             # Check the current filesystem rather than the earlier scan: a
             # prefetch may have published audio and metadata since that scan.
@@ -293,7 +336,9 @@ def _prune_cache() -> None:
             ):
                 metadata.unlink(missing_ok=True)
     except OSError:
-        return
+        pass
+    return (retained_bytes + incoming_bytes <= TTS_CACHE_MAX_BYTES
+            and remaining_count <= available_files)
 
 
 def rate_string(multiplier: float) -> str:
@@ -708,12 +753,14 @@ class SpeechWorker(QThread):
         self._stream_audio = bool(stream_audio)
         self._continuous_stream = continuous and self._stream_audio
         self.disconnected_segments: set[int] = set()
+        self.synthesis_completed = False
         self._prefetch_only = prefetch_only
         self._trace = trace
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._synthesis_task: asyncio.Task[None] | None = None
 
     def run(self) -> None:
+        self.synthesis_completed = False
         if self._trace is not None:
             self._trace.mark(
                 "worker_started",
@@ -730,6 +777,7 @@ class SpeechWorker(QThread):
             from translators.http_client import cancellation_scope
             with cancellation_scope(self.isInterruptionRequested):
                 asyncio.run(self._run_synthesis())
+            self.synthesis_completed = not self.isInterruptionRequested()
         except asyncio.CancelledError:
             if self._trace is not None:
                 self._trace.mark("worker_cancelled")
@@ -1317,9 +1365,7 @@ class SpeechWorker(QThread):
     def _store_temp(
         self, audio: bytes, boundaries: list, *, suffix: str = ".mp3"
     ) -> tuple[str, list]:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(audio)
-            path = Path(tmp.name)
+        path = Path(create_speech_file(audio, suffix=suffix))
         self._output_paths.append(path)
         return str(path), boundaries
 
@@ -1384,18 +1430,30 @@ class SpeechWorker(QThread):
         metadata_path: Path | None = None
         audio_published = False
         try:
+            metadata = json.dumps({
+                "audio_size": len(audio),
+                "audio_sha256": hashlib.sha256(audio).hexdigest(),
+                "boundaries": [list(b) for b in boundaries],
+            }).encode("utf-8")
+            incoming_bytes = len(audio) + len(metadata)
+            if incoming_bytes >= TTS_CACHE_CLEANUP_START_BYTES:
+                # This entry would immediately trigger its own eviction.
+                _prune_cache()
+                return
+            if not _prune_cache(incoming_bytes=incoming_bytes):
+                # Playback can continue from its temporary file when locked
+                # cache entries prevent freeing sufficient space.
+                return
             cache = _cache_dir()
             metadata_path = cache / f"{key}.json"
             _atomic_cache_write(cache / f"{key}{suffix}", audio)
             audio_published = True
             _atomic_cache_write(
                 metadata_path,
-                json.dumps({
-                    "audio_size": len(audio),
-                    "audio_sha256": hashlib.sha256(audio).hexdigest(),
-                    "boundaries": [list(b) for b in boundaries],
-                }).encode("utf-8"),
+                metadata,
             )
+            # Check immediately after publication, including concurrent writers.
+            _prune_cache()
         except OSError:
             # If publication stops between the two files, legacy metadata
             # without a checksum must not describe the replacement audio.
@@ -1406,19 +1464,15 @@ class SpeechWorker(QThread):
                     pass
 
     def cleanup_output(self) -> None:
-        """Delete temp mp3s; keep locked ones for a later cleanup retry."""
+        """Release playback files and register locked ones for periodic retry."""
         remaining = []
         for path in self._output_paths:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
+            if not release_speech_file(path):
                 remaining.append(path)
         self._output_paths = remaining
 
     def _cleanup_output_path(self, path: Path) -> None:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
+        if not release_speech_file(path):
             return
         self._output_paths = [
             output_path

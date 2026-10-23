@@ -5,7 +5,6 @@ import logging
 from bisect import bisect_right
 import re
 from collections.abc import Callable
-from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
@@ -38,6 +37,8 @@ from ui.context_menu import style_context_menu
 
 from config.settings import configure_playback_volume
 from popup.chat_worker import ChatWorker
+from popup.audio_stream import AudioStreamServer
+from popup.speech_temp import release_speech_file
 from popup.speech_worker import (
     ARABIC_VOICE,
     configured_speech_rate, speech_rate_setting_key,
@@ -184,6 +185,15 @@ class ChatPanel(QWidget):
             self._chat_font_size = 12.0
         self._chat_font_size = min(30.0, max(8.0, self._chat_font_size))
         self._speech_worker: SpeechWorker | None = None
+        self._speech_stream_server: AudioStreamServer | None = None
+        self._speech_playing_stream = False
+        self._speech_stream_end_pending = False
+        self._speech_last_position_ms = 0
+        self._speech_pending_position_ms: int | None = None
+        self._speech_pending_source: QUrl | None = None
+        self._speech_error: str | None = None
+        self._speech_stream_recovered = False
+        self._speech_stream_failed = False
         self._speech_paths: dict[int, str] = {}
         self._speech_boundaries: dict[int, list[tuple[int, int, int, int]]] = {}
         self._speech_index = 0
@@ -1175,8 +1185,11 @@ class ChatPanel(QWidget):
                         self._speech_paused = False
                         self._sync_speech_controls()
                         self._highlight_speech_range(source_start, source_end)
-                        self._player.setPosition(start_tick // 10_000)
-                        self._player.play()
+                        if self._speech_playing_stream:
+                            self._play_speech_segment(path, start_tick // 10_000)
+                        else:
+                            self._player.setPosition(start_tick // 10_000)
+                            self._player.play()
                         return
         self._stop_speech()
         self._speech_text = speech_text
@@ -1187,6 +1200,10 @@ class ChatPanel(QWidget):
         self._speech_boundaries.clear()
         self._speech_active = True
         self._speech_paused = False
+        self._speech_error = None
+        self._speech_stream_recovered = False
+        self._speech_stream_failed = False
+        self._speech_last_position_ms = 0
         self._highlight_speech_range(word_start, word_end)
         self._sync_speech_controls()
         self._player.setPlaybackRate(self._speech_rate)
@@ -1215,6 +1232,15 @@ class ChatPanel(QWidget):
             bool(settings.get("speech_latin_only", False))
             and response_language.casefold().split("-", 1)[0] == "ar"
         )
+        stream_audio = engine == "edge"
+        if stream_audio and self._speech_stream_server is None:
+            try:
+                self._speech_stream_server = AudioStreamServer()
+            except (OSError, RuntimeError) as error:
+                self.context_notice.setText(f"Read aloud playback failed: {error}")
+                self.context_notice.show()
+                self._finish_speech()
+                return
         worker = SpeechWorker(
             self._speech_text,
             self,
@@ -1224,7 +1250,9 @@ class ChatPanel(QWidget):
                 settings.get("automatic_speech_voice", False)),
             target_language=response_language,
             fast=bool(settings.get("fast_mode", True)),
-            stream_audio=False,
+            continuous_stream=True,
+            stream_audio=stream_audio,
+            stream_server=self._speech_stream_server if stream_audio else None,
             read_latin_words=read_latin_words,
             latin_only=latin_only,
             glossary=(
@@ -1234,6 +1262,8 @@ class ChatPanel(QWidget):
             gemini_voice=str(settings.get("gemini_tts_voice") or "Kore"),
         )
         self._speech_worker = worker
+        worker.segment_stream_ready.connect(self._on_speech_stream_ready)
+        worker.word_boundary_ready.connect(self._on_speech_word_boundary_ready)
         worker.segment_ready.connect(self._on_speech_segment_ready)
         worker.word_boundaries.connect(self._on_speech_word_boundaries)
         worker.failed.connect(self._on_speech_failed)
@@ -1259,11 +1289,35 @@ class ChatPanel(QWidget):
     def _on_speech_segment_ready(self, index: int, path: str) -> None:
         worker = self.sender()
         if worker is not self._speech_worker or not self._speech_active:
-            Path(path).unlink(missing_ok=True)
+            release_speech_file(path)
             return
         self._speech_paths[index] = path
+        if self._speech_playing_stream:
+            # Keep the live response playing. This completed file is for
+            # word seeking/recovery; switching to it here creates a pause.
+            if ((getattr(worker, "disconnected_segments", set())
+                 or self._speech_stream_failed)
+                    and not self._speech_paused):
+                self._recover_speech_stream()
+            return
         if index == self._speech_index and not self._speech_paused:
             self._play_speech_segment(path)
+
+    def _on_speech_stream_ready(self, index: int, url: str) -> None:
+        if self.sender() is not self._speech_worker or not self._speech_active:
+            return
+        self._speech_playing_stream = True
+        self._speech_index = index
+        self._speech_last_position_ms = 0
+        self._player.setSource(QUrl(url))
+        if not self._speech_paused:
+            self._player.play()
+
+    def _on_speech_word_boundary_ready(self, index: int, boundary: tuple) -> None:
+        if self.sender() is not self._speech_worker or not self._speech_active:
+            return
+        self._speech_boundaries.setdefault(index, []).append(boundary)
+        self._update_speech_highlight(self._player.position())
 
     def _on_speech_word_boundaries(
         self, index: int, boundaries: list[tuple[int, int, int, int]]
@@ -1272,18 +1326,51 @@ class ChatPanel(QWidget):
             self._speech_boundaries[index] = boundaries
             self._update_speech_highlight(self._player.position())
 
-    def _play_speech_segment(self, path: str) -> None:
-        self._player.setSource(QUrl.fromLocalFile(path))
+    def _play_speech_segment(self, path: str, position_ms: int = 0) -> None:
+        self._speech_playing_stream = False
+        self._speech_stream_end_pending = False
+        self._speech_last_position_ms = position_ms
+        source = QUrl.fromLocalFile(path)
+        self._speech_pending_position_ms = position_ms or None
+        self._speech_pending_source = source if position_ms else None
+        if self._speech_stream_server is not None:
+            self._speech_stream_server.abort_all()
+        self._player.setSource(source)
+        if position_ms and self._player.mediaStatus() in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        ):
+            self._player.setPosition(position_ms)
+            self._speech_pending_position_ms = None
+            self._speech_pending_source = None
         self._player.play()
 
     def _on_speech_media_status_changed(self, status) -> None:
+        if (self._speech_pending_position_ms is not None
+                and self._player.source() == self._speech_pending_source
+                and status in (QMediaPlayer.MediaStatus.LoadedMedia,
+                               QMediaPlayer.MediaStatus.BufferedMedia)):
+            self._player.setPosition(self._speech_pending_position_ms)
+            self._speech_pending_position_ms = None
+            self._speech_pending_source = None
         if (
             not self._speech_active
-            or self._speech_paused
             or status != QMediaPlayer.MediaStatus.EndOfMedia
         ):
             return
+        if self._speech_playing_stream:
+            self._speech_stream_end_pending = True
+            if not self._speech_paused:
+                self._resolve_speech_stream_end()
+            return
+        if self._speech_paused:
+            return
+        completed_path = self._speech_paths.pop(self._speech_index, None)
+        self._speech_boundaries.pop(self._speech_index, None)
         self._speech_index += 1
+        if completed_path is not None:
+            self._player.setSource(QUrl())
+            release_speech_file(completed_path)
         next_path = self._speech_paths.get(self._speech_index)
         if next_path is not None:
             self._play_speech_segment(next_path)
@@ -1293,6 +1380,7 @@ class ChatPanel(QWidget):
     def _on_speech_failed(self, error: str) -> None:
         if self.sender() is not self._speech_worker:
             return
+        self._speech_error = error
         self.context_notice.setText(f"Read aloud failed: {error}")
         self.context_notice.show()
         if self._player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
@@ -1300,6 +1388,12 @@ class ChatPanel(QWidget):
 
     def _on_speech_player_error(self, error, message: str) -> None:
         if error == QMediaPlayer.Error.NoError:
+            return
+        if self._speech_active and self._speech_playing_stream:
+            self._speech_stream_failed = True
+            self._speech_stream_end_pending = True
+            if not self._speech_paused:
+                self._recover_speech_stream()
             return
         self.context_notice.setText(f"Read aloud playback failed: {message}")
         self.context_notice.show()
@@ -1320,6 +1414,10 @@ class ChatPanel(QWidget):
             return
         if self._speech_paused:
             return
+        if self._speech_active and self._speech_playing_stream:
+            if self._speech_stream_end_pending:
+                self._resolve_speech_stream_end()
+            return
         if not self._speech_active:
             self._speech_worker = None
             self._clear_speech_output(worker)
@@ -1333,6 +1431,8 @@ class ChatPanel(QWidget):
     def _update_speech_highlight(self, position_ms: int = 0) -> None:
         if not self._speech_active or self._speech_document_start is None:
             return
+        if position_ms > 0:
+            self._speech_last_position_ms = position_ms
         boundaries = self._speech_boundaries.get(self._speech_index, [])
         index = bisect_right(boundaries, position_ms * 10_000, key=lambda b: b[0]) - 1
         if index >= 0:
@@ -1389,6 +1489,13 @@ class ChatPanel(QWidget):
         if not self._speech_active or not self._speech_paused:
             return
         self._speech_paused = False
+        if self._speech_playing_stream:
+            if self._speech_stream_end_pending:
+                self._resolve_speech_stream_end()
+            else:
+                self._player.play()
+            self._sync_speech_controls()
+            return
         state = self._player.playbackState()
         if state == QMediaPlayer.PlaybackState.PausedState:
             self._player.play()
@@ -1404,11 +1511,13 @@ class ChatPanel(QWidget):
         worker = self._speech_worker
         self._speech_active = False
         self._speech_paused = False
+        self._reset_speech_stream()
         self._speech_document_start = None
         self._speech_message_start = None
         self.transcript.setExtraSelections([])
         self._player.stop()
         self._player.setSource(QUrl())
+        self._clear_speech_files()
         self._sync_speech_controls()
         if worker is not None:
             self._speech_worker = None
@@ -1420,16 +1529,58 @@ class ChatPanel(QWidget):
     def _finish_speech(self) -> None:
         self._speech_active = False
         self._speech_paused = False
+        self._reset_speech_stream()
         self._speech_document_start = None
         self._speech_message_start = None
         self.transcript.setExtraSelections([])
         self._player.stop()
         self._player.setSource(QUrl())
+        self._clear_speech_files()
         self._sync_speech_controls()
         worker = self._speech_worker
         if worker is not None and not worker.isRunning():
             self._speech_worker = None
             self._clear_speech_output(worker)
+
+    def _reset_speech_stream(self) -> None:
+        self._speech_playing_stream = False
+        self._speech_stream_end_pending = False
+        self._speech_pending_position_ms = None
+        self._speech_pending_source = None
+        if self._speech_stream_server is not None:
+            self._speech_stream_server.abort_all()
+
+    def _resolve_speech_stream_end(self) -> None:
+        worker = self._speech_worker
+        if worker is not None and worker.isRunning():
+            return  # Let synthesis finish before deciding whether EOF is final.
+        if self._speech_error:
+            self._finish_speech()
+        elif (worker is not None and worker.synthesis_completed
+              and not worker.disconnected_segments
+              and not self._speech_stream_failed):
+            self._finish_speech()
+        else:
+            self._recover_speech_stream()
+
+    def _recover_speech_stream(self) -> None:
+        path = self._speech_paths.get(self._speech_index)
+        if path is not None and not self._speech_stream_recovered:
+            self._speech_stream_recovered = True
+            self._play_speech_segment(
+                path, max(self._player.position(), self._speech_last_position_ms))
+        elif self._speech_worker is not None and self._speech_worker.isRunning():
+            self._speech_stream_end_pending = True
+        else:
+            self.context_notice.setText("Read aloud playback failed: audio stream interrupted.")
+            self.context_notice.show()
+            self._finish_speech()
+
+    def _clear_speech_files(self) -> None:
+        for path in set(self._speech_paths.values()):
+            release_speech_file(path)
+        self._speech_paths.clear()
+        self._speech_boundaries.clear()
 
     @staticmethod
     def _clear_speech_output(worker: SpeechWorker) -> None:
@@ -1456,6 +1607,9 @@ class ChatPanel(QWidget):
         self._shutting_down = True
         self._streaming_timer.stop()
         self._stop_speech()
+        if self._speech_stream_server is not None:
+            self._speech_stream_server.close()
+            self._speech_stream_server = None
         for worker in self.findChildren(QThread):
             if worker.isRunning():
                 worker.requestInterruption()

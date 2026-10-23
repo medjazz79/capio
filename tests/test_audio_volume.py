@@ -18,14 +18,15 @@ class FakeAudioOutput:
 
 
 class SystemVolumePolicyTest(unittest.TestCase):
-    def test_audio_output_starts_at_full_scale(self):
+    def test_audio_output_volume_is_left_untouched(self):
         from config.settings import configure_playback_volume
 
         output = FakeAudioOutput()
 
-        configure_playback_volume(output)
-
-        self.assertEqual(output.volume, 1.0)
+        with mock.patch.object(output, "setVolume", wraps=output.setVolume) as set_volume:
+            configure_playback_volume(output)
+        self.assertEqual(output.volume, 0.25)
+        set_volume.assert_not_called()
 
     def test_volume_is_never_saved_or_restored(self):
         from config import settings as settings_module
@@ -33,7 +34,10 @@ class SystemVolumePolicyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "settings.json"
             path.write_text(
-                json.dumps({"font_size": 21, "volume": 0.3}),
+                json.dumps({"font_size": 21, "volume": 0.3,
+                            "window_geometry": "saved-window-state",
+                            "float_pos": [200, 180],
+                            "popup_pos": [100, 90], "popup_size": [640, 480]}),
                 encoding="utf-8",
             )
             with mock.patch.object(
@@ -48,6 +52,10 @@ class SystemVolumePolicyTest(unittest.TestCase):
             saved = json.loads(path.read_text(encoding="utf-8"))
 
         self.assertNotIn("volume", saved)
+        self.assertEqual(saved["window_geometry"], "saved-window-state")
+        self.assertEqual(saved["float_pos"], [200, 180])
+        self.assertEqual(saved["popup_pos"], [100, 90])
+        self.assertEqual(saved["popup_size"], [640, 480])
 
 
 class AudioOutputWiringTest(unittest.TestCase):

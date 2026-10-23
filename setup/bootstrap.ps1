@@ -14,6 +14,40 @@ $requirements = @(
     (Join-Path $setup "requirements.txt"),
     (Join-Path $setup "requirements-speech.txt")
 )
+$entryPoint = if ($Mode -eq "float") { "main_02.py" } else { "main.py" }
+$script = Join-Path $root $entryPoint
+
+function Start-Capio {
+    Start-Process -FilePath $venvPythonw -ArgumentList @("`"$script`"") -WorkingDirectory $root
+}
+
+# A configured installation can start directly from its own environment.
+# Avoid probing the system Python and importing the full dependency stack
+# in a separate process on every launch. SetupOnly retains the full check.
+$requirementsHash = (
+    Get-FileHash -Algorithm SHA256 -LiteralPath $requirements |
+        ForEach-Object { $_.Hash }
+) -join ":"
+$marker = Join-Path $venv ".harmony-requirements.sha256"
+$installedHash = ""
+if (Test-Path -LiteralPath $marker) {
+    $installedHash = (Get-Content -LiteralPath $marker -Raw).Trim()
+}
+$dependencyFiles = @(
+    "PySide6\__init__.py", "pymupdf\__init__.py", "requests\__init__.py",
+    "PIL\__init__.py", "mammoth\__init__.py", "mss\__init__.py",
+    "langdetect\__init__.py", "edge_tts\__init__.py"
+)
+$missingDependency = $dependencyFiles | Where-Object {
+    -not (Test-Path -LiteralPath (Join-Path $venv "Lib\site-packages\$_"))
+}
+if (-not $SetupOnly -and $installedHash -eq $requirementsHash `
+        -and (Test-Path -LiteralPath $venvPython) `
+        -and (Test-Path -LiteralPath $venvPythonw) `
+        -and -not $missingDependency) {
+    Start-Capio
+    exit 0
+}
 
 function Stop-WithGuidance([string]$message, [string]$url = "") {
     Write-Host ""
@@ -88,16 +122,6 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     }
 }
 
-$requirementsHash = (
-    Get-FileHash -Algorithm SHA256 -LiteralPath $requirements |
-        ForEach-Object { $_.Hash }
-) -join ":"
-$marker = Join-Path $venv ".harmony-requirements.sha256"
-$installedHash = ""
-if (Test-Path -LiteralPath $marker) {
-    $installedHash = (Get-Content -LiteralPath $marker -Raw).Trim()
-}
-
 $dependenciesWork = $false
 if ($installedHash -eq $requirementsHash) {
     & $venvPython -c "import PySide6, pymupdf, requests, PIL, mammoth, mss, langdetect, edge_tts" 2>$null
@@ -121,7 +145,5 @@ if ($SetupOnly) {
     exit 0
 }
 
-$entryPoint = if ($Mode -eq "float") { "main_02.py" } else { "main.py" }
-$script = Join-Path $root $entryPoint
 Write-Host "Starting $entryPoint..."
-Start-Process -FilePath $venvPythonw -ArgumentList @("`"$script`"") -WorkingDirectory $root
+Start-Capio

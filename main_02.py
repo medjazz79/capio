@@ -26,9 +26,9 @@ else:
     if str(APP_DIR) not in sys.path:
         sys.path.insert(0, str(APP_DIR))
 
-from config.console import hide_standalone_console
+from config.console import minimize_standalone_console
 
-hide_standalone_console()
+minimize_standalone_console()
 
 # Right-clicking "Settings" must never run this on a system Python that lacks
 # PySide6/PyMuPDF — that is why the float launcher used to fail to start.
@@ -64,6 +64,7 @@ from PySide6.QtWidgets import (
 )
 
 from config.settings import SettingsLoadError, load, save
+from config.version import APP_VERSION
 from popup.translate_popup import TranslatePopup, retain_live_popups
 from ui.file_drop import local_document_paths
 from ui.theme import THEMES, theme_colors
@@ -1375,6 +1376,11 @@ def main():
     _prune_shared_speech_cache()
     app = QApplication(sys.argv)
     app.setApplicationName("Capio")
+    app.setApplicationVersion(APP_VERSION)
+    log.info("Capio V%s floating translator; app directory: %s", APP_VERSION, APP_DIR)
+    from popup.speech_temp import start_speech_cleanup, stop_speech_cleanup
+    start_speech_cleanup(_prune_shared_speech_cache)
+    app.aboutToQuit.connect(stop_speech_cleanup)
     app.setWindowIcon(_floating_app_icon())
     try:
         w = FloatButton()

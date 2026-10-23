@@ -27,9 +27,9 @@ else:
     if str(APP_DIR) not in sys.path:
         sys.path.insert(0, str(APP_DIR))
 
-from config.console import hide_standalone_console
+from config.console import minimize_standalone_console
 
-hide_standalone_console()
+minimize_standalone_console()
 
 # Double-clicking main.py may use a system Python without the app dependencies.
 VENV_PYTHON = APP_DIR / ".venv" / "Scripts" / "python.exe"
@@ -75,6 +75,7 @@ from PySide6.QtWidgets import (
 from config.settings import (
     SettingsLoadError, copy_settings, load, resolve_model, save,
 )
+from config.version import APP_VERSION
 from popup.translate_popup import TranslatePopup, retain_live_popups
 from popup.worker import PageTranslationWorker, TranslateWorker
 from reader import continuous, pdf_utils
@@ -2353,10 +2354,11 @@ class MainWindow(QMainWindow):
         popup: TranslatePopup,
         page_no: int,
     ) -> None:
+        if (popup is not self._automatic_page_reading_popup
+                or book is not self._automatic_page_reading_book):
+            return
         if (
-            popup is not self._automatic_page_reading_popup
-            or book is not self._automatic_page_reading_book
-            or not book.has_doc()
+            not book.has_doc()
             or not 0 <= page_no < book.page_count()
         ):
             self._stop_automatic_page_reading()
@@ -2459,14 +2461,17 @@ class MainWindow(QMainWindow):
             self._automatic_page_reading_elapsed.start()
             self._automatic_page_reading_time_timer.start(
                 min(duration_ms, 2_147_000_000))
-        popup._toggle_speech()
+        # A new page always starts with its first word, independently of any
+        # manual pause/click position or chat answer on the previous page.
+        popup._speech_text_override = None
+        popup._request_speech(0, trigger="successive-reading")
         if self.settings.get("prefetch_next_page_translation", False):
             book = self._automatic_page_reading_book
             page_no = self._automatic_page_reading_page
             if book is not None and page_no is not None:
                 self._automatic_page_prefetch_scheduled = (
                     book, popup, page_no)
-                self._automatic_page_prefetch_timer.start(5000)
+                self._automatic_page_prefetch_timer.start(350)
 
     def _start_scheduled_automatic_page_prefetch(self) -> None:
         scheduled = self._automatic_page_prefetch_scheduled
@@ -2482,11 +2487,8 @@ class MainWindow(QMainWindow):
             self._automatic_page_prefetch_scheduled = None
             return
 
-        speech_worker = popup._speech_worker
-        if speech_worker is not None and speech_worker.isRunning():
-            self._automatic_page_prefetch_timer.start(250)
-            return
-
+        # Translation can run while the current page is still synthesizing.
+        # Waiting for its worker to exit leaves short pages with no head start.
         self._automatic_page_prefetch_scheduled = None
         self._start_automatic_page_prefetch(book, popup, page_no)
 
@@ -2742,14 +2744,20 @@ class MainWindow(QMainWindow):
             and scheduled[1] is popup
             and scheduled[2] == page_no
         ):
-            self._automatic_page_waiting_for_prefetch = next_page
-            popup.spin.setText(
-                "Waiting before translating the next page…")
-            popup.spin.show()
-            return
+            self._automatic_page_prefetch_timer.stop()
+            self._automatic_page_prefetch_scheduled = None
+
+        def advance_if_current():
+            if (book is self._automatic_page_reading_book
+                    and popup is self._automatic_page_reading_popup
+                    and page_no == self._automatic_page_reading_page
+                    and not self._automatic_page_waiting_for_speech
+                    and not self._automatic_page_reading_at_end):
+                self._translate_automatic_page(book, popup, next_page)
+
         QTimer.singleShot(
             0,
-            lambda: self._translate_automatic_page(book, popup, next_page),
+            advance_if_current,
         )
 
     def _on_automatic_page_translation_failed(
@@ -4068,6 +4076,11 @@ def main():
     usage.start_session()
     app = QApplication(sys.argv)
     app.setApplicationName("Capio")
+    app.setApplicationVersion(APP_VERSION)
+    log.info("Capio V%s reader; app directory: %s", APP_VERSION, APP_DIR)
+    from popup.speech_temp import start_speech_cleanup, stop_speech_cleanup
+    start_speech_cleanup(_prune_cache)
+    app.aboutToQuit.connect(stop_speech_cleanup)
     app.setStyleSheet(APP_STYLE)
     try:
         win = MainWindow()
